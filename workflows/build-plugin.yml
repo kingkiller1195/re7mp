@@ -1,0 +1,32 @@
+# Builds re7_mp.dll on a Windows runner so you don't need Visual Studio installed.
+# Usage: push this project to a GitHub repo -> Actions tab -> "build-plugin" -> Run workflow
+#        -> download the "re7_mp-dll" artifact when it finishes.
+name: build-plugin
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch REFramework plugin headers
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/praydog/REFramework refw
+          mkdir -p plugin/third_party/reframework
+          cp refw/include/reframework/* plugin/third_party/reframework/
+          ls plugin/third_party/reframework
+
+      - name: Configure
+        run: cmake -S plugin -B plugin/build -A x64
+        # To match a different REFramework Lua version: add  -DLUA_TAG=v5.3.6
+
+      - name: Build
+        run: cmake --build plugin/build --config Release --target re7_mp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: re7_mp-dll
+          path: plugin/build/Release/re7_mp.dll
