@@ -1,133 +1,112 @@
-# RE7 Co-op (REFramework) — multiplayer foundation, VR-ready
+# RE7 multiplayer prototype
 
-A multiplayer layer for Resident Evil 7 built on [REFramework](https://github.com/praydog/REFramework).
-Players see each other in the world (skeleton avatars, nameplates, distance), chat, quick-chat and drop
-shared markers. It also ships the reliable-event channel you need to synchronise world state (doors,
-items, enemies) — that part is yours to build on top; see **What this is / isn't**.
+One exe (`re7mp.exe`, a small GUI) and one Lua file (`lua/re7mp.lua`, embedded in the exe and
+installed for you). Each player sees the other as a stick-figure skeleton with a name tag,
+facing the direction they are looking.
 
-```
- REFramework (dinput8.dll)
-   ├─ reframework/plugins/re7_mp.dll        C++  UDP transport on its own thread, exposed to Lua as `mp_net`
-   └─ reframework/autorun/re7_mp.lua        Lua  game integration (hot-reloadable from the REFramework menu)
-        └─ re7_mp/{tracking,pose,session,avatars,ui,config,mathx}.lua
-```
+    RE7 + REFramework (re7mp.lua)  <--files in reframework/data-->  re7mp.exe  <--UDP-->  other player's re7mp.exe
 
-Why two halves: REFramework's Lua is sandboxed (no sockets), so networking has to be a native plugin.
-The network thread is independent of the game's frame rate, so loading screens and VR frame pacing
-can't starve keep-alives.
+**Both players must run the same version** (the packet format changed again in this one; older builds are ignored).
 
-## What this is / isn't
+## Build (Visual Studio 2026)
 
-**Works today (flat screen):** host/join, up to 8 players, 30 Hz pose sync with smoothing, nameplates,
-chat (menu + F7/F8/F9 quick-chat), F6 shared markers, join/leave announcements, disconnect/timeout handling,
-reliable ordered user events with a handler registry.
+1. File > Open > Folder... and pick this folder (VS reads `CMakeLists.txt`).
+2. Choose the `x64-Release` configuration, then Build > Build All.
+3. Run `re7mp.exe` (usually under `out\build\x64-Release\`; the Output window shows the path).
+   It's a static build, so you can send the exe to a friend as is.
 
-**Not included — and it's the hard 90% of a co-op mod:** shared world state. Each player's RE7 is still its
-own single-player game; they only *see* each other. Everyone must be at the same story point/room
-(same save). Doors, pickups, enemy AI/damage, cutscenes and saves are not synchronised. The hook for building
-that is `session.on_user(kind, fn)` / `session.send_user(kind, payload)` (reliable, ordered, relayed by the host).
-Start with host-authoritative state for one thing (e.g. door open/close) and grow from there.
+## Use
 
-## Install (players)
+1. Run `re7mp.exe`. It finds your RE7 folder itself (a running RE7, then your Steam libraries); otherwise use Browse.
+2. Type **your name**. It's sent to the other player and shown above your figure; you can change it while running.
+3. Pick a mode:
+   - **Loopback test**: a fake player ("Loopback Bot") orbits you at 3 m, walking and *facing you*. Needs no network.
+   - **Network**: enter the other player's `ip:port` (they enter yours). UDP 27015 must be reachable (LAN, VPN, or port forward).
+4. Click **Start** (it installs/updates the Lua script), start RE7, load a save. Press Insert for the "RE7 Multiplayer" panel.
 
-1. Install the **RE7** build of REFramework (put `dinput8.dll` in the game folder; for VR extract the full zip).
-2. Copy `game/reframework/` into the game folder (merges with the existing `reframework/`), and put the built
-   `re7_mp.dll` in `reframework/plugins/`.
-3. In game press **Insert** → **RE7 Co-op**. One player clicks **Host**, the others type the host's IPv4 address and click **Join**.
+Settings are remembered in `re7mp.ini` next to the exe. After changing `lua\re7mp.lua`, rebuild: the exe carries a copy and re-installs it on Start.
 
-Networking: UDP, default port **7777**. Over the internet the host must forward that port, or everyone can use a
-virtual LAN (Tailscale / ZeroTier / Radmin) and skip port-forwarding. IPv4 numeric addresses only.
+## Rotation
 
-## Build the plugin (Windows, Visual Studio 2022 or newer + CMake)
+The camera's forward axis in RE7 turned out to be -Z (the figure was 180 degrees off with +Z), so
+`FORWARD = { 0, 0, -1 }` is now the default at the top of `lua/re7mp.lua`.
+The Loopback Bot copies *your* rotation, so it doesn't depend on any axis guess: its white look-line
+should point the same way you are looking (you see its back when it is in front of you). If it points
+back at you, flip `FORWARD` to `{ 0, 0, 1 }` and rebuild.
 
-```
-git clone https://github.com/praydog/REFramework
-xcopy /E /I REFramework\include\reframework  re7-coop\plugin\third_party\reframework
-cd re7-coop\plugin
-cmake -B build -A x64
-cmake --build build --config Release          # -> build\Release\re7_mp.dll
-```
+## Start together (hold until both are ready)
 
-**Lua version must match REFramework's.** The DLL links its own Lua and operates on REFramework's `lua_State`.
-Run `print(_VERSION)` in the REFramework script console and, if it isn't 5.4, build with e.g. `-DLUA_TAG=v5.3.6`.
-A mismatch can crash the game when `mp_net` is first used, so check this first if the game dies as the plugin loads.
+A ready check, so both players start a new game on the same difficulty at the same time.
 
-## Hotkeys
+1. Each player says "I'm ready" on a difficulty. Ready state travels inside every position packet, so a
+   lost packet fixes itself on the next one.
+2. When both are ready and the difficulties match, both go. A player only goes after the other side's packet
+   shows they have seen *this* player's ready, and "go" is latched for 5 s, so neither side can be left waiting.
+3. Mismatched difficulties don't start; the panel offers "Use their difficulty". Cancel, a 2-minute
+   timeout and a script reload all unfreeze the game.
 
-| Key | Action |
-|---|---|
-| F6 | Drop a marker 3 m ahead of where you look (visible to everyone for 60 s) |
-| F7 / F8 / F9 | "Help!" / "Over here!" / "Wait for me!" |
+**Automatic (filled in from your probe).** The script hooks `app.GameManager.newGameRequest`. When you start a
+new game with the other player connected, it reads your difficulty (`get_gameDifficulty`), freezes the game
+(global game speed, the same mechanism as REFramework's timescale) and waits for them to be ready too,
+then lets it continue. With nobody connected it does nothing and the game starts normally. The freeze is
+optional (checkbox in the panel).
 
-(Quick-chat and markers exist because typing is impractical in VR and on a controller.)
+The difficulty enum's values are read from the game at runtime and matched by name (Assist/Easy, Normal,
+Madhouse/Hard), and the mapping is logged to the console, so check it there once.
 
-## VR: how it's prepared, and what's left
+**Manual (always works).** Insert > RE7 Multiplayer > Start together > pick a difficulty > "I'm ready".
+After both are ready you get a synchronized 3-2-1; the script also sets the game's difficulty
+(`set_gameDifficulty`) and tells you to press New Game. In loopback mode the bot presses ready 1.5 s
+after you, so you can try the whole thing alone.
 
-Already done:
-- **The wire pose is VR-shaped.** Every pose packet carries head + left hand + right hand (world space) and
-  flags (`VR`, `HANDS_VALID`). Flat players simply don't claim real hands and receivers synthesise them.
-- **One file owns the flat/VR difference:** `tracking.lua`. Network, session and avatars never ask which mode you're in.
-- **VR hand capture is written** (controller poses re-expressed relative to the HMD and re-applied to the head,
-  so it doesn't depend on how REFramework maps tracking space to game space), fully `pcall`-guarded so it fails
-  closed to "no hands".
-- Mixed lobbies work by design: a VR player and a flat player see each other correctly.
+**Still missing: actually starting the game for you.** `newGameRequest`, `newGameInitParam`,
+`newGameRequest_Chapter7` and `SaveDataManager.newGameInit` have arguments I can't see, and calling them
+with guessed arguments could crash the game, so the script doesn't. To finish this, in the panel:
 
-Left to do (in order):
-1. **Verify `tracking.lua`'s VR branch on hardware.** It uses REFramework's `vrmod` Lua object (`is_hmd_active`,
-   `is_using_controllers`, `get_left/right_controller_index`, `get_transform`). Method names and the matrix
-   convention (`TODO(VR)` comments) were written from the documented API but **not run on a headset**.
-2. **A world-space avatar backend** (`avatars.lua`, skeleton at the bottom). The current `overlay` backend is an ImGui
-   2D overlay: fine on a monitor, **invisible inside a headset**. VR players need real GameObjects (prefab/mesh) driven
-   by `p.cur.head / lhand / rhand`, which the pipeline already supplies smoothed and in world space.
-3. VR-friendly UI (the REFramework menu is a desktop window; hotkeys cover the basics meanwhile).
+1. Start together > leave "Log new-game calls" ticked, start a new game normally, and copy what appears in the
+   REFramework console (it logs which of those methods fire, in what order, with raw argument values).
+2. Probe RE7 types > "Show new-game method signatures" and copy the console output.
 
-## Writing world sync on top
+Send me both and I'll make "go" start the new game itself.
 
-```lua
-local session = require("re7_mp/session")
-local KIND_DOOR = 16                                   -- 16..255 are yours
+## Avatar: cloning a model instead of the skeleton (experimental)
 
-session.on_user(KIND_DOOR, function(from_id, payload)  -- runs on every other machine
-    local door_id, open = payload:match("^(%d+),(%d)$")
-    -- find the door and set its state here
-end)
+Insert > RE7 Multiplayer > Avatar. The skeleton stays the default.
 
-session.send_user(KIND_DOOR, "42,1")                   -- reliable, ordered, relayed by the host
-```
-Payload is an opaque string ≤ 900 bytes. Clients can only talk through the host (star topology), which gives you a
-natural place to make the host authoritative.
+1. **Scan scene** lists GameObjects whose path contains the filter (default "player") with their components.
+   Look for one with a mesh that is a full-body character.
+2. Type its exact name into "Object to clone" and click **Clone and follow**. The clone is moved to the other
+   player's position each frame, facing where they look. If it faces the wrong way, set `MODEL_YAW_OFFSET` in
+   `lua/re7mp.lua` to 3.14159.
+3. **List via.GameObject clone/create methods** shows which cloning methods exist if `clone` fails.
 
-## Protocol (v1, little-endian, UDP)
-
-`magic 0x3752 | proto u8 | type u8 | body`. Types: HELLO, WELCOME, DENY, POSE (unreliable, 92 B, 30 Hz, newest wins
-via wrap-safe sequence numbers), REL (reliable, ordered, go-back-N resend, cumulative ACK), PING/PONG (1 Hz, 8 s timeout), BYE.
-Host is id 0 and relays. Clients can only originate chat/user events; the host stamps the real sender id.
-There is no encryption or authentication — play with people you trust.
-
-## Tests
-
-`plugin/tests/run_all.sh` (Linux/WSL, needs g++ and `liblua5.4`) runs four stages:
-1. Transport loopback: handshake, roster, pose relay, chat/user events, **ordered exactly-once delivery under 30% packet loss**, leave, id reuse, server-full (ASan+UBSan).
-2. The same under ThreadSanitizer.
-3. Lua modules (math, pose, config, tracking incl. the VR hand math) in a real Lua 5.4 runtime.
-4. **Two-process end-to-end:** two instances each load the real `re7_mp.lua` and the real `plugin.cpp` bridge into a real Lua state and play a session over real UDP (menu buttons, hotkeys, chat, markers, avatar drawing, disconnect, script reset).
-
-### Verification status (be aware of this)
-
-| Piece | Status |
-|---|---|
-| Transport, protocol, reliability | Tested (stages 1–2) |
-| `plugin.cpp` Lua bridge | Tested against real Lua 5.4.6 with test-only header stubs (stage 3–4); **not yet compiled with the real Lua headers / MSVC / REFramework's `API.h`** |
-| Lua mod logic | Tested against a **mock** of REFramework's API (shapes taken from its docs/behaviour) |
-| Inside RE7 itself | **Not run** — no game available here. Expect to adjust: camera access in `tracking.lua`, `draw.*`/`imgui.*` call details, RE7-specific quirks |
-| VR | Hand math unit-tested with fake matrices; **not run on a headset** |
+Caveats, so you aren't surprised: RE7 is first person, so I don't know that a full-body Ethan exists as a
+loaded object during normal play (I believe you mostly see arms and hands); if the scan finds none, the same
+tools can look for other humanoids that are loaded. A cloned model has no animation driving it, so
+expect a static pose. Cloning the whole player object would also copy its controllers and camera, so clone a
+mesh object, not the player root. None of this has been run. Send me the scan output and any errors.
 
 ## Layout
 
-```
-plugin/src/net.{hpp,cpp}        transport (portable; Winsock on Windows)
-plugin/src/plugin.cpp           REFramework plugin entry + Lua bridge (mp_net)
-plugin/CMakeLists.txt           builds re7_mp.dll (Windows) + tests (anywhere)
-plugin/tests/                   loopback, Lua harness, mock REFramework, e2e
-game/reframework/autorun/       re7_mp.lua + re7_mp/*.lua
-```
+- `src/gui_win.cpp`: the GUI (plain Win32), game detection, Lua install
+- `src/engine.*`: networking thread, names, ready-check flags, a generic reliable one-shot event channel (not used by the Lua yet), loopback bot
+- `src/packet.hpp`: wire format v3 (position + rotation + ready flags, name, event, ack) and name sanitising
+- `src/bridge.hpp`: the JSON file bridge to the Lua script
+- `src/game_locator.*`: Steam library parsing, Lua installer
+- `src/transport.hpp`, `src/udp_transport.cpp`: transport interface + UDP (a Steam backend would slot in here)
+- `lua/re7mp.lua`: in-game script (pose sending, smoothing, skeleton drawing, ready check + freeze, RE7 adapter, probe and avatar tools)
+- `src/cli_main.cpp` (`re7mp_cli`): headless engine; `tests/core_tests.cpp` (`re7mp_tests`); `tools/fake_game.py`
+
+## What has and hasn't been tested
+
+Tested (on Linux): packets and name sanitising, the bridge, Steam folder parsing, Lua install, loopback
+(the bot copying your rotation, plus the full ready check: ready, confirm, go, cancel), two engines over UDP
+exchanging pose, names, renames and ready flags, and the one-shot event channel with retransmission.
+
+Not tested: the GUI (only syntax-checked against stand-in headers), and the Lua. I had no Lua interpreter,
+only a bracket-balance and use-before-define check. New and unverified in this version: the
+`sdk.hook` calls on `app.GameManager`, reading the difficulty enum, the freeze (`via.Application.get/set_GlobalSpeed`,
+which I believe is how REFramework's timescale works), the scene scanner and the clone call. If the panel shows "UI error", or the
+game doesn't unfreeze, use Cancel (it always releases) and tell me what the console says.
+The skeleton is procedural, driven by camera position and rotation, with no real body model yet.
+Positions are only comparable while both players are in the same loaded area.

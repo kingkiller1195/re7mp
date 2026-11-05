@@ -1,0 +1,3 @@
+// Embeds the Lua autorun script into the exe so the GUI can install it for you.
+// The script's source of truth is lua/re7mp.lua; edit that file and rebuild.
+101 RCDATA "../lua/re7mp.lua"
