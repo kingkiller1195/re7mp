@@ -34,40 +34,47 @@ The Loopback Bot copies *your* rotation, so it doesn't depend on any axis guess:
 should point the same way you are looking (you see its back when it is in front of you). If it points
 back at you, flip `FORWARD` to `{ 0, 0, 1 }` and rebuild.
 
-## Start together (hold until both are ready)
+## Start together (new game sync)
 
-A ready check, so both players start a new game on the same difficulty at the same time.
+Goal: both players start a new game on the same difficulty, at the same time.
 
-1. Each player says "I'm ready" on a difficulty. Ready state travels inside every position packet, so a
-   lost packet fixes itself on the next one.
-2. When both are ready and the difficulties match, both go. A player only goes after the other side's packet
-   shows they have seen *this* player's ready, and "go" is latched for 5 s, so neither side can be left waiting.
-3. Mismatched difficulties don't start; the panel offers "Use their difficulty". Cancel, a 2-minute
-   timeout and a script reload all unfreeze the game.
+**How it works.** The script hooks `app.GameManager.newGameRequest()` (no arguments, per your signature probe).
+When a player starts a new game with the other player connected, the request is **blocked** and that player
+becomes "ready" on their current difficulty (`get_gameDifficulty`). When both are ready on the same
+difficulty, both see a 3-2-1, then the blocked request is replayed on both sides: the script calls
+`set_gameDifficulty(...)` and then `newGameRequest()` itself. With nobody connected, nothing is blocked and
+the game starts normally.
 
-**Automatic (filled in from your probe).** The script hooks `app.GameManager.newGameRequest`. When you start a
-new game with the other player connected, it reads your difficulty (`get_gameDifficulty`), freezes the game
-(global game speed, the same mechanism as REFramework's timescale) and waits for them to be ready too,
-then lets it continue. With nobody connected it does nothing and the game starts normally. The freeze is
-optional (checkbox in the panel).
+Ready state travels inside every position packet, so lost packets heal themselves, a player only goes once
+the other side's packet shows they've seen this player's ready, and "go" is held for 5 s so neither side is
+left waiting. Cancel (panel), a 2-minute timeout or a script reload drop the blocked request, so you just
+press New Game again.
 
-The difficulty enum's values are read from the game at runtime and matched by name (Assist/Easy, Normal,
-Madhouse/Hard), and the mapping is logged to the console, so check it there once.
+**Ways to start together** (Insert > RE7 Multiplayer > Start together):
 
-**Manual (always works).** Insert > RE7 Multiplayer > Start together > pick a difficulty > "I'm ready".
-After both are ready you get a synchronized 3-2-1; the script also sets the game's difficulty
-(`set_gameDifficulty`) and tells you to press New Game. In loopback mode the bot presses ready 1.5 s
-after you, so you can try the whole thing alone.
+- Both players press **New Game** in the game menu.
+- One player presses New Game; the other sees "X is ready on Madhouse" on screen and clicks **Join**
+  (or enables **Auto-join**, off by default because it starts a new game immediately).
+- Neither uses the menu: both pick a difficulty and click **I'm ready** (at the title screen). After the
+  countdown the script starts the game for you (untick "start the new game for me" to be told to press New Game instead).
 
-**Still missing: actually starting the game for you.** `newGameRequest`, `newGameInitParam`,
-`newGameRequest_Chapter7` and `SaveDataManager.newGameInit` have arguments I can't see, and calling them
-with guessed arguments could crash the game, so the script doesn't. To finish this, in the panel:
+Different difficulties never start; the panel offers "Use their difficulty". The difficulty enum
+(`app.GameManager.Difficulty`) is read at runtime and matched by name onto Easy/Normal/Madhouse; the mapping
+and the `GameMode` values are logged to the console on load, so please check those once.
 
-1. Start together > leave "Log new-game calls" ticked, start a new game normally, and copy what appears in the
-   REFramework console (it logs which of those methods fire, in what order, with raw argument values).
-2. Probe RE7 types > "Show new-game method signatures" and copy the console output.
+**Testing it alone (loopback).** Run `re7mp.exe` in Loopback mode and start RE7. At the title screen press
+New Game. Expected: your game waits ("Ready on ..., waiting for Loopback Bot"), the bot presses ready 1.5 s later,
+you get "Both ready! Starting in 3...", then the new game begins. The exe's log shows the same steps.
 
-Send me both and I'll make "go" start the new game itself.
+**What I couldn't verify, and what to send me.** I don't know whether calling `newGameRequest()` is *enough*
+to start a game, or whether the menu also calls `newGameInitParam(bool)` and `SaveDataManager.newGameInit()`
+(or `newGameRequest_Chapter7()` for another start path) around it. The script logs every one of these calls
+(Start together > "Log new-game calls", also in the REFramework console). If the game doesn't start after the
+countdown, or the New Game button never triggers the wait, start a new game normally once and send me
+the logged lines (names, order, argument values).
+
+If the freeze fallback is used (checkbox, or if this REFramework can't skip a call), the game speed is set near
+zero instead of blocking the request. That relies on `via.Application.set_GlobalSpeed`.
 
 ## Avatar: cloning a model instead of the skeleton (experimental)
 
@@ -95,7 +102,7 @@ mesh object, not the player root. None of this has been run. Send me the scan ou
 - `src/game_locator.*`: Steam library parsing, Lua installer
 - `src/transport.hpp`, `src/udp_transport.cpp`: transport interface + UDP (a Steam backend would slot in here)
 - `lua/re7mp.lua`: in-game script (pose sending, smoothing, skeleton drawing, ready check + freeze, RE7 adapter, probe and avatar tools)
-- `src/cli_main.cpp` (`re7mp_cli`): headless engine; `tests/core_tests.cpp` (`re7mp_tests`); `tools/fake_game.py`
+- `src/cli_main.cpp` (`re7mp_cli`): headless engine; `tests/core_tests.cpp` (`re7mp_tests`); `tools/fake_game.py`, `tools/lobby_sim.py` (ready-check simulation)
 
 ## What has and hasn't been tested
 
@@ -104,9 +111,12 @@ Tested (on Linux): packets and name sanitising, the bridge, Steam folder parsing
 exchanging pose, names, renames and ready flags, and the one-shot event channel with retransmission.
 
 Not tested: the GUI (only syntax-checked against stand-in headers), and the Lua. I had no Lua interpreter,
-only a bracket-balance and use-before-define check. New and unverified in this version: the
-`sdk.hook` calls on `app.GameManager`, reading the difficulty enum, the freeze (`via.Application.get/set_GlobalSpeed`,
-which I believe is how REFramework's timescale works), the scene scanner and the clone call. If the panel shows "UI error", or the
+only a bracket-balance and use-before-define check. I did model the ready-check state machine in Python
+(`tools/lobby_sim.py`, 1,000+ scenarios with 0-30% packet loss and 30-150 ms lag: both players start exactly
+once, within 0.6 s of each other, never before both are ready; cancels and mismatches behave). That checks the
+logic, not the Lua. New and unverified in the game itself: the `sdk.hook` calls (including skipping the original
+request), reading the difficulty enum, `newGameRequest()` being enough to start a game, the freeze fallback,
+the scene scanner and the clone call. If the panel shows "UI error", or the
 game doesn't unfreeze, use Cancel (it always releases) and tell me what the console says.
 The skeleton is procedural, driven by camera position and rotation, with no real body model yet.
 Positions are only comparable while both players are in the same loaded area.

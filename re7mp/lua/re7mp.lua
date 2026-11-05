@@ -8,8 +8,8 @@
 --   * draws the other player as a stick-figure skeleton with a name tag, facing where they look
 --   * "Start together": a ready check. Both players say they're ready on the same difficulty,
 --     and only then does the game go on. When RE7's New Game is detected (app.GameManager.newGameRequest)
---     the game is frozen until the other player is ready too; otherwise use the "I'm ready" button
---     in the panel, which gives a synchronized countdown.
+--     that request is BLOCKED until the other player is ready too, then replayed on the agreed
+--     difficulty. The "I'm ready" / "Join" buttons in the panel do the same with a countdown.
 --   * "Avatar (experimental)": scan the scene and try cloning an in-game model instead of the skeleton.
 --
 -- NOTE: untested in-game apart from the position/figure part (the new-game hooks, ready check,
@@ -70,14 +70,18 @@ local state = {
 local lobby = {
     phase = "idle",          -- idle | waiting | go | done
     difficulty = 1,
-    hold = false,            -- true when the game is being frozen while we wait
+    hold_kind = nil,         -- nil | "block" (New Game request blocked) | "freeze" (game speed frozen)
+    need_clear = false,      -- ignore the other player's ready state until they have cleared it once
+    join_diff = nil,         -- difficulty the other player is ready on, while we are idle
     started_at = 0,
     go_at = 0,
     latch_until = 0,
     message = "Not ready.",
     message_until = 0,
     mismatch_diff = nil,     -- the other player's difficulty when it differs from ours
-    freeze_when_hooked = true,
+    freeze_instead = false,  -- freeze the game instead of blocking the New Game request
+    auto_join = false,       -- start our own new game as soon as the other player is ready
+    auto_start = true,       -- in manual mode, call newGameRequest ourselves after the countdown
     suppress_until = 0,
     hook_installed = false,
 }
@@ -121,6 +125,9 @@ local RE7 = {
     captured_gm = nil,       -- app.GameManager instance seen by a hook (fallback if the singleton lookup fails)
     trace_on = true,
     trace_lines = {},
+    replaying = false,       -- true while WE call newGameRequest, so our hook lets it through
+    can_block = false,       -- can a pre-hook skip the original call? (set below)
+    last_set_wire = nil,     -- last difficulty the game was set to, as 0/1/2
     map_built = false,
     to_game = {},            -- wire id -> the game's difficulty value
     from_game = {},          -- the game's difficulty value -> wire id
@@ -152,7 +159,7 @@ local function build_difficulty_map()
     local ok, err = pcall(function()
         local td = sdk.find_type_definition("app.GameManager")
         local m = td and td:get_method("get_gameDifficulty")
-        local rt = m and m:get_return_type()
+        local rt = (m and m:get_return_type()) or sdk.find_type_definition("app.GameManager.Difficulty")
         if not rt then return end
         say("difficulty type: " .. tostring(rt:get_full_name()))
         local found = {}
@@ -193,13 +200,75 @@ function RE7.current_difficulty()
     return nil
 end
 
--- Hooks the new-game request and calls on_new_game(difficulty_id) when it runs. The other new-game
--- methods are only logged (Start together > "Log new-game calls") so their arguments can be worked out.
+local function wire_from_game(v)
+    if type(v) ~= "number" then return nil end
+    local wire = RE7.from_game[v]
+    if wire ~= nil then return wire end
+    if v >= 0 and v <= 2 then return v end
+    return nil
+end
+
+local function log_enum(type_name)
+    pcall(function()
+        local td = sdk.find_type_definition(type_name)
+        if not td then
+            say(type_name .. ": type not found")
+            return
+        end
+        local parts = {}
+        for _, f in ipairs(td:get_fields()) do
+            if f:is_static() then
+                local value = f:get_data(nil)
+                if type(value) == "number" then parts[#parts + 1] = f:get_name() .. "=" .. tostring(value) end
+            end
+        end
+        say(type_name .. ": " .. table.concat(parts, ", "))
+    end)
+end
+
+do
+    local okp, skip_const = pcall(function() return sdk.PreHookResult.SKIP_ORIGINAL end)
+    RE7.can_block = okp and skip_const ~= nil
+end
+
+-- Sets the game's difficulty. Returns true, or false plus a message.
+function RE7.apply_difficulty(difficulty_id)
+    build_difficulty_map()
+    local gm = game_manager()
+    if not gm then return false, "app.GameManager not found" end
+    local value = RE7.to_game[difficulty_id] or difficulty_id
+    local ok, err = pcall(function() gm:call("set_gameDifficulty", value) end)
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+-- Starts a new game on the given difficulty: sets the difficulty, then calls newGameRequest() (it takes no
+-- arguments, per the signature probe). Returns true, or false plus a message.
+function RE7.start_new_game(difficulty_id)
+    local ok, err = RE7.apply_difficulty(difficulty_id)
+    if not ok then return false, err end
+    local gm = game_manager()
+    if not gm then return false, "app.GameManager not found" end
+    RE7.replaying = true -- our own hook must let this call through
+    local okc, errc = pcall(function() gm:call("newGameRequest") end)
+    RE7.replaying = false
+    if not okc then return false, tostring(errc) end
+    return true
+end
+
+-- Hooks the new-game request. on_new_game(difficulty_id) is called when the player starts a new game; if it
+-- returns true the original request is SKIPPED (blocked) and is replayed later by RE7.start_new_game.
+-- The other new-game methods are only logged (Start together > "Log new-game calls").
 function RE7.install_new_game_hook(on_new_game)
     build_difficulty_map()
-    local CALL_ORIGINAL = sdk.PreHookResult and sdk.PreHookResult.CALL_ORIGINAL
+    log_enum("app.GameManager.Difficulty")
+    log_enum("app.GameManager.GameMode")
+    local pre_result = sdk.PreHookResult
+    local CALL_ORIGINAL = pre_result and pre_result.CALL_ORIGINAL
+    local SKIP_ORIGINAL = pre_result and pre_result.SKIP_ORIGINAL
     local installed = 0
 
+    -- handler(args) may return true to skip the original call (only honoured if the game supports it).
     local function hook(type_name, method_name, handler)
         local td = sdk.find_type_definition(type_name)
         local m = td and td:get_method(method_name)
@@ -208,8 +277,12 @@ function RE7.install_new_game_hook(on_new_game)
             return
         end
         sdk.hook(m, function(args)
-            local ok, err = pcall(handler, args)
-            if not ok then say("hook error in " .. method_name .. ": " .. tostring(err)) end
+            local ok, skip = pcall(handler, args)
+            if not ok then
+                say("hook error in " .. method_name .. ": " .. tostring(skip))
+                return CALL_ORIGINAL
+            end
+            if skip == true and SKIP_ORIGINAL ~= nil then return SKIP_ORIGINAL end
             return CALL_ORIGINAL
         end, function(retval) return retval end)
         installed = installed + 1
@@ -223,42 +296,39 @@ function RE7.install_new_game_hook(on_new_game)
         local ok, v = pcall(sdk.to_int64, args[i])
         return ok and string.format("0x%x", v or 0) or "?"
     end
+    local function raw_bool(args, i)
+        local ok, v = pcall(sdk.to_int64, args[i])
+        return ok and tostring((v or 0) % 256) or "?"
+    end
 
     hook("app.GameManager", "set_gameDifficulty", function(args)
         remember_this(args)
+        local ok, v = pcall(sdk.to_int64, args[3])
+        if ok and v then RE7.last_set_wire = wire_from_game(v % 4294967296) end
         trace("set_gameDifficulty(" .. raw(args, 3) .. ")")
     end)
     hook("app.GameManager", "newGameRequest", function(args)
         remember_this(args)
-        trace("newGameRequest(" .. raw(args, 3) .. ", " .. raw(args, 4) .. ")")
-        on_new_game(RE7.current_difficulty())
+        if RE7.replaying then
+            trace("newGameRequest() [replayed by us]")
+            return false
+        end
+        trace("newGameRequest()")
+        return on_new_game(RE7.current_difficulty() or RE7.last_set_wire) == true
     end)
     hook("app.GameManager", "newGameRequest_Chapter7", function(args)
-        trace("newGameRequest_Chapter7(" .. raw(args, 3) .. ", " .. raw(args, 4) .. ")")
+        trace("newGameRequest_Chapter7()")
     end)
     hook("app.GameManager", "newGameInitParam", function(args)
-        trace("newGameInitParam(" .. raw(args, 3) .. ", " .. raw(args, 4) .. ")")
+        trace("newGameInitParam(" .. raw_bool(args, 3) .. ")")
     end)
     hook("app.GameManager", "setGamemode", function(args)
         trace("setGamemode(" .. raw(args, 3) .. ")")
     end)
     hook("app.SaveDataManager", "newGameInit", function(args)
-        trace("SaveDataManager.newGameInit(" .. raw(args, 3) .. ")")
+        trace("SaveDataManager.newGameInit()")
     end)
     return installed > 0
-end
-
--- Sets the game's difficulty so both players are on the same one. Starting the game itself needs
--- newGameRequest's arguments, which are still unknown, so this returns "partial" and the player
--- presses New Game themselves. Returns true | "partial" | false plus a message.
-function RE7.start_new_game(difficulty_id)
-    build_difficulty_map()
-    local gm = game_manager()
-    if not gm then return false, "app.GameManager not found" end
-    local value = RE7.to_game[difficulty_id] or difficulty_id
-    local ok, err = pcall(function() gm:call("set_gameDifficulty", value) end)
-    if not ok then return false, tostring(err) end
-    return "partial", "difficulty set"
 end
 
 ----------------------------------------------------------------------------------------------
@@ -320,7 +390,7 @@ local function hold_game()
     if ok then
         held.active = true
     else
-        lobby.hold = false
+        lobby.hold_kind = nil
         say("could not freeze the game: " .. tostring(err))
     end
 end
@@ -345,7 +415,7 @@ local function set_message(text, seconds)
     say(text)
 end
 
--- from_hook = true when the game itself is starting a new game (so we may freeze it).
+-- from_hook = true when the game itself asked for a new game (so we may block or freeze it).
 local function start_ready(difficulty, from_hook)
     if lobby.phase ~= "idle" then return end
     local now = os.clock()
@@ -353,29 +423,44 @@ local function start_ready(difficulty, from_hook)
     lobby.difficulty = difficulty
     lobby.started_at = now
     lobby.mismatch_diff = nil
-    lobby.hold = from_hook and lobby.freeze_when_hooked
-    if lobby.hold then hold_game() end
+    lobby.hold_kind = nil
+    if from_hook then
+        if lobby.freeze_instead or not RE7.can_block then
+            lobby.hold_kind = "freeze"
+            hold_game() -- clears hold_kind again if the freeze fails
+        else
+            lobby.hold_kind = "block"
+        end
+    end
     set_message("Ready on " .. (DIFFICULTY[difficulty] or "?") .. ". Waiting for the other player...", 60)
 end
 
 local function cancel_ready(text)
+    local was_blocking = lobby.hold_kind == "block"
     release_game()
-    lobby.hold = false
+    lobby.hold_kind = nil
     lobby.phase = "idle"
     lobby.latch_until = 0
     lobby.mismatch_diff = nil
-    set_message(text or "Cancelled.", 6)
+    lobby.need_clear = true
+    set_message(text or (was_blocking and "Cancelled. Press New Game again when you're ready." or "Cancelled."), 6)
 end
 
--- Called by the RE7 adapter's hook when the local player starts a new game.
+-- Called by the RE7 adapter's hook when the game receives a new-game request. Returns true to make
+-- the hook BLOCK that request until both players are ready.
 local function on_local_new_game(difficulty_id)
     local now = os.clock()
-    if now < lobby.suppress_until then return end -- we started it ourselves
-    if now - state.remote_changed_at > CFG.STALE_AFTER then
+    if now < lobby.suppress_until then return false end -- we started it ourselves
+    if lobby.phase == "idle" and now - state.remote_changed_at > CFG.STALE_AFTER then
         say("New game started with nobody connected: not waiting for anyone.")
-        return
+        return false
     end
     start_ready(difficulty_id or lobby.difficulty, true)
+    -- Already waiting from the panel's "I'm ready" and the game now asks for a new game: block it too.
+    if lobby.phase == "waiting" and lobby.hold_kind == nil and RE7.can_block and not lobby.freeze_instead then
+        lobby.hold_kind = "block"
+    end
+    return lobby.hold_kind == "block"
 end
 
 -- The flags we send with every position packet.
@@ -394,7 +479,27 @@ local function update_lobby(now)
     local who = state.remote_name or CFG.DEFAULT_NAME
     local diff_name = DIFFICULTY[lobby.difficulty] or "?"
 
-    if lobby.phase == "waiting" then
+    if lobby.phase == "idle" then
+        -- Don't react to a ready state left over from a game that just started or that we cancelled.
+        if lobby.need_clear then
+            if not has(rf, FLAG_READY) then lobby.need_clear = false end
+            lobby.join_diff = nil
+            return
+        end
+        if has(rf, FLAG_READY) then
+            lobby.join_diff = flags_diff(rf)
+            if lobby.auto_join then
+                start_ready(lobby.join_diff, false)
+            else
+                lobby.message = string.format("%s is ready to start a new game on %s. Press New Game, or click Join in the Insert menu.",
+                    who, DIFFICULTY[lobby.join_diff] or "?")
+                lobby.message_until = now + 1
+            end
+        else
+            lobby.join_diff = nil
+        end
+
+    elseif lobby.phase == "waiting" then
         if now - lobby.started_at > CFG.READY_TIMEOUT then
             cancel_ready("Timed out waiting for " .. who .. ".")
             return
@@ -421,32 +526,50 @@ local function update_lobby(now)
         end
 
     elseif lobby.phase == "go" then
-        if lobby.hold then
-            -- The game itself is starting: just let it carry on.
-            release_game()
-            lobby.hold = false
-            lobby.phase = "done"
-            set_message("Both ready: continuing on " .. diff_name .. ".", 6)
+        -- Everyone counts down together so the starts line up, whatever started the ready check.
+        local left = CFG.COUNTDOWN - (now - lobby.go_at)
+        if left > 0 then
+            lobby.message = string.format("Both ready! Starting in %d...", math.ceil(left))
         else
-            local left = CFG.COUNTDOWN - (now - lobby.go_at)
-            if left > 0 then
-                lobby.message = string.format("Both ready! Starting in %d...", math.ceil(left))
-            else
-                lobby.phase = "done"
-                lobby.suppress_until = now + 20 -- don't treat our own start as a new request
-                local ok, res = pcall(RE7.start_new_game, lobby.difficulty)
+            local kind = lobby.hold_kind
+            lobby.hold_kind = nil
+            lobby.phase = "done"
+            lobby.need_clear = true
+            lobby.suppress_until = now + 20 -- don't treat our own start as a new request
+
+            if kind == "freeze" then
+                release_game() -- the game's own request was never blocked: just let it carry on
+                set_message("Both ready: continuing on " .. diff_name .. ".", 6)
+
+            elseif kind == "block" then
+                -- Replay the New Game request we blocked, on the agreed difficulty.
+                local ok, res, err = pcall(RE7.start_new_game, lobby.difficulty)
                 if ok and res == true then
-                    set_message("New game started on " .. diff_name .. ".", 6)
-                elseif ok and res == "partial" then
-                    set_message("GO! Difficulty set to " .. diff_name .. ". Press New Game now.", 10)
+                    set_message("Both ready: starting the new game on " .. diff_name .. ".", 8)
                 else
-                    set_message("GO! Press New Game now (" .. diff_name .. ").", 10)
+                    set_message("Both ready on " .. diff_name .. ", but the new game could not be started ("
+                        .. tostring(ok and err or res) .. "). Press New Game again.", 12)
                 end
+
+            elseif lobby.auto_start then -- started from the panel
+                local ok, res, err = pcall(RE7.start_new_game, lobby.difficulty)
+                if ok and res == true then
+                    set_message("New game requested on " .. diff_name .. ". If nothing happens, press New Game.", 10)
+                else
+                    set_message("GO! Press New Game now (" .. diff_name .. "). " .. tostring(ok and err or res), 10)
+                end
+
+            else
+                pcall(RE7.apply_difficulty, lobby.difficulty)
+                set_message("GO! Difficulty set to " .. diff_name .. ". Press New Game now.", 10)
             end
         end
 
     elseif lobby.phase == "done" then
-        if now >= lobby.latch_until then lobby.phase = "idle" end
+        if now >= lobby.latch_until then
+            lobby.phase = "idle"
+            lobby.need_clear = true
+        end
     end
 end
 
@@ -864,6 +987,12 @@ re.on_draw_ui(function()
         local ok, err = pcall(function()
             imgui.text(lobby.message)
             if lobby.phase == "idle" then
+                if lobby.join_diff ~= nil and not lobby.need_clear then
+                    local who = state.remote_name or CFG.DEFAULT_NAME
+                    if imgui.button("Join " .. who .. " (" .. (DIFFICULTY[lobby.join_diff] or "?") .. ")") then
+                        start_ready(lobby.join_diff, false)
+                    end
+                end
                 local c, idx = imgui.combo("Difficulty", lobby.difficulty + 1, { "Easy", "Normal", "Madhouse" })
                 if c then lobby.difficulty = idx - 1 end
                 if imgui.button("I'm ready") then start_ready(lobby.difficulty, false) end
@@ -875,11 +1004,16 @@ re.on_draw_ui(function()
                     end
                 end
             end
-            local c2, v2 = imgui.checkbox("Freeze the game while waiting (when New Game is detected)",
-                lobby.freeze_when_hooked)
-            if c2 then lobby.freeze_when_hooked = v2 end
-            imgui.text(lobby.hook_installed and "New Game detection: on (app.GameManager.newGameRequest)"
+            local c1, v1 = imgui.checkbox("Auto-join when the other player starts a new game", lobby.auto_join)
+            if c1 then lobby.auto_join = v1 end
+            local c4, v4 = imgui.checkbox("After the countdown, start the new game for me", lobby.auto_start)
+            if c4 then lobby.auto_start = v4 end
+            local c2, v2 = imgui.checkbox("Freeze the game instead of blocking the New Game request", lobby.freeze_instead)
+            if c2 then lobby.freeze_instead = v2 end
+            imgui.text(lobby.hook_installed
+                and ("New Game detection: on (newGameRequest, " .. (RE7.can_block and "can block" or "cannot block, will freeze") .. ")")
                 or "New Game detection: off (hook not installed, see console; use \"I'm ready\")")
+            if lobby.hold_kind == "block" then imgui.text("The New Game request is blocked until both players are ready (Cancel drops it).") end
             if held.active then imgui.text("Game is frozen until both players are ready (Cancel releases it).") end
             local gd = RE7.current_difficulty()
             imgui.text("Game difficulty right now: " .. (gd ~= nil and DIFFICULTY[gd] or "unknown"))
