@@ -1,0 +1,2 @@
+This is the latest version available, I wish I could code this myself but unfortunately I cant, if anyone can make a better one themselves then I can credit the better mod and please post any bugs or sorts on the issues page for now!
+You need to Have reframework installed into the re7 main folder and download and run the exe, you should be able to install and do a p2p connection from there. Other features are being worked on which include the game models being loaded as character models and new game starting being synced.
