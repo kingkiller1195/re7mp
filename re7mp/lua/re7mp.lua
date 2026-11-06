@@ -1,15 +1,18 @@
--- RE7 multiplayer prototype, Lua side (script v4).
+-- RE7 multiplayer prototype, Lua side (script v5).
 -- re7mp.exe installs this to <RE7>/reframework/autorun/re7mp.lua and talks to it through
 -- JSON files in reframework/data. Edit the copy in the project (lua/re7mp.lua) and rebuild;
 -- the exe overwrites the installed copy.
 --
 -- What it does:
 --   * sends your camera position + rotation to the other player (via re7mp.exe)
---   * draws the other player as a stick-figure skeleton with a name tag, facing where they look
+--   * draws the other player as a shaded 3D body (plus an optional debug skeleton) with a name tag,
+--     facing where they look
 --   * "Start together": a ready check. Both players say they're ready on the same difficulty,
 --     and only then does the game go on. When RE7's New Game is detected (app.GameManager.newGameRequest)
 --     that request is BLOCKED until the other player is ready too, then replayed on the agreed
 --     difficulty. The "I'm ready" / "Join" buttons in the panel do the same with a countdown.
+--   * "Chat and pings": a reliable message channel to the other player (more uses to come, e.g. items).
+--   * "Find item hooks (tracer)": logs which game methods fire when you pick up or drop items.
 --   * "Avatar (experimental)": scan the scene and try cloning an in-game model instead of the skeleton.
 --
 -- NOTE: untested in-game apart from the position/figure part (the new-game hooks, ready check,
@@ -28,6 +31,7 @@ local CFG = {
     SMOOTHING = 14.0,         -- higher = snappier, lower = smoother
     TELEPORT_DISTANCE = 15.0, -- a jump bigger than this (metres) snaps instead of gliding
     DEFAULT_NAME = "Player 2",
+    BODY_ALPHA = 215,         -- 0-255; the body is an overlay and shows through walls, so it is a little see-through
     READY_TIMEOUT = 120,      -- give up waiting for the other player after this many seconds
     GO_LATCH = 5,             -- keep saying "going" this long so the other side can't miss it
     COUNTDOWN = 3,            -- seconds of countdown after both are ready (manual mode)
@@ -63,7 +67,9 @@ local state = {
     render_fwd = nil,        -- smoothed look direction { x, y, z }
     speed = 0,               -- smoothed horizontal speed in m/s
     walk_phase = 0,
-    show_figure = true,
+    show_figure = true,      -- master switch for drawing the other player
+    show_body = true,        -- the shaded 3D body
+    show_skeleton = false,   -- the line skeleton (debug)
     last_error = nil,
 }
 
@@ -95,7 +101,7 @@ local avatar = {
     filter = "player",       -- scanner filter text
     source_name = "",        -- name of the GameObject to clone
     lines = {},              -- scanner output
-    show_skeleton = false,   -- draw the skeleton even while a clone is active
+    show_skeleton = false,   -- keep drawing the body/skeleton even while a clone is active
 }
 
 local probe = {
@@ -676,70 +682,197 @@ local function update_remote(now, dt)
 end
 
 ----------------------------------------------------------------------------------------------
--- Drawing: a procedural stick-figure skeleton (placeholder until a real model is spawned)
+-- Drawing: a 3D body made of shaded boxes, plus a line skeleton for debugging.
+-- Both are projected onto the screen as an overlay, so they show through walls (no depth test against
+-- the level). That is expected until the other player gets a real in-game avatar.
 ----------------------------------------------------------------------------------------------
 local function project(p)
     return draw.world_to_screen(Vector3f.new(p[1], p[2], p[3]))
 end
 
-local function bone(a, b, color)
+local function line3(a, b, color)
     local sa, sb = project(a), project(b)
     if sa and sb then draw.line(sa.x, sa.y, sb.x, sb.y, color) end
 end
 
-local function draw_figure(pos, fwd, amp, phase, label, color)
-    -- Body orientation = look direction flattened onto the ground plane.
+local function vadd(a, b) return { a[1] + b[1], a[2] + b[2], a[3] + b[3] } end
+local function vsub(a, b) return { a[1] - b[1], a[2] - b[2], a[3] - b[3] } end
+local function vscale(a, k) return { a[1] * k, a[2] * k, a[3] * k } end
+local function vdot(a, b) return a[1] * b[1] + a[2] * b[2] + a[3] * b[3] end
+local function vcross(a, b)
+    return { a[2] * b[3] - a[3] * b[2], a[3] * b[1] - a[1] * b[3], a[1] * b[2] - a[2] * b[1] }
+end
+local function vnorm(a)
+    local l = math.sqrt(vdot(a, a))
+    if l < 1e-6 then return { 0, 1, 0 } end
+    return { a[1] / l, a[2] / l, a[3] / l }
+end
+
+-- Packed as 0xAABBGGRR, which is what the draw functions take (green looks the same either way).
+local function rgba(r, g, b, a)
+    return math.floor(a) * 16777216 + math.floor(b) * 65536 + math.floor(g) * 256 + math.floor(r)
+end
+
+-- Joint positions for the current pose. `pos` is the camera (eyes), fwd the look direction.
+local function compute_joints(pos, fwd, amp, phase)
     local hx, hz = fwd[1], fwd[3]
     local hl = math.sqrt(hx * hx + hz * hz)
     if hl < 1e-3 then hx, hz = 0, 1 else hx, hz = hx / hl, hz / hl end
     local rx, rz = hz, -hx -- "right" on the ground plane
-
     local H = CFG.EYE_HEIGHT
     local ox, oy, oz = pos.x, pos.y - H, pos.z -- point on the floor below the camera
     local function J(r, u, f) -- right / up / forward offsets from the feet -> world point
         return { ox + rx * r + hx * f, oy + u, oz + rz * r + hz * f }
     end
-
-    local head = { pos.x, pos.y, pos.z }
-    local neck = J(0, H - 0.18, 0)
-    local pelvis = J(0, H * 0.56, 0)
-    local shL, shR = J(0.2, H - 0.28, 0), J(-0.2, H - 0.28, 0)
-    local hipL, hipR = J(0.1, H * 0.56, 0), J(-0.1, H * 0.56, 0)
-
-    bone(neck, head, color)
-    bone(neck, pelvis, color)
-    bone(shL, shR, color)
-    bone(hipL, hipR, color)
-
+    local j = {
+        frame = { right = { rx, 0, rz }, fwd = { hx, 0, hz }, up = { 0, 1, 0 } },
+        head = { pos.x, pos.y, pos.z },
+        neck = J(0, H - 0.18, 0),
+        pelvis = J(0, H * 0.56, 0),
+        shoulder = {}, hip = {}, elbow = {}, hand = {}, knee = {}, foot = {},
+    }
     for _, k in ipairs({ 1, -1 }) do
         local ph = phase + (k > 0 and 0 or math.pi) -- legs and arms swing in opposition
         local stride = amp * 0.32 * math.sin(ph)
         local lift = amp * 0.14 * math.max(0, math.cos(ph))
-        local sh = k > 0 and shL or shR
-        local hip = k > 0 and hipL or hipR
-        local knee = J(k * 0.1, H * 0.28 + lift * 0.5, stride * 0.6 + amp * 0.05)
-        local foot = J(k * 0.1, lift, stride)
-        local elbow = J(k * 0.23, H * 0.72, -stride * 0.5)
-        local hand = J(k * 0.23, H * 0.55, -stride)
-        bone(sh, elbow, color)
-        bone(elbow, hand, color)
-        bone(hip, knee, color)
-        bone(knee, foot, color)
+        j.shoulder[k] = J(k * 0.2, H - 0.28, 0)
+        j.hip[k] = J(k * 0.1, H * 0.56, 0)
+        j.knee[k] = J(k * 0.1, H * 0.28 + lift * 0.5, stride * 0.6 + amp * 0.05)
+        j.foot[k] = J(k * 0.1, lift, stride)
+        j.elbow[k] = J(k * 0.23, H * 0.72, -stride * 0.5)
+        j.hand[k] = J(k * 0.23, H * 0.55, -stride)
+    end
+    return j
+end
+
+-- Debug skeleton: just lines between the joints, plus the look direction.
+local function draw_skeleton(j, fwd3, color)
+    line3(j.neck, j.head, color)
+    line3(j.neck, j.pelvis, color)
+    line3(j.shoulder[1], j.shoulder[-1], color)
+    line3(j.hip[1], j.hip[-1], color)
+    for _, k in ipairs({ 1, -1 }) do
+        line3(j.shoulder[k], j.elbow[k], color)
+        line3(j.elbow[k], j.hand[k], color)
+        line3(j.hip[k], j.knee[k], color)
+        line3(j.knee[k], j.foot[k], color)
+    end
+    line3(j.head, vadd(j.head, vscale(fwd3, 0.45)), 0xFFFFFFFF)
+end
+
+-- ---- 3D body: oriented boxes, back-face culled, sorted far to near, flat shaded ----
+local PERIM = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } }
+local function corner_index(s1, s2, s3)
+    return (s1 > 0 and 4 or 0) + (s2 > 0 and 2 or 0) + (s3 > 0 and 1 or 0) + 1
+end
+local FACES = {} -- each face: which axis it is perpendicular to, which side, and its 4 corner indices
+for axis = 1, 3 do
+    local a2, a3 = (axis % 3) + 1, ((axis + 1) % 3) + 1
+    for _, sign in ipairs({ 1, -1 }) do
+        local idx = {}
+        for _, pq in ipairs(PERIM) do
+            local sgn = { 0, 0, 0 }
+            sgn[axis], sgn[a2], sgn[a3] = sign, pq[1], pq[2]
+            idx[#idx + 1] = corner_index(sgn[1], sgn[2], sgn[3])
+        end
+        FACES[#FACES + 1] = { axis = axis, sign = sign, idx = idx }
+    end
+end
+local LIGHT = vnorm({ 0.35, 0.85, 0.4 })
+
+local function make_box(center, ax, ay, az, hx, hy, hz)
+    local corners = {}
+    for _, s1 in ipairs({ -1, 1 }) do
+        for _, s2 in ipairs({ -1, 1 }) do
+            for _, s3 in ipairs({ -1, 1 }) do
+                local c = vadd(center, vadd(vscale(ax, s1 * hx), vadd(vscale(ay, s2 * hy), vscale(az, s3 * hz))))
+                corners[corner_index(s1, s2, s3)] = c
+            end
+        end
+    end
+    return { center = center, axes = { ax, ay, az }, half = { hx, hy, hz }, corners = corners }
+end
+
+-- A thick bar from a to b (arms, legs); `side` is a hint for which way its width points.
+local function limb_box(a, b, half_width, side)
+    local d = vsub(b, a)
+    local len = math.sqrt(vdot(d, d))
+    local ay = vnorm(d)
+    local ax = vnorm(vsub(side, vscale(ay, vdot(side, ay))))
+    local az = vcross(ax, ay)
+    return make_box(vscale(vadd(a, b), 0.5), ax, ay, az, half_width, math.max(len / 2, 0.01), half_width)
+end
+
+local function draw_box(box, cam, base, alpha, outline)
+    local projected = {}
+    local function P(i)
+        local v = projected[i]
+        if v == nil then
+            v = project(box.corners[i]) or false
+            projected[i] = v
+        end
+        return v
+    end
+    for _, f in ipairs(FACES) do
+        local n = vscale(box.axes[f.axis], f.sign)
+        local face_center = vadd(box.center, vscale(n, box.half[f.axis]))
+        if vdot(n, vsub(cam, face_center)) > 0 then -- the face points at the camera
+            local a, b, c, d = P(f.idx[1]), P(f.idx[2]), P(f.idx[3]), P(f.idx[4])
+            if a and b and c and d then
+                if draw.filled_quad then
+                    local br = 0.40 + 0.60 * math.max(0, vdot(n, LIGHT))
+                    draw.filled_quad(a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y,
+                        rgba(base[1] * br, base[2] * br, base[3] * br, alpha))
+                end
+                draw.line(a.x, a.y, b.x, b.y, outline)
+                draw.line(b.x, b.y, c.x, c.y, outline)
+                draw.line(c.x, c.y, d.x, d.y, outline)
+                draw.line(d.x, d.y, a.x, a.y, outline)
+            end
+        end
+    end
+end
+
+local function draw_body(j, fwd3, cam, tint)
+    local R, F, U = j.frame.right, j.frame.fwd, j.frame.up
+    local function tinted(r, g, b) return { r * tint[1] / 255, g * tint[2] / 255, b * tint[3] / 255 } end
+    local skin, shirt, trousers, shoe = tinted(240, 240, 240), tinted(200, 230, 210), tinted(150, 170, 200), tinted(110, 110, 110)
+    local visor = tinted(255, 255, 255)
+    local parts = {}
+    local function add(box, color) parts[#parts + 1] = { box = box, color = color } end
+
+    -- torso
+    local torso_len = math.sqrt(vdot(vsub(j.neck, j.pelvis), vsub(j.neck, j.pelvis)))
+    add(make_box(vscale(vadd(j.neck, j.pelvis), 0.5), R, U, F, 0.2, torso_len / 2 + 0.03, 0.11), shirt)
+
+    -- head, turned and tilted to the look direction, with a bright visor on its front
+    local right = vnorm(vcross({ 0, 1, 0 }, fwd3))
+    if math.abs(fwd3[2]) > 0.97 then right = R end
+    local up = vcross(fwd3, right)
+    local hc = vsub(j.head, vscale(fwd3, 0.05))
+    add(make_box(hc, right, up, fwd3, 0.095, 0.12, 0.11), skin)
+    add(make_box(vadd(vadd(hc, vscale(fwd3, 0.105)), vscale(up, 0.015)), right, up, fwd3, 0.07, 0.03, 0.012), visor)
+
+    -- arms, legs, feet
+    for _, k in ipairs({ 1, -1 }) do
+        add(limb_box(j.shoulder[k], j.elbow[k], 0.055, R), shirt)
+        add(limb_box(j.elbow[k], j.hand[k], 0.05, R), skin)
+        add(limb_box(j.hip[k], j.knee[k], 0.085, R), trousers)
+        add(limb_box(j.knee[k], j.foot[k], 0.065, R), trousers)
+        add(make_box(vadd(vadd(j.foot[k], vscale(F, 0.07)), vscale(U, 0.035)), R, U, F, 0.06, 0.04, 0.13), shoe)
     end
 
-    -- Head: a small diamond around the camera position.
-    local r = 0.11
-    local top, bottom = { pos.x, pos.y + r, pos.z }, { pos.x, pos.y - r, pos.z }
-    local left, right = J(-r, H, 0), J(r, H, 0)
-    bone(top, left, color)
-    bone(left, bottom, color)
-    bone(bottom, right, color)
-    bone(right, top, color)
+    -- far to near, so nearer parts cover farther ones
+    for _, p in ipairs(parts) do
+        local d = vsub(p.box.center, cam)
+        p.d2 = vdot(d, d)
+    end
+    table.sort(parts, function(a, b) return a.d2 > b.d2 end)
+    local outline = rgba(10, 30, 15, 200)
+    for _, p in ipairs(parts) do draw_box(p.box, cam, p.color, CFG.BODY_ALPHA, outline) end
+end
 
-    -- Look direction (includes up/down tilt), so you can see where they are aiming.
-    local look = { pos.x + fwd[1] * 0.45, pos.y + fwd[2] * 0.45, pos.z + fwd[3] * 0.45 }
-    bone(head, look, 0xFFFFFFFF)
-
+local function draw_tag(pos, label, color)
     local tag = project({ pos.x, pos.y + 0.32, pos.z })
     if tag then draw.text(label, tag.x - #label * 3.5, tag.y - 14, color) end
 end
@@ -752,7 +885,154 @@ local function draw_remote(now)
     local label = state.remote_name or CFG.DEFAULT_NAME
     if stale then label = label .. " (no signal)" end
     local amp = math.max(0, math.min(1, (state.speed - 0.15) / 1.8))
-    draw_figure(state.render_pos, state.render_fwd, amp, state.walk_phase, label, color)
+    local pos, fwd = state.render_pos, state.render_fwd
+    local j = compute_joints(pos, fwd, amp, state.walk_phase)
+    if state.show_body and state.local_pos then
+        local cam = { state.local_pos.x, state.local_pos.y, state.local_pos.z }
+        draw_body(j, fwd, cam, stale and { 150, 150, 150 } or { 90, 255, 130 })
+    end
+    if state.show_skeleton then draw_skeleton(j, fwd, color) end
+    draw_tag(pos, label, color)
+end
+
+----------------------------------------------------------------------------------------------
+-- Messages: a reliable channel to the other player (chat, pings; item events will use it too).
+-- Messages go through re7mp.exe, which resends them until the other side confirms and delivers each
+-- one once. Kinds: 1 = chat text, 2 = ping "x;y;z".
+----------------------------------------------------------------------------------------------
+local MSG_OUT_FILE = "re7mp_msg_out.json"
+local MSG_IN_FILE = "re7mp_msg_in.json"
+
+local netmsg = {
+    outbox = {},   -- ring of our most recent messages: { id, k, p }
+    next_id = math.floor(os.time and os.time() or (os.clock() * 1000)) * 1000,
+    dirty = false,
+    last_flush = 0,
+    handlers = {}, -- kind -> function(payload)
+    epoch = nil,   -- which engine run the inbox belongs to
+    last_n = 0,    -- last inbox entry we handled
+}
+
+local function net_on(kind, handler)
+    netmsg.handlers[kind] = handler
+end
+
+local function net_send(kind, payload)
+    payload = tostring(payload):gsub("%c", " ")
+    if #payload > 180 then payload = payload:sub(1, 180) end
+    pcall(function() -- never leave half of a multi-byte character at the end
+        while #payload > 0 and not utf8.len(payload) do payload = payload:sub(1, -2) end
+    end)
+    netmsg.next_id = netmsg.next_id + 1
+    netmsg.outbox[#netmsg.outbox + 1] = { id = netmsg.next_id, k = kind, p = payload }
+    while #netmsg.outbox > 32 do table.remove(netmsg.outbox, 1) end
+    netmsg.dirty = true
+end
+
+local function flush_messages(now)
+    if netmsg.dirty and now - netmsg.last_flush >= 0.05 then
+        netmsg.dirty = false
+        netmsg.last_flush = now
+        json.dump_file(MSG_OUT_FILE, { msgs = netmsg.outbox })
+    end
+end
+
+-- Remember what is already in the inbox so old messages are not replayed after a script reload.
+local function prime_messages()
+    local d = json.load_file(MSG_IN_FILE)
+    if type(d) ~= "table" or type(d.msgs) ~= "table" then return end
+    netmsg.epoch = d.epoch
+    for _, m in ipairs(d.msgs) do
+        if type(m) == "table" and type(m.n) == "number" and m.n > netmsg.last_n then netmsg.last_n = m.n end
+    end
+end
+
+local function read_messages()
+    local d = json.load_file(MSG_IN_FILE)
+    if type(d) ~= "table" or type(d.msgs) ~= "table" then return end
+    if d.epoch ~= netmsg.epoch then -- the engine restarted: its numbering starts again
+        netmsg.epoch = d.epoch
+        netmsg.last_n = 0
+    end
+    for _, m in ipairs(d.msgs) do
+        if type(m) == "table" and type(m.n) == "number" and m.n > netmsg.last_n then
+            netmsg.last_n = m.n
+            local handler = netmsg.handlers[m.k]
+            if handler then
+                local ok, err = pcall(handler, tostring(m.p or ""))
+                if not ok then say("message handler error: " .. tostring(err)) end
+            end
+        end
+    end
+end
+
+-- Chat
+local chat = { lines = {}, input = "" }
+
+local function chat_add(who, text)
+    chat.lines[#chat.lines + 1] = { who = who, text = text, at = os.clock() }
+    while #chat.lines > 40 do table.remove(chat.lines, 1) end
+end
+
+local function chat_send(text)
+    text = text:gsub("^%s+", ""):gsub("%s+$", "")
+    if text == "" then return end
+    net_send(1, text)
+    chat_add("You", text)
+end
+
+net_on(1, function(payload)
+    chat_add(state.remote_name or CFG.DEFAULT_NAME, payload)
+end)
+
+-- Pings: "look here" markers at a world position
+local pings = {}
+
+net_on(2, function(payload)
+    local x, y, z = payload:match("^(-?[%d%.]+);(-?[%d%.]+);(-?[%d%.]+)$")
+    x, y, z = tonumber(x), tonumber(y), tonumber(z)
+    if not (x and y and z) then return end
+    pings[#pings + 1] = { x = x, y = y, z = z, who = state.remote_name or CFG.DEFAULT_NAME, at = os.clock() }
+    while #pings > 8 do table.remove(pings, 1) end
+end)
+
+local function ping_here()
+    local p = state.local_pos
+    if not p then return end
+    net_send(2, string.format("%.2f;%.2f;%.2f", p.x, p.y, p.z))
+    chat_add("You", "(pinged your position)")
+end
+
+-- On-screen chat and ping markers
+local function draw_hud(now)
+    local y = 64
+    for i = math.max(1, #chat.lines - 5), #chat.lines do
+        local l = chat.lines[i]
+        if now - l.at < 12 then
+            pcall(draw.text, l.who .. ": " .. l.text, 24, y, 0xFFFFFFFF)
+            y = y + 16
+        end
+    end
+    for i = #pings, 1, -1 do
+        local p = pings[i]
+        if now - p.at > 12 then
+            table.remove(pings, i)
+        else
+            local sp = project({ p.x, p.y, p.z })
+            if sp then
+                local c = 0xFF00D7FF
+                local r = 9
+                draw.line(sp.x, sp.y - r, sp.x + r, sp.y, c)
+                draw.line(sp.x + r, sp.y, sp.x, sp.y + r, c)
+                draw.line(sp.x, sp.y + r, sp.x - r, sp.y, c)
+                draw.line(sp.x - r, sp.y, sp.x, sp.y - r, c)
+                local lp = state.local_pos
+                local dist = 0
+                if lp then dist = math.sqrt((p.x - lp.x) ^ 2 + (p.y - lp.y) ^ 2 + (p.z - lp.z) ^ 2) end
+                draw.text(string.format("%s (%.0f m)", p.who, dist), sp.x + 14, sp.y - 8, c)
+            end
+        end
+    end
 end
 
 ----------------------------------------------------------------------------------------------
@@ -760,7 +1040,8 @@ end
 ----------------------------------------------------------------------------------------------
 local PROBE_CANDIDATES = {
     "app.GameManager", "app.SaveDataManager", "app.ItemManager",
-    "app.EnemyManager", "app.EventManager", "app.MapManager", "app.GimmickManager", "app.InventoryManager",
+    "app.Inventory", "app.Item", "app.ItemData", "app.SupplyBoxData",
+    "app.EnemyManager", "app.EventManager", "app.MapManager", "app.GimmickManager",
 }
 local PROBE_KEYWORDS = { "difficult", "newgame", "new_game", "gamemode", "rank", "startgame", "gamestart" }
 local NEW_GAME_METHODS = {
@@ -826,6 +1107,128 @@ local function probe_signatures()
         end)
         if not ok then probe_add(entry[2] .. ": error " .. tostring(err)) end
     end
+end
+
+----------------------------------------------------------------------------------------------
+-- Tracer: hooks every method of a type (rate limited) and logs the calls with their arguments, so you can
+-- see which methods fire when you pick up or drop an item. Hooks last until the scripts are reloaded.
+----------------------------------------------------------------------------------------------
+local tracer = {
+    enabled = true,
+    type_name = "app.ItemManager",
+    filter = "",
+    include_getters = false,
+    hooked = {},
+    hook_count = 0,
+    rate = {},
+    lines = {},
+}
+
+local function tracer_add(text)
+    tracer.lines[#tracer.lines + 1] = text
+    while #tracer.lines > 60 do table.remove(tracer.lines, 1) end
+    say("[trace] " .. text)
+end
+
+-- Reference types are read as objects; value types (numbers, enums, structs) are only shown as raw numbers,
+-- because treating a plain number as an object pointer could crash the game.
+local function describe_arg(pt, args, idx)
+    local ok, text = pcall(function()
+        local n = pt.name
+        if pt.ref then
+            local o = sdk.to_managed_object(args[idx])
+            if o == nil then return "null" end
+            if n == "System.String" then
+                local ok2, str = pcall(function() return o:call("ToString()") end)
+                if ok2 and type(str) == "string" then return "\"" .. str .. "\"" end
+                return "<string>"
+            end
+            if n == "via.GameObject" then
+                local ok3, nm = pcall(function() return o:call("get_Name") end)
+                if ok3 then return "GameObject(" .. tostring(nm) .. ")" end
+            end
+            return "<" .. n .. ">"
+        end
+        if n == "System.Boolean" then return tostring(sdk.to_int64(args[idx]) % 256 ~= 0) end
+        if n == "System.Single" then return string.format("%.3f", sdk.to_float(args[idx])) end
+        local v = sdk.to_int64(args[idx])
+        if n == "System.Int32" or n:find("^app%.") then
+            v = v % 4294967296
+            if v >= 2147483648 then v = v - 4294967296 end
+        end
+        return tostring(v)
+    end)
+    return ok and text or ("?" .. tostring(text))
+end
+
+local function trace_method(type_name, m)
+    local mname = m:get_name()
+    local ptypes, names = {}, {}
+    pcall(function()
+        for i, t in ipairs(m:get_param_types() or {}) do
+            local okv, isval = pcall(function() return t:is_value_type() end)
+            ptypes[i] = { name = t:get_full_name(), ref = okv and isval == false }
+            names[i] = ptypes[i].name
+        end
+    end)
+    local is_static = false
+    pcall(function() is_static = m:is_static() == true end)
+    local key = type_name .. "." .. mname .. "(" .. table.concat(names, ",") .. ")"
+    if tracer.hooked[key] then return false end
+    tracer.hooked[key] = true
+
+    local CALL_ORIGINAL = sdk.PreHookResult and sdk.PreHookResult.CALL_ORIGINAL
+    sdk.hook(m, function(args)
+        pcall(function()
+            if not tracer.enabled then return end
+            local now = os.clock()
+            local e = tracer.rate[key] or { t = 0, n = 0, dropped = 0 }
+            tracer.rate[key] = e
+            if now - e.t > 1 then
+                if e.dropped > 0 then
+                    tracer_add(type_name .. "." .. mname .. ": " .. e.dropped .. " more calls in the last second")
+                end
+                e.t, e.n, e.dropped = now, 0, 0
+            end
+            e.n = e.n + 1
+            if e.n > 3 then
+                e.dropped = e.dropped + 1
+                return
+            end
+            local parts = {}
+            for i, pt in ipairs(ptypes) do parts[i] = describe_arg(pt, args, i + (is_static and 1 or 2)) end
+            tracer_add(string.format("%s.%s(%s)", type_name, mname, table.concat(parts, ", ")))
+        end)
+        return CALL_ORIGINAL
+    end, function(retval) return retval end)
+    return true
+end
+
+local function trace_type(type_name, filter, include_getters)
+    local ok, err = pcall(function()
+        local td = sdk.find_type_definition(type_name)
+        if not td then
+            tracer_add(type_name .. ": not found")
+            return
+        end
+        local added, skipped = 0, 0
+        local f = (filter or ""):lower()
+        for _, m in ipairs(td:get_methods() or {}) do
+            local name = m:get_name()
+            local low = name:lower()
+            local skip = low:find("update", 1, true) ~= nil or name == ".ctor" or name == "doAwake"
+                or (not include_getters and low:sub(1, 4) == "get_")
+                or (f ~= "" and not low:find(f, 1, true))
+            if not skip and tracer.hook_count < 150 and trace_method(type_name, m) then
+                added = added + 1
+                tracer.hook_count = tracer.hook_count + 1
+            else
+                skipped = skipped + 1
+            end
+        end
+        tracer_add(string.format("%s: tracing %d methods (%d skipped)", type_name, added, skipped))
+    end)
+    if not ok then tracer_add(type_name .. ": error " .. tostring(err)) end
 end
 
 ----------------------------------------------------------------------------------------------
@@ -941,6 +1344,7 @@ end
 ----------------------------------------------------------------------------------------------
 -- Main loop and UI
 ----------------------------------------------------------------------------------------------
+prime_messages()
 local ok_hook, installed = pcall(RE7.install_new_game_hook, on_local_new_game)
 lobby.hook_installed = ok_hook and installed == true
 
@@ -953,13 +1357,18 @@ re.on_frame(function()
     state.last_frame = now
 
     if now - state.last_send >= CFG.SEND_INTERVAL then send_local(now) end
-    if now - state.last_read >= CFG.READ_INTERVAL then read_remote(now) end
+    if now - state.last_read >= CFG.READ_INTERVAL then
+        read_remote(now)
+        pcall(read_messages)
+    end
+    flush_messages(now)
     update_remote(now, dt)
     update_lobby(now)
     update_avatar()
 
     local ok, err = pcall(draw_remote, now)
     if not ok then state.last_error = tostring(err) end
+    pcall(draw_hud, now)
 
     if lobby.phase ~= "idle" or now < lobby.message_until then
         pcall(draw.text, lobby.message, 24, 24, 0xFF00FFFF)
@@ -971,6 +1380,10 @@ re.on_draw_ui(function()
 
     local changed, v = imgui.checkbox("Show other player", state.show_figure)
     if changed then state.show_figure = v end
+    local cb, vb = imgui.checkbox("3D body", state.show_body)
+    if cb then state.show_body = vb end
+    local cs, vs = imgui.checkbox("Debug skeleton (lines)", state.show_skeleton)
+    if cs then state.show_skeleton = vs end
 
     local lp, r = state.local_pos, state.remote
     imgui.text(lp and string.format("You:    %.2f, %.2f, %.2f", lp.x, lp.y, lp.z) or "You:    (no camera yet)")
@@ -1025,10 +1438,49 @@ re.on_draw_ui(function()
         imgui.tree_pop()
     end
 
+    if imgui.tree_node("Chat and pings") then
+        local ok, err = pcall(function()
+            local c, text = imgui.input_text("Message", chat.input)
+            if c then chat.input = text end
+            if imgui.button("Send") then
+                chat_send(chat.input)
+                chat.input = ""
+            end
+            if imgui.button("Ping my position") then ping_here() end
+            imgui.text("The other player sees your message and a marker at your position for 12 seconds.")
+            for i = math.max(1, #chat.lines - 8), #chat.lines do
+                imgui.text(chat.lines[i].who .. ": " .. chat.lines[i].text)
+            end
+        end)
+        if not ok then imgui.text("UI error: " .. tostring(err)) end
+        imgui.tree_pop()
+    end
+
+    if imgui.tree_node("Find item hooks (tracer)") then
+        local ok, err = pcall(function()
+            imgui.text("Logs which methods fire (with arguments) while you pick up, drop or use items.")
+            imgui.text("Hooks stay until the scripts are reloaded; calls are rate limited.")
+            local ce, ve = imgui.checkbox("Tracing on", tracer.enabled)
+            if ce then tracer.enabled = ve end
+            if imgui.button("Trace app.ItemManager") then trace_type("app.ItemManager", "", false) end
+            local c1, v1 = imgui.input_text("Type to trace", tracer.type_name)
+            if c1 then tracer.type_name = v1 end
+            local c2, v2 = imgui.input_text("Only methods containing", tracer.filter)
+            if c2 then tracer.filter = v2 end
+            local c3, v3 = imgui.checkbox("Include get_ methods (noisy)", tracer.include_getters)
+            if c3 then tracer.include_getters = v3 end
+            if imgui.button("Trace that type") then trace_type(tracer.type_name, tracer.filter, tracer.include_getters) end
+            imgui.text("Hooked methods: " .. tostring(tracer.hook_count))
+            for i = math.max(1, #tracer.lines - 20), #tracer.lines do imgui.text(tracer.lines[i]) end
+        end)
+        if not ok then imgui.text("UI error: " .. tostring(err)) end
+        imgui.tree_pop()
+    end
+
     if imgui.tree_node("Avatar (experimental)") then
         local ok, err = pcall(function()
-            imgui.text(avatar.obj and "A cloned model is standing in for the skeleton."
-                or "Drawing the skeleton. Scan for a model, then clone it.")
+            imgui.text(avatar.obj and "A cloned model is standing in for the body."
+                or "Drawing the 3D body. Scan for a model, then clone it.")
             local c1, v1 = imgui.input_text("Scan filter", avatar.filter)
             if c1 then avatar.filter = v1 end
             if imgui.button("Scan scene") then scan_scene(avatar.filter) end
@@ -1037,7 +1489,7 @@ re.on_draw_ui(function()
             if c2 then avatar.source_name = v2 end
             if imgui.button("Clone and follow") then spawn_clone(avatar.source_name) end
             if avatar.obj and imgui.button("Remove clone") then remove_clone() end
-            local c3, v3 = imgui.checkbox("Also draw the skeleton", avatar.show_skeleton)
+            local c3, v3 = imgui.checkbox("Also draw the body/skeleton", avatar.show_skeleton)
             if c3 then avatar.show_skeleton = v3 end
             if imgui.button("List via.GameObject clone/create methods") then
                 probe.lines = {}
@@ -1075,4 +1527,4 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 
-say("script v4 loaded")
+say("script v5 loaded")

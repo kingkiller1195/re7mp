@@ -1,6 +1,7 @@
 // re7mp_cli: headless front end for the engine (handy for debugging and scripts).
 //   re7mp_cli --data-dir <game>/reframework/data --loopback
 //   re7mp_cli --data-dir <game>/reframework/data --peer <host:port> [--listen <port>]
+//   add --tcp-host / --tcp-join for TCP instead of UDP, --bot-stationary for a parked loopback bot
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -24,6 +25,12 @@ int main(int argc, char** argv) {
         const bool has_next = i + 1 < argc;
         if (a == "--loopback") {
             cfg.mode = re7mp::Mode::Loopback;
+        } else if (a == "--tcp-host") {
+            cfg.transport = re7mp::Transport::TcpHost;
+        } else if (a == "--tcp-join") {
+            cfg.transport = re7mp::Transport::TcpJoin;
+        } else if (a == "--bot-stationary") {
+            cfg.bot_mode = re7mp::BotMode::Stationary;
         } else if (a == "--name" && has_next) {
             cfg.name = argv[++i];
         } else if (a == "--data-dir" && has_next) {
@@ -36,7 +43,7 @@ int main(int argc, char** argv) {
             cfg.peer_host = colon == std::string::npos ? v : v.substr(0, colon);
             if (colon != std::string::npos) cfg.peer_port = static_cast<uint16_t>(std::atoi(v.substr(colon + 1).c_str()));
         } else {
-            std::fprintf(stderr, "usage: re7mp_cli --data-dir <dir> (--loopback | --peer <host:port>) [--listen <port>] [--name <name>]\n");
+            std::fprintf(stderr, "usage: re7mp_cli --data-dir <dir> (--loopback | --peer <host:port>) [--listen <port>] [--name <name>] [--tcp-host | --tcp-join] [--bot-stationary]\n");
             return 2;
         }
     }

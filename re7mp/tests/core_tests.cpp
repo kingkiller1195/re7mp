@@ -9,10 +9,12 @@
 #include <regex>
 #include <sstream>
 #include <thread>
+#include <tuple>
 
 #include "bridge.hpp"
 #include "engine.hpp"
 #include "game_locator.hpp"
+#include "json_mini.hpp"
 #include "packet.hpp"
 
 namespace fs = std::filesystem;
@@ -363,16 +365,317 @@ static void test_network(const fs::path& tmp) {
     CHECK(!c.start(bad, err) && !err.empty());
 }
 
+
+// ---- messages / parser / transports ----------------------------------------------------------
+
+using MsgList = std::vector<std::tuple<uint64_t, int, std::string>>;
+static std::string json_quote(const std::string& s) {
+    std::string o = "\"";
+    for (char c : s) {
+        if (c == '"' || c == '\\') o += '\\';
+        o += c;
+    }
+    return o + "\"";
+}
+// What the Lua script does: write the ring of recent messages (id, kind, payload).
+static void write_msgs(const fs::path& dir, const MsgList& list) {
+    std::string t = "{\"msgs\":[";
+    bool first = true;
+    for (auto& [id, kind, payload] : list) {
+        if (!first) t += ",";
+        first = false;
+        t += "{\"id\":" + std::to_string(id) + ",\"k\":" + std::to_string(kind) + ",\"p\":" + json_quote(payload) + "}";
+    }
+    t += "]}";
+    write_text(dir / "re7mp_msg_out.json", t);
+}
+// What the Lua script reads: the payloads of messages of one kind currently in the inbox.
+static std::vector<std::string> inbox_payloads(const fs::path& dir, int kind) {
+    std::vector<std::string> out;
+    mini::Value v;
+    if (!mini::parse(read_text(dir / "re7mp_msg_in.json"), v)) return out;
+    const mini::Value* msgs = v.get("msgs");
+    if (!msgs) return out;
+    for (auto& m : msgs->arr) {
+        const mini::Value* k = m.get("k");
+        const mini::Value* p = m.get("p");
+        if (k && p && static_cast<int>(k->num) == kind) out.push_back(p->str);
+    }
+    return out;
+}
+static size_t inbox_size(const fs::path& dir) {
+    mini::Value v;
+    if (!mini::parse(read_text(dir / "re7mp_msg_in.json"), v)) return 0;
+    const mini::Value* msgs = v.get("msgs");
+    return msgs ? msgs->arr.size() : 0;
+}
+
+static void test_json_mini() {
+    mini::Value v;
+    CHECK(mini::parse("{\"a\":[1,2.5,-3e2,true,false,null],\"s\":\"x\\\"y\\\\z\\n\\u00e9\\ud83d\\ude42\",\"o\":{}}", v));
+    const auto* a = v.get("a");
+    CHECK(a && a->arr.size() == 6 && a->arr[1].num == 2.5 && a->arr[2].num == -300 && a->arr[3].b && !a->arr[4].b);
+    const auto* sv = v.get("s");
+    CHECK(sv && sv->str == "x\"y\\z\n\xC3\xA9\xF0\x9F\x99\x82");
+    CHECK(mini::parse("  [ ]  ", v) && v.type == mini::Value::Type::Arr);
+    CHECK(!mini::parse("{\"a\":1", v));            // half-written
+    CHECK(!mini::parse("{\"a\":1} x", v));         // trailing garbage
+    CHECK(!mini::parse("{\"a\" 1}", v));
+    CHECK(!mini::parse("\"unterminated", v));
+    CHECK(!mini::parse("[1,,2]", v));
+    std::string deep(40, '[');
+    CHECK(!mini::parse(deep, v));                  // depth limit, no stack blowup
+}
+
+static void test_message_packets() {
+    uint8_t buf[sizeof(MessageFixed) + kMaxPayloadBytes];
+    const size_t n = encode_message(buf, 7, 42, 3, "hello \xC3\xA9");
+    CHECK(n == sizeof(MessageFixed) + 8);
+    uint32_t s, id;
+    uint16_t k;
+    std::string p;
+    CHECK(decode_message(buf, n, s, id, k, p) && s == 7 && id == 42 && k == 3 && p == "hello \xC3\xA9");
+    CHECK(!decode_message(buf, n - 1, s, id, k, p));   // truncated
+    CHECK(!decode_message(buf, n + 1, s, id, k, p));   // trailing byte
+    CHECK(encode_message(buf, 1, 1, 1, std::string(kMaxPayloadBytes + 1, 'x')) == 0);  // too long
+    CHECK(encode_message(buf, 1, 1, 1, std::string("a\nb")) == 0);                     // control character
+    CHECK(encode_message(buf, 1, 1, 1, std::string("\xff")) == 0);                     // invalid UTF-8
+    CHECK(encode_message(buf, 1, 1, 1, std::string(kMaxPayloadBytes, 'x')) == sizeof(MessageFixed) + kMaxPayloadBytes);
+    auto ak = make_message_ack(1, 9);
+    AckPacket a2;
+    CHECK(decode_message_ack(&ak, sizeof(ak), a2) && a2.id == 9);
+    CHECK(!decode_ack(&ak, sizeof(ak), a2));  // not an event ack
+}
+
+static void test_bridge_messages(const fs::path& tmp) {
+    const fs::path d = tmp / "bridge_msgs";
+    FileBridge b(d);
+    std::vector<LocalMessage> v;
+    CHECK(!b.poll_messages(v));
+    write_text(d / "re7mp_msg_out.json", "{\"msgs\":[{\"id\":5,\"k\":1,\"p\":\"he");  // half-written
+    CHECK(!b.poll_messages(v));
+    write_msgs(d, {{5, 1, "hello \"quoted\" \\ ok"}, {6, 2, "1.0;2.0;3.0"}});
+    CHECK(b.poll_messages(v) && v.size() == 2 && v[0].lua_id == 5 && v[0].payload == "hello \"quoted\" \\ ok" &&
+          v[1].kind == 2);
+    CHECK(!b.poll_messages(v));  // unchanged
+    // The ring still contains the old ones; only the new one comes back.
+    write_msgs(d, {{5, 1, "hello \"quoted\" \\ ok"}, {6, 2, "1.0;2.0;3.0"}, {7, 1, "third"}});
+    CHECK(b.poll_messages(v) && v.size() == 1 && v[0].lua_id == 7 && v[0].payload == "third");
+    // A bad payload is skipped, not retried forever.
+    write_text(d / "re7mp_msg_out.json", "{\"msgs\":[{\"id\":8,\"k\":1,\"p\":\"a\\u0001b\"},{\"id\":9,\"k\":1,\"p\":\"fine\"}]}");
+    CHECK(b.poll_messages(v) && v.size() == 1 && v[0].payload == "fine");
+    std::vector<InMessage> in;
+    InMessage m;
+    m.n = 1; m.id = 10; m.kind = 1; m.payload = "he said \"hi\"";
+    in.push_back(m);
+    CHECK(b.publish_messages(77, in));
+    mini::Value jv;
+    CHECK(mini::parse(read_text(d / "re7mp_msg_in.json"), jv) && jv.get("epoch")->num == 77 &&
+          jv.get("msgs")->arr.size() == 1 && jv.get("msgs")->arr[0].get("p")->str == "he said \"hi\"");
+}
+
+static void test_stationary_bot(const fs::path& tmp) {
+    const fs::path dir = tmp / "stationary";
+    Engine e;
+    Config cfg;
+    cfg.data_dir = dir;
+    cfg.mode = Mode::Loopback;
+    cfg.listen_port = 28951;
+    cfg.bot_mode = BotMode::Stationary;
+    std::string err;
+    CHECK(e.start(cfg, err));
+    fs::create_directories(dir);
+    std::atomic<int> flags{0};
+    std::thread g([&] { fake_game(dir, 100.0, 200.0, 3200, &flags); });
+    auto in_xz = [&] {
+        double x = 0, z = 0;
+        auto t = read_text(dir / "re7mp_in.json");
+        json_num(t, "x", x);
+        json_num(t, "z", z);
+        return std::make_pair(x, z);
+    };
+    std::this_thread::sleep_for(milliseconds(700));
+    auto p1 = in_xz();
+    std::this_thread::sleep_for(milliseconds(900));
+    auto p2 = in_xz();
+    auto s = e.status();
+    std::printf("  stationary: bot at (%.2f, %.2f) then (%.2f, %.2f); you at x=%.2f\n", p1.first, p1.second, p2.first,
+                p2.second, s.lx);
+    CHECK(std::fabs(p1.first - p2.first) < 1e-3 && std::fabs(p1.second - p2.second) < 1e-3);  // it did not move
+    CHECK(std::fabs(p1.second - 200.0) < 0.01 && p1.first > 99.9 && p1.first < 100.5);        // parked where you were
+    double qy;
+    CHECK(json_num(read_text(dir / "re7mp_in.json"), "qy", qy) && std::fabs(qy - 0.6) < 1e-3);  // still copies rotation
+    // "Move bot to me" teleports it to where you are now.
+    e.teleport_bot_here();
+    std::this_thread::sleep_for(milliseconds(400));
+    auto p3 = in_xz();
+    s = e.status();
+    CHECK(std::fabs(p3.first - s.lx) < 0.3 && p3.first > p2.first);
+    // Switching back to orbit moves it again; switching to stationary parks it again.
+    e.set_bot_mode(BotMode::Orbit);
+    std::this_thread::sleep_for(milliseconds(300));
+    auto p4 = in_xz();
+    std::this_thread::sleep_for(milliseconds(400));
+    auto p5 = in_xz();
+    CHECK(std::fabs(p4.first - p5.first) + std::fabs(p4.second - p5.second) > 0.1);
+    g.join();
+    e.stop();
+}
+
+static void test_loopback_messages_and_tcp(const fs::path& tmp, Transport transport, uint16_t port, const char* label) {
+    const fs::path dir = tmp / (std::string("lbm_") + label);
+    Engine e;
+    Config cfg;
+    cfg.data_dir = dir;
+    cfg.mode = Mode::Loopback;
+    cfg.transport = transport;
+    cfg.listen_port = port;
+    cfg.name = "Tester";
+    std::string err;
+    CHECK(e.start(cfg, err));
+    fs::create_directories(dir);
+    std::atomic<int> flags{0};
+    std::thread g([&] { fake_game(dir, 100.0, 200.0, 2600, &flags); });
+    std::this_thread::sleep_for(milliseconds(900));  // TCP needs a moment to connect
+    write_msgs(dir, {{1, 1, "hello bot"}});
+    std::this_thread::sleep_for(milliseconds(500));
+    auto chat = inbox_payloads(dir, 1);
+    CHECK(chat.size() == 1 && chat[0] == "echo: hello bot");
+    write_msgs(dir, {{1, 1, "hello bot"}, {2, 2, "10.00;1.50;-4.25"}});
+    std::this_thread::sleep_for(milliseconds(500));
+    auto pings = inbox_payloads(dir, 2);
+    CHECK(pings.size() == 1 && pings[0] == "10.00;1.50;-4.25");
+    CHECK(inbox_payloads(dir, 1).size() == 1);  // the first message was not sent a second time
+    CHECK(inbox_size(dir) == 2);
+    g.join();
+    auto s = e.status();
+    std::printf("  %s loopback: sent=%llu recv=%llu msgs sent=%llu recv=%llu\n", label, (unsigned long long)s.sent,
+                (unsigned long long)s.received, (unsigned long long)s.messages_sent,
+                (unsigned long long)s.messages_received);
+    CHECK(s.game_hooked && s.peer_active && s.remote_name == "Loopback Bot");
+    CHECK(s.messages_sent == 2 && s.messages_received == 2);
+    auto log = e.drain_log();
+    CHECK(count_lines(log, "never confirmed") == 0);
+    if (transport != Transport::Udp) CHECK(count_lines(log, "TCP: connected to the host") == 1);
+    e.stop();
+}
+
+static void test_tcp_network(const fs::path& tmp) {
+    Engine host, join;
+    Config ch, cj;
+    ch.data_dir = tmp / "tcp_host";
+    cj.data_dir = tmp / "tcp_join";
+    ch.mode = cj.mode = Mode::Network;
+    ch.transport = Transport::TcpHost;
+    cj.transport = Transport::TcpJoin;
+    ch.listen_port = 28941;
+    cj.peer_host = "127.0.0.1";
+    cj.peer_port = 28941;
+    ch.name = "Hosty";
+    cj.name = "Joiny";
+    std::string err;
+    CHECK(host.start(ch, err));
+    std::atomic<int> fa{0}, fb{kFlagReady | (2 << 1)};
+    std::thread g1([&] { fake_game(ch.data_dir, 10.0, 10.0, 3800, &fa); });
+    std::thread g2([&] { fake_game(cj.data_dir, -50.0, 70.0, 3800, &fb); });
+    std::this_thread::sleep_for(milliseconds(400));
+    CHECK(join.start(cj, err));  // the joiner starts after the host and connects on its own
+    std::this_thread::sleep_for(milliseconds(1800));
+    auto sh = host.status(), sj = join.status();
+    std::printf("  tcp: host sees %s at x=%.2f, joiner sees %s at x=%.2f\n", sh.remote_name.c_str(), sh.rx,
+                sj.remote_name.c_str(), sj.rx);
+    CHECK(sh.peer_active && sj.peer_active && sh.remote_name == "Joiny" && sj.remote_name == "Hosty");
+    CHECK(std::fabs(sh.rx - (-50.0)) < 2 && std::fabs(sj.rx - 10.0) < 2);
+    double v = -1;
+    json_num(read_text(ch.data_dir / "re7mp_in.json"), "flags", v);
+    CHECK(static_cast<int>(v) == (kFlagReady | (2 << 1)));  // ready flags cross over TCP too
+
+    // Reliable messages both ways.
+    write_msgs(ch.data_dir, {{1, 1, "from host"}});
+    write_msgs(cj.data_dir, {{1, 1, "from joiner"}});
+    std::this_thread::sleep_for(milliseconds(500));
+    CHECK(inbox_payloads(join.status().running ? cj.data_dir : cj.data_dir, 1) == std::vector<std::string>{"from host"});
+    CHECK(inbox_payloads(ch.data_dir, 1) == std::vector<std::string>{"from joiner"});
+
+    // The host goes away and comes back: the joiner reconnects by itself.
+    host.stop();
+    std::this_thread::sleep_for(milliseconds(300));
+    CHECK(host.start(ch, err));
+    std::this_thread::sleep_for(milliseconds(2200));
+    sh = host.status();
+    sj = join.status();
+    CHECK(sh.peer_active && sj.peer_active);
+    auto logj = join.drain_log();
+    CHECK(count_lines(logj, "TCP connection lost") >= 1 && count_lines(logj, "TCP: connected to the host") >= 2);
+    g1.join();
+    g2.join();
+    host.stop();
+    join.stop();
+
+    // A host that only allows one address ignores everyone else.
+    Config restricted = ch;
+    restricted.data_dir = tmp / "tcp_restricted";
+    restricted.peer_host = "127.0.0.2";  // not who will connect (we connect from 127.0.0.1)
+    restricted.listen_port = 28943;
+    Config c3 = cj;
+    c3.data_dir = tmp / "tcp_restricted_join";
+    c3.peer_port = 28943;
+    Engine r, j3;
+    CHECK(r.start(restricted, err) && j3.start(c3, err));
+    std::thread g3([&] { fake_game(restricted.data_dir, 0, 0, 1500, nullptr); });
+    std::thread g4([&] { fake_game(c3.data_dir, 5, 5, 1500, nullptr); });
+    g3.join();
+    g4.join();
+    CHECK(!r.status().peer_active && !j3.status().peer_active);
+    r.stop();
+    j3.stop();
+}
+
+static void test_message_retransmission(const fs::path& tmp) {
+    Engine a, b;
+    Config ca, cb;
+    ca.data_dir = tmp / "mr_a";
+    cb.data_dir = tmp / "mr_b";
+    ca.mode = cb.mode = Mode::Network;
+    ca.listen_port = 28961;
+    ca.peer_host = "127.0.0.1";
+    ca.peer_port = 28962;
+    cb.listen_port = 28962;
+    cb.peer_host = "127.0.0.1";
+    cb.peer_port = 28961;
+    std::string err;
+    CHECK(a.start(ca, err));
+    std::this_thread::sleep_for(milliseconds(200));
+    write_msgs(ca.data_dir, {{1, 7, "sent before B existed"}});
+    std::this_thread::sleep_for(milliseconds(1000));
+    CHECK(b.start(cb, err));  // B appears late: A keeps resending until B acks
+    std::this_thread::sleep_for(milliseconds(1200));
+    auto got = inbox_payloads(cb.data_dir, 7);
+    CHECK(got.size() == 1 && got[0] == "sent before B existed");  // delivered exactly once despite resends
+    auto loga = a.drain_log();
+    CHECK(count_lines(loga, "never confirmed") == 0);
+    a.stop();
+    b.stop();
+}
+
 int main() {
     const fs::path tmp = fs::temp_directory_path() / "re7mp_test_data";
     fs::remove_all(tmp);
     fs::create_directories(tmp);
     test_packets();
+    test_json_mini();
+    test_message_packets();
     test_locator(tmp);
     test_install(tmp);
     test_bridge(tmp);
+    test_bridge_messages(tmp);
     test_loopback(tmp);
     test_network(tmp);
+    test_stationary_bot(tmp);
+    test_loopback_messages_and_tcp(tmp, Transport::Udp, 28971, "udp");
+    test_loopback_messages_and_tcp(tmp, Transport::TcpHost, 28975, "tcp");
+    test_tcp_network(tmp);
+    test_message_retransmission(tmp);
     fs::remove_all(tmp);
     std::printf(g_failed ? "%d check(s) FAILED\n" : "all checks passed\n", g_failed);
     return g_failed ? 1 : 0;

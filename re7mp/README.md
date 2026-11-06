@@ -1,8 +1,8 @@
 # RE7 multiplayer prototype
 
 One exe (`re7mp.exe`, a small GUI) and one Lua file (`lua/re7mp.lua`, embedded in the exe and
-installed for you). Each player sees the other as a stick-figure skeleton with a name tag,
-facing the direction they are looking.
+installed for you). Each player sees the other as a shaded 3D body with a name tag, facing the direction they
+are looking, and the two games can talk to each other (new-game sync, chat, pings, and soon items).
 
     RE7 + REFramework (re7mp.lua)  <--files in reframework/data-->  re7mp.exe  <--UDP-->  other player's re7mp.exe
 
@@ -18,13 +18,37 @@ facing the direction they are looking.
 ## Use
 
 1. Run `re7mp.exe`. It finds your RE7 folder itself (a running RE7, then your Steam libraries); otherwise use Browse.
-2. Type **your name**. It's sent to the other player and shown above your figure; you can change it while running.
+2. Type **your name**. It's sent to the other player and shown above their view of you; you can change it while running.
 3. Pick a mode:
-   - **Loopback test**: a fake player ("Loopback Bot") orbits you at 3 m, walking and *facing you*. Needs no network.
-   - **Network**: enter the other player's `ip:port` (they enter yours). UDP 27015 must be reachable (LAN, VPN, or port forward).
-4. Click **Start** (it installs/updates the Lua script), start RE7, load a save. Press Insert for the "RE7 Multiplayer" panel.
+   - **Loopback test**: a fake player ("Loopback Bot") appears next to you. Needs no network.
+   - **Network**: enter the other player's `ip:port` (they enter yours).
+4. Pick the **connection**:
+   - **UDP (fast)**: the default. Both sides enter each other's address; UDP port 27015 must be reachable
+     (LAN, VPN, or port forward).
+   - **TCP: I host / TCP: I join**: reliable and ordered, for when UDP sync misbehaves (loss, odd NATs). One player
+     hosts (listens on the port; the address box is optional and, if filled in, only that IP may connect), the other
+     joins the host's `ip:port`. The joiner retries every second and reconnects by itself if the link drops.
+     Position updates arrive a little later than with UDP when the network is lossy (TCP waits to resend), which is
+     the trade-off for never losing data. Both players must pick the same family (both UDP, or one host + one join).
+5. Click **Start** (it installs/updates the Lua script), start RE7, load a save. Press Insert for the "RE7 Multiplayer" panel.
+
+**Loopback bot.** *Orbits you* circles you at 3 m, walking. *Stays put* teleports the bot to where you are and keeps
+it there while you walk around it; it still copies where your camera points, so you can inspect the body from all sides.
+"Move bot to me" parks it at your current spot again. The bot also presses ready 1.5 s after you (to test new-game sync),
+echoes chat messages and answers pings (to test those).
 
 Settings are remembered in `re7mp.ini` next to the exe. After changing `lua\re7mp.lua`, rebuild: the exe carries a copy and re-installs it on Start.
+
+## The other player's body
+
+A shaded 3D body: head with a visor on its front, torso, arms, legs and feet, each a box in world space, projected
+with perspective, back-face culled and sorted far to near. It follows the other player's camera (position, where they
+look including up/down, and a walk cycle driven by their speed). The old line skeleton is still there as a **debug
+skeleton** (checkboxes in the panel).
+
+It is an overlay, so **it draws through walls** (no depth test against the level) and is slightly see-through to
+show that. Fixing that needs a real in-game avatar. Accuracy is limited to what we send: camera position and rotation.
+Crouching, aiming and holding items are not sent yet.
 
 ## Rotation
 
@@ -93,30 +117,76 @@ tools can look for other humanoids that are loaded. A cloned model has no animat
 expect a static pose. Cloning the whole player object would also copy its controllers and camera, so clone a
 mesh object, not the player root. None of this has been run. Send me the scan output and any errors.
 
+## Interactivity: messages, chat, pings, and finding item hooks
+
+**Reliable messages.** Besides the position stream there is now a reliable message channel: the Lua script queues a
+short text message (kind + payload up to 200 bytes), `re7mp.exe` resends it until the other side confirms, the other side
+receives each message exactly once and hands it to its Lua script. This is the pipe item pickups, drops and other events
+will use. Two uses already ride on it:
+
+- **Chat**: Insert > RE7 Multiplayer > Chat and pings > type, Send. Messages show on screen for 12 s.
+- **Ping**: "Ping my position" puts a marker at your position on the other player's screen for 12 s, with your name and distance.
+  (In loopback mode the bot echoes your chat and returns your ping, so you can try it alone.)
+
+**Item sync: where it stands.** From your `app.ItemManager` probe: `createItemInstance`, `createDropItemInstance`,
+`setItemGotFlag`, `applyDifficultyItemNumRate`, `hasItemInInventory` and others exist, but none of them is obviously
+"the player picked this up", and the inventory type (`app.Inventory`) hasn't been probed. So the next step is
+discovery, with the **tracer** (Insert > Find item hooks):
+
+1. Click "Trace app.ItemManager". Then pick up an item, drop one, combine two, open the supply box.
+2. Watch the REFramework console (or the panel): each call that fires is logged with its arguments, e.g.
+   `app.ItemManager.setItemGotFlag("HandGun")`. Calls are rate limited to a few per second per method.
+3. Do the same for `app.Inventory`, `app.Item`, `app.ItemData`: type the name, "Trace that type"
+   (leave "include get_" off unless you need it; it's noisy).
+4. Send me the log of one pickup, one drop and one use.
+
+With that I can hook the pickup, send "player X picked up item Y at position P" over the message channel, and on the
+other side remove or mark the matching item in the world (matched by item id + position, since both games load the
+same level), plus the inventory/give/drop events. Items placed by the difficulty (`applyDifficultyItemNumRate`)
+and "who gets the item" rules (shared vs both get it) need a decision from you.
+
+## Design notes: death and enemies (not built yet)
+
+Things to decide and find out before building:
+
+- **Death.** What should happen when one player dies? Options: (a) shared fate: both get the game over screen;
+  (b) the other player keeps playing and the dead player waits / respawns at the last checkpoint or save;
+  (c) a downed state with revive. We need the hook for "player died / game over" (the earlier probe showed rank and
+  damage methods on `app.GameManager`, e.g. `addRankPointPlDamage`; the player health/damage types are still to be
+  found with the tracer). Death would be a reliable message (kind "death"), applied by the other side per the rule you pick.
+- **Enemies.** RE7's AI is not deterministic, so two games running their own copy of the same enemy will drift apart. The
+  workable design is host-authoritative: one player (the host) runs the AI; the other game shows puppets. For each enemy
+  we'd send a network id (matched by name + spawn position), position, rotation, animation/state and health about
+  10 times a second, and the joiner's game disables that enemy's AI components and applies the received state. Damage
+  the joiner deals is sent to the host as "enemy N took X damage"; the host applies it. The hard parts are scripted
+  events, Jack's/Marguerite's special behaviour, and spawning/despawning in sync. Start with plain enemies in one area.
+  Needed first: how to enumerate enemies (probe `app.EnemyManager` and use the tracer) and which components hold AI,
+  health and animation.
+- **Transport.** Enemy snapshots are state, so they go over the unreliable position-style channel (UDP), while
+  spawn/despawn/damage/death go over the reliable message channel. TCP mode makes everything reliable, at the cost of latency.
+
 ## Layout
 
 - `src/gui_win.cpp`: the GUI (plain Win32), game detection, Lua install
-- `src/engine.*`: networking thread, names, ready-check flags, a generic reliable one-shot event channel (not used by the Lua yet), loopback bot
-- `src/packet.hpp`: wire format v3 (position + rotation + ready flags, name, event, ack) and name sanitising
-- `src/bridge.hpp`: the JSON file bridge to the Lua script
+- `src/engine.*`: networking thread, names, ready-check flags, reliable message channel, one-shot events, loopback bot (orbit / stationary)
+- `src/packet.hpp`: wire format v4 (position + rotation + ready flags, name, event, message, acks) and name sanitising
+- `src/bridge.hpp`, `src/json_mini.hpp`: the JSON file bridge to the Lua script and its small JSON parser
 - `src/game_locator.*`: Steam library parsing, Lua installer
-- `src/transport.hpp`, `src/udp_transport.cpp`: transport interface + UDP (a Steam backend would slot in here)
-- `lua/re7mp.lua`: in-game script (pose sending, smoothing, skeleton drawing, ready check + freeze, RE7 adapter, probe and avatar tools)
+- `src/transport.hpp`, `src/udp_transport.cpp`, `src/tcp_transport.cpp`: transport interface, UDP, and framed TCP with host/join and auto-reconnect (a Steam backend would slot in here)
+- `lua/re7mp.lua`: in-game script (pose sending, smoothing, 3D body + debug skeleton, ready check + block/freeze, RE7 adapter, chat/pings, tracer, probe and avatar tools)
 - `src/cli_main.cpp` (`re7mp_cli`): headless engine; `tests/core_tests.cpp` (`re7mp_tests`); `tools/fake_game.py`, `tools/lobby_sim.py` (ready-check simulation)
 
 ## What has and hasn't been tested
 
-Tested (on Linux): packets and name sanitising, the bridge, Steam folder parsing, Lua install, loopback
-(the bot copying your rotation, plus the full ready check: ready, confirm, go, cancel), two engines over UDP
-exchanging pose, names, renames and ready flags, and the one-shot event channel with retransmission.
+Tested (on Linux): packets and name sanitising, the JSON parser, the bridge, Steam folder parsing, Lua install,
+loopback (orbiting and stationary bot, teleport, rotation copying, the full ready check), UDP and TCP between two
+engines (names, pose, flags, reliable messages both ways, resend and exactly-once delivery when the peer starts late,
+TCP reconnect after the host restarts, the host's address restriction), and chat/ping echo through the bot.
+I also modelled the new-game ready-check state machine in Python (`tools/lobby_sim.py`, 1,000+ scenarios with packet
+loss and lag) and checked the 3D body's face ordering and back-face culling logic in Python.
 
-Not tested: the GUI (only syntax-checked against stand-in headers), and the Lua. I had no Lua interpreter,
-only a bracket-balance and use-before-define check. I did model the ready-check state machine in Python
-(`tools/lobby_sim.py`, 1,000+ scenarios with 0-30% packet loss and 30-150 ms lag: both players start exactly
-once, within 0.6 s of each other, never before both are ready; cancels and mismatches behave). That checks the
-logic, not the Lua. New and unverified in the game itself: the `sdk.hook` calls (including skipping the original
-request), reading the difficulty enum, `newGameRequest()` being enough to start a game, the freeze fallback,
-the scene scanner and the clone call. If the panel shows "UI error", or the
-game doesn't unfreeze, use Cancel (it always releases) and tell me what the console says.
-The skeleton is procedural, driven by camera position and rotation, with no real body model yet.
-Positions are only comparable while both players are in the same loaded area.
+Not tested: the GUI (only syntax-checked against stand-in headers), the Windows socket code (the TCP and UDP code
+has Windows branches that I could only read, not run), and the Lua (no interpreter here: only bracket-balance,
+use-before-define and unknown-function checks). In the game itself, unverified: `draw.filled_quad` (the body falls back
+to outlines if it's missing), the tracer's hooks and argument decoding, the message files through `json.dump_file`,
+chat/ping drawing, and everything under Avatar.

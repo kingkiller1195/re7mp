@@ -20,6 +20,17 @@ enum class Mode {
     Loopback,  // a built-in fake Player 2 (reached over real UDP on 127.0.0.1) orbits you
 };
 
+enum class Transport {
+    Udp,      // symmetric: both sides send to each other (the default)
+    TcpHost,  // reliable: wait for the other player to connect
+    TcpJoin,  // reliable: connect to the other player (who hosts)
+};
+
+enum class BotMode {
+    Orbit,       // the loopback bot circles you
+    Stationary,  // the loopback bot teleports to you, stays put, and keeps copying where your camera points
+};
+
 struct Config {
     std::filesystem::path data_dir;  // <RE7 folder>/reframework/data
     Mode mode = Mode::Loopback;
@@ -27,6 +38,8 @@ struct Config {
     std::string peer_host;         // network mode only
     uint16_t peer_port = 27015;
     std::string name = "Player";  // shown above you on the other player's screen
+    Transport transport = Transport::Udp;
+    BotMode bot_mode = BotMode::Orbit;  // loopback mode only
 };
 
 struct Status {
@@ -40,6 +53,8 @@ struct Status {
     float rx = 0, ry = 0, rz = 0;
     uint64_t sent = 0;
     uint64_t received = 0;
+    uint64_t messages_sent = 0;      // reliable messages queued by the game
+    uint64_t messages_received = 0;  // reliable messages delivered to the game
 };
 
 class Engine {
@@ -57,6 +72,10 @@ public:
     // Changes the name sent to the other player (works while running).
     void set_name(const std::string& name);
 
+    // Loopback bot controls (work while running).
+    void set_bot_mode(BotMode mode);
+    void teleport_bot_here();  // stationary bot: move it to where you are now
+
     Status status() const;
     std::vector<std::string> drain_log();  // returns and clears pending log lines
 
@@ -65,12 +84,14 @@ private:
     void log(const std::string& msg);
 
     Config cfg_;
-    std::unique_ptr<UdpTransport> net_;
-    std::unique_ptr<UdpTransport> fake_;  // loopback mode only: the simulated Player 2
+    std::unique_ptr<ITransport> net_;
+    std::unique_ptr<ITransport> fake_;  // loopback mode only: the simulated Player 2
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> running_{false};
     std::atomic<bool> name_dirty_{true};
+    std::atomic<int> bot_mode_{0};
+    std::atomic<bool> bot_teleport_{false};
     std::string name_;
     mutable std::mutex mu_;
     Status status_;

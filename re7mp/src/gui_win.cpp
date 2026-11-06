@@ -60,6 +60,12 @@ enum : int {
     IDC_ST_PKTS = 1015,
     IDC_LOG = 1016,
     IDC_NAME = 1017,
+    IDC_TR_UDP = 1018,  // IDC_TR_UDP, IDC_TR_HOST, IDC_TR_JOIN must stay consecutive (radio group)
+    IDC_TR_HOST = 1019,
+    IDC_TR_JOIN = 1020,
+    IDC_BOT_ORBIT = 1021,  // IDC_BOT_ORBIT and IDC_BOT_STAT must stay consecutive
+    IDC_BOT_STAT = 1022,
+    IDC_BOT_TELE = 1023,
 };
 
 struct App {
@@ -132,6 +138,16 @@ std::wstring ini_path() { return (exe_dir() / L"re7mp.ini").wstring(); }
 
 bool network_mode_selected() { return IsDlgButtonChecked(g.hwnd, IDC_MODE_NET) == BST_CHECKED; }
 
+Transport selected_transport() {
+    if (IsDlgButtonChecked(g.hwnd, IDC_TR_HOST) == BST_CHECKED) return Transport::TcpHost;
+    if (IsDlgButtonChecked(g.hwnd, IDC_TR_JOIN) == BST_CHECKED) return Transport::TcpJoin;
+    return Transport::Udp;
+}
+
+BotMode selected_bot_mode() {
+    return IsDlgButtonChecked(g.hwnd, IDC_BOT_STAT) == BST_CHECKED ? BotMode::Stationary : BotMode::Orbit;
+}
+
 void save_ini() {
     const std::wstring p = ini_path();
     WritePrivateProfileStringW(L"re7mp", L"game_dir", get_text(g.gamedir).c_str(), p.c_str());
@@ -139,6 +155,11 @@ void save_ini() {
     WritePrivateProfileStringW(L"re7mp", L"listen", get_text(g.port).c_str(), p.c_str());
     WritePrivateProfileStringW(L"re7mp", L"peer", get_text(g.peer).c_str(), p.c_str());
     WritePrivateProfileStringW(L"re7mp", L"name", get_text(g.name).c_str(), p.c_str());
+    const Transport tr = selected_transport();
+    WritePrivateProfileStringW(L"re7mp", L"transport", tr == Transport::TcpHost ? L"tcp-host"
+                                                         : tr == Transport::TcpJoin ? L"tcp-join" : L"udp", p.c_str());
+    WritePrivateProfileStringW(L"re7mp", L"bot", selected_bot_mode() == BotMode::Stationary ? L"stationary" : L"orbit",
+                               p.c_str());
 }
 
 void load_ini() {
@@ -154,6 +175,11 @@ void load_ini() {
     SetWindowTextW(g.name, buf);
     GetPrivateProfileStringW(L"re7mp", L"mode", L"loopback", buf, 1024, p.c_str());
     CheckRadioButton(g.hwnd, IDC_MODE_LOOP, IDC_MODE_NET, lstrcmpiW(buf, L"network") == 0 ? IDC_MODE_NET : IDC_MODE_LOOP);
+    GetPrivateProfileStringW(L"re7mp", L"transport", L"udp", buf, 1024, p.c_str());
+    CheckRadioButton(g.hwnd, IDC_TR_UDP, IDC_TR_JOIN,
+                     lstrcmpiW(buf, L"tcp-host") == 0 ? IDC_TR_HOST : lstrcmpiW(buf, L"tcp-join") == 0 ? IDC_TR_JOIN : IDC_TR_UDP);
+    GetPrivateProfileStringW(L"re7mp", L"bot", L"orbit", buf, 1024, p.c_str());
+    CheckRadioButton(g.hwnd, IDC_BOT_ORBIT, IDC_BOT_STAT, lstrcmpiW(buf, L"stationary") == 0 ? IDC_BOT_STAT : IDC_BOT_ORBIT);
 }
 
 // ---------------------------------------------------------------- finding the game
@@ -262,16 +288,25 @@ bool install_script(const fs::path& game) {
 
 void update_enabled() {
     const bool net = network_mode_selected();
+    const Transport tr = selected_transport();
     const BOOL idle = g.ui_running ? FALSE : TRUE;
     EnableWindow(g.gamedir, idle);
     EnableWindow(GetDlgItem(g.hwnd, IDC_BROWSE), idle);
     EnableWindow(GetDlgItem(g.hwnd, IDC_DETECT), idle);
     EnableWindow(GetDlgItem(g.hwnd, IDC_MODE_LOOP), idle);
     EnableWindow(GetDlgItem(g.hwnd, IDC_MODE_NET), idle);
+    EnableWindow(GetDlgItem(g.hwnd, IDC_TR_UDP), idle);
+    EnableWindow(GetDlgItem(g.hwnd, IDC_TR_HOST), idle);
+    EnableWindow(GetDlgItem(g.hwnd, IDC_TR_JOIN), idle);
     EnableWindow(GetDlgItem(g.hwnd, IDC_INSTALL), idle);
     EnableWindow(g.port, idle);
     EnableWindow(g.peer, idle && net);
     EnableWindow(g.lbl_peer, idle && net);
+    SetWindowTextW(g.lbl_peer, tr == Transport::TcpHost ? L"Only allow (ip, optional):" : L"Other player (ip:port):");
+    // The loopback bot can be changed while it runs.
+    EnableWindow(GetDlgItem(g.hwnd, IDC_BOT_ORBIT), !net);
+    EnableWindow(GetDlgItem(g.hwnd, IDC_BOT_STAT), !net);
+    EnableWindow(GetDlgItem(g.hwnd, IDC_BOT_TELE), !net && g.ui_running);
     SetWindowTextW(g.start, g.ui_running ? L"Stop" : L"Start");
 }
 
@@ -299,7 +334,7 @@ void do_start() {
     }
     const long port = std::wcstol(get_text(g.port).c_str(), nullptr, 10);
     if (port < 1 || port > 65534) {
-        MessageBoxW(g.hwnd, L"The UDP port must be between 1 and 65534.", L"RE7 Multiplayer", MB_ICONINFORMATION);
+        MessageBoxW(g.hwnd, L"The port must be between 1 and 65534.", L"RE7 Multiplayer", MB_ICONINFORMATION);
         return;
     }
     Config cfg;
@@ -307,10 +342,16 @@ void do_start() {
     cfg.listen_port = static_cast<uint16_t>(port);
     cfg.mode = network_mode_selected() ? Mode::Network : Mode::Loopback;
     cfg.name = narrow(get_text(g.name));
-    if (cfg.mode == Mode::Network && !parse_peer(get_text(g.peer), cfg)) {
-        MessageBoxW(g.hwnd, L"Enter the other player's address as ip:port, for example 203.0.113.5:27015.",
-                    L"RE7 Multiplayer", MB_ICONINFORMATION);
-        return;
+    cfg.transport = selected_transport();
+    cfg.bot_mode = selected_bot_mode();
+    if (cfg.mode == Mode::Network) {
+        const std::wstring peer_text = get_text(g.peer);
+        const bool peer_optional = cfg.transport == Transport::TcpHost;  // a host may accept anyone
+        if (!(peer_optional && peer_text.empty()) && !parse_peer(peer_text, cfg)) {
+            MessageBoxW(g.hwnd, L"Enter the other player's address as ip:port, for example 203.0.113.5:27015.",
+                        L"RE7 Multiplayer", MB_ICONINFORMATION);
+            return;
+        }
     }
 
     install_script(game);
@@ -363,8 +404,9 @@ void refresh_status() {
         swprintf_s(buf, L"%.2f, %.2f, %.2f", st.rx, st.ry, st.rz);
         remote = buf;
     }
-    swprintf_s(buf, L"Sent %llu   Received %llu", static_cast<unsigned long long>(st.sent),
-               static_cast<unsigned long long>(st.received));
+    swprintf_s(buf, L"Sent %llu   Received %llu     Messages: %llu out, %llu in", static_cast<unsigned long long>(st.sent),
+               static_cast<unsigned long long>(st.received), static_cast<unsigned long long>(st.messages_sent),
+               static_cast<unsigned long long>(st.messages_received));
     set_status(0, g.st_hook, hook);
     set_status(1, g.st_peer, peer);
     set_status(2, g.st_local, local);
@@ -392,36 +434,46 @@ void create_controls() {
     make(L"BUTTON", L"Detect", BS_PUSHBUTTON | tab, 0, 486, 11, 82, 26, IDC_DETECT);
 
     make(L"STATIC", L"Mode:", 0, 0, 12, 52, 80, 20, -1);
-    make(L"BUTTON", L"Loopback test (fake player orbits you)", BS_AUTORADIOBUTTON | WS_GROUP | tab, 0, 96, 50, 270, 22,
+    make(L"BUTTON", L"Loopback test (fake player)", BS_AUTORADIOBUTTON | WS_GROUP | tab, 0, 96, 50, 220, 22,
          IDC_MODE_LOOP);
-    make(L"BUTTON", L"Network (real peer)", BS_AUTORADIOBUTTON, 0, 380, 50, 188, 22, IDC_MODE_NET);
+    make(L"BUTTON", L"Network (real peer)", BS_AUTORADIOBUTTON, 0, 330, 50, 238, 22, IDC_MODE_NET);
 
-    make(L"STATIC", L"Listen UDP port:", 0, 0, 12, 86, 84, 20, -1);
-    g.port = make(L"EDIT", L"27015", ES_AUTOHSCROLL | ES_NUMBER | tab, WS_EX_CLIENTEDGE, 96, 82, 70, 24, IDC_PORT);
-    g.lbl_peer = make(L"STATIC", L"Other player (ip:port):", 0, 0, 190, 86, 140, 20, IDC_LBL_PEER);
-    g.peer = make(L"EDIT", L"", ES_AUTOHSCROLL | tab, WS_EX_CLIENTEDGE, 334, 82, 234, 24, IDC_PEER);
+    make(L"STATIC", L"Connection:", 0, 0, 12, 84, 80, 20, -1);
+    make(L"BUTTON", L"UDP (fast)", BS_AUTORADIOBUTTON | WS_GROUP | tab, 0, 96, 82, 100, 22, IDC_TR_UDP);
+    make(L"BUTTON", L"TCP: I host", BS_AUTORADIOBUTTON, 0, 206, 82, 120, 22, IDC_TR_HOST);
+    make(L"BUTTON", L"TCP: I join", BS_AUTORADIOBUTTON, 0, 336, 82, 120, 22, IDC_TR_JOIN);
 
-    make(L"STATIC", L"Your name:", 0, 0, 12, 120, 80, 20, -1);
-    g.name = make(L"EDIT", L"Player", ES_AUTOHSCROLL | tab, WS_EX_CLIENTEDGE, 96, 116, 200, 24, IDC_NAME);
+    make(L"STATIC", L"Port:", 0, 0, 12, 118, 84, 20, -1);
+    g.port = make(L"EDIT", L"27015", ES_AUTOHSCROLL | ES_NUMBER | tab, WS_EX_CLIENTEDGE, 96, 114, 70, 24, IDC_PORT);
+    g.lbl_peer = make(L"STATIC", L"Other player (ip:port):", 0, 0, 176, 118, 156, 20, IDC_LBL_PEER);
+    g.peer = make(L"EDIT", L"", ES_AUTOHSCROLL | tab, WS_EX_CLIENTEDGE, 334, 114, 234, 24, IDC_PEER);
+
+    make(L"STATIC", L"Your name:", 0, 0, 12, 152, 80, 20, -1);
+    g.name = make(L"EDIT", L"Player", ES_AUTOHSCROLL | tab, WS_EX_CLIENTEDGE, 96, 148, 200, 24, IDC_NAME);
     SendMessageW(g.name, EM_SETLIMITTEXT, 24, 0);
-    make(L"STATIC", L"(shown above you on the other player's screen)", 0, 0, 304, 120, 264, 20, -1);
+    make(L"STATIC", L"(shown above you on the other player's screen)", 0, 0, 304, 152, 264, 20, -1);
 
-    g.start = make(L"BUTTON", L"Start", BS_DEFPUSHBUTTON | tab, 0, 12, 152, 120, 32, IDC_START);
-    make(L"BUTTON", L"Install Lua script", BS_PUSHBUTTON | tab, 0, 140, 152, 150, 32, IDC_INSTALL);
+    make(L"STATIC", L"Loopback bot:", 0, 0, 12, 186, 84, 20, -1);
+    make(L"BUTTON", L"Orbits you", BS_AUTORADIOBUTTON | WS_GROUP | tab, 0, 96, 184, 100, 22, IDC_BOT_ORBIT);
+    make(L"BUTTON", L"Stays put", BS_AUTORADIOBUTTON, 0, 206, 184, 100, 22, IDC_BOT_STAT);
+    make(L"BUTTON", L"Move bot to me", BS_PUSHBUTTON | tab, 0, 316, 182, 140, 26, IDC_BOT_TELE);
 
-    make(L"STATIC", L"Game hook:", 0, 0, 12, 200, 90, 20, -1);
-    g.st_hook = make(L"STATIC", L"Not running", 0, 0, 110, 200, 458, 20, IDC_ST_HOOK);
-    make(L"STATIC", L"Other player:", 0, 0, 12, 224, 90, 20, -1);
-    g.st_peer = make(L"STATIC", L"-", 0, 0, 110, 224, 458, 20, IDC_ST_PEER);
-    make(L"STATIC", L"Your position:", 0, 0, 12, 248, 90, 20, -1);
-    g.st_local = make(L"STATIC", L"-", 0, 0, 110, 248, 458, 20, IDC_ST_LOCAL);
-    make(L"STATIC", L"Their position:", 0, 0, 12, 272, 90, 20, -1);
-    g.st_remote = make(L"STATIC", L"-", 0, 0, 110, 272, 458, 20, IDC_ST_REMOTE);
-    make(L"STATIC", L"Packets:", 0, 0, 12, 296, 90, 20, -1);
-    g.st_pkts = make(L"STATIC", L"-", 0, 0, 110, 296, 458, 20, IDC_ST_PKTS);
+    g.start = make(L"BUTTON", L"Start", BS_DEFPUSHBUTTON | tab, 0, 12, 222, 120, 32, IDC_START);
+    make(L"BUTTON", L"Install Lua script", BS_PUSHBUTTON | tab, 0, 140, 222, 150, 32, IDC_INSTALL);
 
-    g.log = make(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, WS_EX_CLIENTEDGE, 12, 330, 556,
-                 232, IDC_LOG);
+    make(L"STATIC", L"Game hook:", 0, 0, 12, 270, 90, 20, -1);
+    g.st_hook = make(L"STATIC", L"Not running", 0, 0, 110, 270, 458, 20, IDC_ST_HOOK);
+    make(L"STATIC", L"Other player:", 0, 0, 12, 294, 90, 20, -1);
+    g.st_peer = make(L"STATIC", L"-", 0, 0, 110, 294, 458, 20, IDC_ST_PEER);
+    make(L"STATIC", L"Your position:", 0, 0, 12, 318, 90, 20, -1);
+    g.st_local = make(L"STATIC", L"-", 0, 0, 110, 318, 458, 20, IDC_ST_LOCAL);
+    make(L"STATIC", L"Their position:", 0, 0, 12, 342, 90, 20, -1);
+    g.st_remote = make(L"STATIC", L"-", 0, 0, 110, 342, 458, 20, IDC_ST_REMOTE);
+    make(L"STATIC", L"Packets:", 0, 0, 12, 366, 90, 20, -1);
+    g.st_pkts = make(L"STATIC", L"-", 0, 0, 110, 366, 458, 20, IDC_ST_PKTS);
+
+    g.log = make(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, WS_EX_CLIENTEDGE, 12, 400, 556,
+                 200, IDC_LOG);
     SendMessageW(g.log, EM_SETLIMITTEXT, 200000, 0);
 
     EnumChildWindows(g.hwnd, set_font_proc, 0);
@@ -452,7 +504,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_BROWSE: browse_game(); break;
                 case IDC_DETECT: detect_game(false); break;
                 case IDC_MODE_LOOP:
-                case IDC_MODE_NET: update_enabled(); break;
+                case IDC_MODE_NET:
+                case IDC_TR_UDP:
+                case IDC_TR_HOST:
+                case IDC_TR_JOIN: update_enabled(); break;
+                case IDC_BOT_ORBIT:
+                case IDC_BOT_STAT:
+                    if (g.ui_running) g.engine.set_bot_mode(selected_bot_mode());
+                    break;
+                case IDC_BOT_TELE:
+                    if (g.ui_running) g.engine.teleport_bot_here();
+                    break;
                 case IDC_NAME:
                     if (HIWORD(wp) == EN_CHANGE && g.ui_running) g.engine.set_name(narrow(get_text(g.name)));
                     break;
@@ -513,7 +575,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int show) {
     RegisterClassExW(&wc);
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT r{0, 0, S(580), S(574)};
+    RECT r{0, 0, S(580), S(612)};
     AdjustWindowRectEx(&r, style, FALSE, 0);
     HWND hwnd = CreateWindowExW(0, L"RE7MPWindow", L"RE7 Multiplayer", style, CW_USEDEFAULT, CW_USEDEFAULT,
                                 r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);

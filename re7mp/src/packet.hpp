@@ -4,6 +4,8 @@
 //   Name      45 bytes  display name, repeated every couple of seconds (UDP can drop it)
 //   Event     20 bytes  reliable-ish game event (new game + difficulty); resent until acked
 //   EventAck  16 bytes
+//   Message   20 bytes + payload (<= 200): reliable app messages (chat, pings, item events...); resent until acked
+//   MessageAck 16 bytes
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +15,8 @@
 namespace re7mp {
 
 constexpr uint32_t kMagic = 0x4D374552;  // bytes on the wire: 'R' 'E' '7' 'M'
-constexpr uint8_t kProtocolVersion = 3;
+constexpr uint8_t kProtocolVersion = 4;
+constexpr size_t kMaxPayloadBytes = 200;
 constexpr size_t kMaxNameBytes = 32;
 
 // Ready-check state carried in every Position packet (state, not events, so a lost packet
@@ -30,6 +33,8 @@ enum class PacketType : uint8_t {
     Name = 2,
     Event = 3,
     EventAck = 4,
+    Message = 5,
+    MessageAck = 6,
 };
 
 enum class EventType : uint8_t {
@@ -67,8 +72,15 @@ struct AckPacket {
     Header h;
     uint32_t id;
 };
+struct MessageFixed {  // followed on the wire by `len` payload bytes
+    Header h;
+    uint32_t id;
+    uint16_t kind;
+    uint16_t len;
+};
 #pragma pack(pop)
 
+static_assert(sizeof(MessageFixed) == 20, "MessageFixed layout changed");
 static_assert(sizeof(Header) == 12, "Header layout changed");
 static_assert(sizeof(PositionPacket) == 46, "PositionPacket layout changed");
 static_assert(sizeof(NamePacket) == 45, "NamePacket layout changed");
@@ -207,6 +219,58 @@ inline AckPacket make_ack(uint32_t session, uint32_t id) {
 }
 inline bool decode_ack(const void* data, size_t len, AckPacket& out) {
     if (len != sizeof(AckPacket) || peek_type(data, len) != static_cast<int>(PacketType::EventAck)) return false;
+    std::memcpy(&out, data, sizeof(out));
+    return true;
+}
+
+// ---- messages ------------------------------------------------------------------------------
+
+// Payloads are short text (UTF-8, no control characters), so they can be passed through JSON files safely.
+inline bool valid_payload(const std::string& p) {
+    if (p.size() > kMaxPayloadBytes) return false;
+    for (char ch : p) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x20 || c == 0x7F) return false;
+    }
+    return valid_utf8(p);
+}
+
+// Writes the packet into `out` (must hold sizeof(MessageFixed) + kMaxPayloadBytes). Returns its size, or 0 if
+// the payload is not valid.
+inline size_t encode_message(uint8_t* out, uint32_t session, uint32_t id, uint16_t kind, const std::string& payload) {
+    if (!valid_payload(payload)) return 0;
+    MessageFixed m{};
+    m.h = make_header(PacketType::Message, session);
+    m.id = id;
+    m.kind = kind;
+    m.len = static_cast<uint16_t>(payload.size());
+    std::memcpy(out, &m, sizeof(m));
+    std::memcpy(out + sizeof(m), payload.data(), payload.size());
+    return sizeof(m) + payload.size();
+}
+
+inline bool decode_message(const void* data, size_t len, uint32_t& session, uint32_t& id, uint16_t& kind,
+                           std::string& payload) {
+    if (len < sizeof(MessageFixed) || peek_type(data, len) != static_cast<int>(PacketType::Message)) return false;
+    MessageFixed m;
+    std::memcpy(&m, data, sizeof(m));
+    if (m.len > kMaxPayloadBytes || len != sizeof(m) + m.len) return false;
+    payload.assign(static_cast<const char*>(data) + sizeof(m), m.len);
+    if (!valid_payload(payload)) return false;
+    session = m.h.session;
+    id = m.id;
+    kind = m.kind;
+    return true;
+}
+
+inline AckPacket make_message_ack(uint32_t session, uint32_t id) {
+    AckPacket p{};
+    p.h = make_header(PacketType::MessageAck, session);
+    p.id = id;
+    return p;
+}
+inline bool decode_message_ack(const void* data, size_t len, AckPacket& out) {
+    if (len != sizeof(AckPacket) || peek_type(data, len) != static_cast<int>(PacketType::MessageAck)) return false;
     std::memcpy(&out, data, sizeof(out));
     return true;
 }

@@ -6,9 +6,12 @@
 //   re7mp_in.json       engine -> Lua   remote pose+name  {seq,x,y,z,qx,qy,qz,qw,flags,recv_count,name}
 //   re7mp_evt_out.json  Lua -> engine   event to send     {id,type,arg}
 //   re7mp_evt_in.json   engine -> Lua   event received    {session,id,type,arg}
+//   re7mp_msg_out.json  Lua -> engine   messages to send   {msgs:[{id,k,p}, ...]}   (ring of the last ~32)
+//   re7mp_msg_in.json   engine -> Lua   messages received  {epoch,msgs:[{n,id,k,p}, ...]}  (ring of the last ~64)
 //
 // The Lua side writes in place (the reader tolerates half-written files); the engine side
 // writes a temp file and renames it so Lua never sees a partial file.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -17,6 +20,10 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <vector>
+
+#include "json_mini.hpp"
+#include "packet.hpp"
 
 namespace re7mp {
 
@@ -40,18 +47,33 @@ struct LocalEvent {
     uint8_t arg = 0;
 };
 
+struct LocalMessage {  // Lua -> engine
+    uint64_t lua_id = 0;
+    uint16_t kind = 0;
+    std::string payload;
+};
+
+struct InMessage {  // engine -> Lua
+    uint64_t n = 0;  // delivery number in this engine run; Lua processes each n once
+    uint32_t id = 0;
+    uint16_t kind = 0;
+    std::string payload;
+};
+
 class FileBridge {
 public:
     explicit FileBridge(std::filesystem::path data_dir)
         : dir_(std::move(data_dir)),
           pose_out_{dir_ / "re7mp_out.json"},
-          evt_out_{dir_ / "re7mp_evt_out.json"} {}
+          evt_out_{dir_ / "re7mp_evt_out.json"},
+          msg_out_{dir_ / "re7mp_msg_out.json"} {}
 
     // Deletes leftovers from a previous run so stale positions/events aren't replayed.
     void clear_stale() {
         std::error_code ec;
         for (const char* f : {"re7mp_out.json", "re7mp_in.json", "re7mp_evt_out.json", "re7mp_evt_in.json",
-                              "re7mp_in.tmp", "re7mp_evt_in.tmp"}) {
+                              "re7mp_in.tmp", "re7mp_evt_in.tmp", "re7mp_msg_out.json", "re7mp_msg_in.json",
+                              "re7mp_msg_in.tmp"}) {
             std::filesystem::remove(dir_ / f, ec);
         }
     }
@@ -108,6 +130,50 @@ public:
         out.type = static_cast<uint8_t>(type);
         out.arg = static_cast<uint8_t>(arg);
         return true;
+    }
+
+    // Messages the game wants to send, oldest first. Returns true if there are new ones.
+    bool poll_messages(std::vector<LocalMessage>& out) {
+        out.clear();
+        std::string text;
+        if (!read_changed(msg_out_, text)) return false;
+        mini::Value root;
+        if (!mini::parse(text, root) || root.type != mini::Value::Type::Obj) return false;  // half-written: retry
+        accept(msg_out_);
+        const mini::Value* msgs = root.get("msgs");
+        if (!msgs || msgs->type != mini::Value::Type::Arr) return false;
+        uint64_t max_id = last_msg_id_;
+        for (const auto& m : msgs->arr) {
+            if (m.type != mini::Value::Type::Obj) continue;
+            const mini::Value* id = m.get("id");
+            const mini::Value* k = m.get("k");
+            const mini::Value* p = m.get("p");
+            if (!id || id->type != mini::Value::Type::Num || id->num < 1) continue;
+            const auto uid = static_cast<uint64_t>(id->num);
+            if (uid <= last_msg_id_) continue;  // already handled
+            if (uid > max_id) max_id = uid;
+            if (!k || k->type != mini::Value::Type::Num || k->num < 0 || k->num > 65535) continue;
+            if (!p || p->type != mini::Value::Type::Str || !valid_payload(p->str)) continue;
+            LocalMessage lm;
+            lm.lua_id = uid;
+            lm.kind = static_cast<uint16_t>(k->num);
+            lm.payload = p->str;
+            out.push_back(std::move(lm));
+        }
+        last_msg_id_ = max_id;
+        std::sort(out.begin(), out.end(), [](const LocalMessage& a, const LocalMessage& b) { return a.lua_id < b.lua_id; });
+        return !out.empty();
+    }
+
+    bool publish_messages(uint32_t epoch, const std::vector<InMessage>& msgs) {
+        std::string s = "{\"epoch\":" + std::to_string(epoch) + ",\"msgs\":[";
+        for (size_t i = 0; i < msgs.size(); ++i) {
+            if (i) s += ",";
+            s += "{\"n\":" + std::to_string(msgs[i].n) + ",\"id\":" + std::to_string(msgs[i].id) +
+                 ",\"k\":" + std::to_string(msgs[i].kind) + ",\"p\":\"" + json_escape(msgs[i].payload) + "\"}";
+        }
+        s += "]}\n";
+        return write_atomic("re7mp_msg_in.tmp", "re7mp_msg_in.json", s.c_str());
     }
 
     bool publish_remote(const RemotePose& p, uint64_t recv_count, const std::string& name) {
@@ -194,10 +260,11 @@ private:
     }
 
     std::filesystem::path dir_;
-    Watch pose_out_, evt_out_;
+    Watch pose_out_, evt_out_, msg_out_;
     bool have_pose_seq_ = false, have_evt_id_ = false;
     uint32_t last_pose_seq_ = 0;
     uint64_t last_evt_id_ = 0;
+    uint64_t last_msg_id_ = 0;
 };
 
 }  // namespace re7mp

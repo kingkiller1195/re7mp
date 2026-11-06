@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(re7mp_core STATIC
   src/engine.cpp
   src/udp_transport.cpp
+  src/tcp_transport.cpp
   src/game_locator.cpp)
 target_include_directories(re7mp_core PUBLIC src)
 find_package(Threads REQUIRED)

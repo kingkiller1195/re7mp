@@ -3,7 +3,9 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <deque>
 #include <random>
+#include <set>
 
 #include "bridge.hpp"
 #include "packet.hpp"
@@ -11,10 +13,12 @@
 namespace re7mp {
 
 namespace {
-constexpr float kOrbitRadius = 3.0f;  // metres: the loopback Player 2 circles you at this distance
+constexpr float kOrbitRadius = 3.0f;  // metres: the loopback bot circles you at this distance
 constexpr float kOrbitSpeed = 0.8f;   // radians per second
 constexpr const char* kLoopbackName = "Loopback Bot";
 constexpr int kBotReadyDelayMs = 1500;  // how long the loopback bot takes to "press ready" after you
+constexpr size_t kMaxPendingMessages = 64;
+constexpr size_t kInboxSize = 64;
 using Clock = std::chrono::steady_clock;
 using std::chrono::milliseconds;
 using std::chrono::seconds;
@@ -34,6 +38,19 @@ struct PendingEvent {
     uint8_t type = 0, arg = 0;
     Clock::time_point first, last;
 };
+
+struct PendingMessage {
+    uint32_t id = 0;
+    uint16_t kind = 0;
+    std::string payload;
+    Clock::time_point first, last;
+};
+
+bool send_message_packet(ITransport& t, uint32_t session, uint32_t id, uint16_t kind, const std::string& payload) {
+    uint8_t buf[sizeof(MessageFixed) + kMaxPayloadBytes];
+    const size_t n = encode_message(buf, session, id, kind, payload);
+    return n > 0 && t.send(buf, n);
+}
 }  // namespace
 
 Engine::~Engine() { stop(); }
@@ -44,6 +61,13 @@ void Engine::set_name(const std::string& name) {
     name_ = clean;
     name_dirty_ = true;
 }
+
+void Engine::set_bot_mode(BotMode mode) {
+    bot_mode_ = static_cast<int>(mode);
+    if (mode == BotMode::Stationary) bot_teleport_ = true;
+}
+
+void Engine::teleport_bot_here() { bot_teleport_ = true; }
 
 bool Engine::start(const Config& cfg, std::string& err) {
     stop();
@@ -62,20 +86,43 @@ bool Engine::start(const Config& cfg, std::string& err) {
             return false;
         }
         const auto fake_port = static_cast<uint16_t>(cfg_.listen_port + 1);
-        net_ = UdpTransport::create(cfg_.listen_port, "127.0.0.1", fake_port, err);
-        if (!net_) return false;
-        fake_ = UdpTransport::create(fake_port, "127.0.0.1", cfg_.listen_port, err);
-        if (!fake_) {
-            net_.reset();
-            return false;
+        if (cfg_.transport == Transport::Udp) {
+            auto a = UdpTransport::create(cfg_.listen_port, "127.0.0.1", fake_port, err);
+            if (!a) return false;
+            auto b = UdpTransport::create(fake_port, "127.0.0.1", cfg_.listen_port, err);
+            if (!b) return false;
+            net_ = std::move(a);
+            fake_ = std::move(b);
+        } else {  // the bot hosts, we join, both over 127.0.0.1
+            auto b = TcpTransport::create(TcpTransport::Role::Host, fake_port, "127.0.0.1", 0, err);
+            if (!b) return false;
+            auto a = TcpTransport::create(TcpTransport::Role::Join, 0, "127.0.0.1", fake_port, err);
+            if (!a) return false;
+            net_ = std::move(a);
+            fake_ = std::move(b);
         }
     } else {
-        if (cfg_.peer_host.empty()) {
-            err = "enter the other player's address (ip:port)";
-            return false;
+        if (cfg_.transport == Transport::Udp) {
+            if (cfg_.peer_host.empty()) {
+                err = "enter the other player's address (ip:port)";
+                return false;
+            }
+            auto a = UdpTransport::create(cfg_.listen_port, cfg_.peer_host, cfg_.peer_port, err);
+            if (!a) return false;
+            net_ = std::move(a);
+        } else if (cfg_.transport == Transport::TcpHost) {
+            auto a = TcpTransport::create(TcpTransport::Role::Host, cfg_.listen_port, cfg_.peer_host, cfg_.peer_port, err);
+            if (!a) return false;
+            net_ = std::move(a);
+        } else {
+            if (cfg_.peer_host.empty()) {
+                err = "enter the host's address (ip:port)";
+                return false;
+            }
+            auto a = TcpTransport::create(TcpTransport::Role::Join, 0, cfg_.peer_host, cfg_.peer_port, err);
+            if (!a) return false;
+            net_ = std::move(a);
         }
-        net_ = UdpTransport::create(cfg_.listen_port, cfg_.peer_host, cfg_.peer_port, err);
-        if (!net_) return false;
     }
 
     FileBridge(cfg_.data_dir).clear_stale();
@@ -87,6 +134,8 @@ bool Engine::start(const Config& cfg, std::string& err) {
         name_ = sanitize_name(cfg_.name);
         name_dirty_ = true;
     }
+    bot_mode_ = static_cast<int>(cfg_.bot_mode);
+    bot_teleport_ = cfg_.bot_mode == BotMode::Stationary;
     stop_ = false;
     running_ = true;
     thread_ = std::thread(&Engine::run, this);
@@ -135,7 +184,7 @@ void Engine::run() {
     std::random_device rd;
     const uint32_t session = rd();
     const uint32_t fake_session = rd();
-    uint32_t send_seq = 0, fake_seq = 0, event_seq = 0;
+    uint32_t send_seq = 0, fake_seq = 0, event_seq = 0, msg_seq = 0, fake_msg_id = 0;
 
     Status st;
     st.running = true;
@@ -145,19 +194,35 @@ void Engine::run() {
     bool have_event = false;
     uint32_t event_session = 0, event_id = 0;
     PendingEvent pending;
+    std::deque<PendingMessage> pending_msgs;
+    std::set<uint32_t> seen_msg_ids;
+    std::deque<uint32_t> seen_msg_order;
+    uint32_t seen_msg_session = 0;
+    bool have_msg_session = false;
+    std::deque<InMessage> inbox;
+    uint64_t inbox_n = 0;
+    bool inbox_dirty = false;
     bool hooked = false, peer_active = false;
     uint16_t local_flags = 0, remote_flags = 0;
-    // loopback bot's ready-check state
+    // loopback bot state
     bool bot_seen_ready = false, bot_ready = false, bot_go = false;
+    bool bot_anchor_valid = false;
+    float bot_ax = 0, bot_ay = 0, bot_az = 0;
     Clock::time_point bot_ready_since{};
     Clock::time_point last_local{}, last_remote{}, last_name_sent{}, fake_last_name{};
     const auto t0 = Clock::now();
 
+    const char* transport_name = cfg_.transport == Transport::Udp ? "UDP" : "TCP";
     if (cfg_.mode == Mode::Loopback) {
-        log("Started in loopback mode: a fake Player 2 will orbit you once the game is running.");
-    } else {
+        log(std::string("Started in loopback mode over ") + transport_name +
+            ": a fake player will appear once the game is running.");
+    } else if (cfg_.transport == Transport::Udp) {
         log("Started: listening on UDP " + std::to_string(cfg_.listen_port) + ", peer " + cfg_.peer_host + ":" +
             std::to_string(cfg_.peer_port));
+    } else if (cfg_.transport == Transport::TcpHost) {
+        log("Started: hosting on TCP " + std::to_string(cfg_.listen_port) + ", waiting for the other player.");
+    } else {
+        log("Started: connecting over TCP to " + cfg_.peer_host + ":" + std::to_string(cfg_.peer_port));
     }
 
     while (!stop_) {
@@ -187,7 +252,7 @@ void Engine::run() {
             local_flags = lp.flags;
         }
 
-        // 1b. Event from the Lua script (e.g. "I started a new game on Madhouse") -> peer, resent until acked.
+        // 1b. One-shot event from the Lua script -> peer, resent until acked.
         LocalEvent le;
         if (bridge.poll_event(le)) {
             pending.active = true;
@@ -214,7 +279,38 @@ void Engine::run() {
             }
         }
 
-        // 1c. Our name, repeated because UDP can drop it. Faster until we've heard theirs.
+        // 1c. Reliable messages (chat, pings, item events...) from the Lua script -> peer, resent until acked.
+        std::vector<LocalMessage> lms;
+        if (bridge.poll_messages(lms)) {
+            for (auto& lm : lms) {
+                if (pending_msgs.size() >= kMaxPendingMessages) {
+                    log("Too many unconfirmed messages: dropping the oldest.");
+                    pending_msgs.pop_front();
+                }
+                PendingMessage pm;
+                pm.id = ++msg_seq;
+                pm.kind = lm.kind;
+                pm.payload = std::move(lm.payload);
+                pm.first = pm.last = now;
+                send_message_packet(*net_, session, pm.id, pm.kind, pm.payload);
+                pending_msgs.push_back(std::move(pm));
+                ++st.messages_sent;
+            }
+        }
+        for (auto it = pending_msgs.begin(); it != pending_msgs.end();) {
+            if (now - it->first > seconds(15)) {
+                log("A message (kind " + std::to_string(it->kind) + ") was never confirmed by the other player.");
+                it = pending_msgs.erase(it);
+            } else {
+                if (now - it->last >= milliseconds(250)) {
+                    it->last = now;
+                    send_message_packet(*net_, session, it->id, it->kind, it->payload);
+                }
+                ++it;
+            }
+        }
+
+        // 1d. Our name, repeated because UDP can drop it. Faster until we've heard theirs.
         const auto name_every = st.remote_name.empty() ? milliseconds(250) : milliseconds(2000);
         if (name_dirty_.exchange(false) || now - last_name_sent >= name_every) {
             last_name_sent = now;
@@ -231,7 +327,7 @@ void Engine::run() {
 
         uint8_t buf[512];
 
-        // 2. Loopback only: the fake Player 2 answers with a pose orbiting yours, facing you.
+        // 2. Loopback only: the fake player answers with a pose, plays the ready check, acks and echoes messages.
         if (fake_) {
             const float t = std::chrono::duration<float>(now - t0).count();
             if (now - fake_last_name >= seconds(2)) {
@@ -239,14 +335,35 @@ void Engine::run() {
                 const auto np = make_name(fake_session, kLoopbackName);
                 fake_->send(&np, sizeof(np));
             }
+            std::string unused;
+            while (fake_->take_status(unused)) {}
+            const auto mode = static_cast<BotMode>(bot_mode_.load());
             for (int i = 0; i < 16; ++i) {
                 const int n = fake_->recv(buf, sizeof(buf), 0);
                 if (n <= 0) break;
                 PositionPacket in;
                 EventPacket ev;
+                uint32_t m_session = 0, m_id = 0;
+                uint16_t m_kind = 0;
+                std::string m_payload;
                 if (decode_position(buf, static_cast<size_t>(n), in)) {
-                    const float ox = kOrbitRadius * std::cos(kOrbitSpeed * t);
-                    const float oz = kOrbitRadius * std::sin(kOrbitSpeed * t);
+                    // Where the bot stands: circling you, or parked where you were when it was told to teleport.
+                    if (bot_teleport_.exchange(false) || (mode == BotMode::Stationary && !bot_anchor_valid)) {
+                        bot_ax = in.x;
+                        bot_ay = in.y;
+                        bot_az = in.z;
+                        bot_anchor_valid = true;
+                    }
+                    float bx, by, bz;
+                    if (mode == BotMode::Stationary) {
+                        bx = bot_ax;
+                        by = bot_ay;
+                        bz = bot_az;
+                    } else {
+                        bx = in.x + kOrbitRadius * std::cos(kOrbitSpeed * t);
+                        by = in.y;
+                        bz = in.z + kOrbitRadius * std::sin(kOrbitSpeed * t);
+                    }
 
                     // The bot "presses ready" a moment after you do, copies your difficulty, and goes once
                     // you can see it is ready. Lets the whole ready check be tested alone.
@@ -261,20 +378,37 @@ void Engine::run() {
                     if (you_ready) bflags |= kFlagSeesReady;
                     if (bot_go) bflags |= kFlagGo;
 
-                    // It copies YOUR rotation. That avoids guessing the game's axis conventions: its
-                    // look-line should point the same way you are looking.
-                    const auto out = make_position(fake_session, ++fake_seq, in.x + ox, in.y, in.z + oz, in.qx, in.qy,
-                                                   in.qz, in.qw, bflags);
+                    // It copies YOUR rotation, so it doesn't depend on any axis guess: its look-line
+                    // should point the same way you are looking.
+                    const auto out = make_position(fake_session, ++fake_seq, bx, by, bz, in.qx, in.qy, in.qz, in.qw,
+                                                   bflags);
                     fake_->send(&out, sizeof(out));
                 } else if (decode_event(buf, static_cast<size_t>(n), ev)) {
                     const auto ack = make_ack(fake_session, ev.id);
                     fake_->send(&ack, sizeof(ack));
+                } else if (decode_message(buf, static_cast<size_t>(n), m_session, m_id, m_kind, m_payload)) {
+                    const auto ack = make_message_ack(fake_session, m_id);
+                    fake_->send(&ack, sizeof(ack));
+                    // Echo chat, and answer a ping with a ping at the same spot, so the in-game UI can be
+                    // tried without a second player.
+                    if (m_kind == 1) {
+                        std::string reply = "echo: " + m_payload;
+                        if (reply.size() > 180) reply.resize(180);
+                        while (!reply.empty() && !valid_utf8(reply)) reply.pop_back();
+                        send_message_packet(*fake_, fake_session, ++fake_msg_id, 1, reply);
+                    } else if (m_kind == 2) {
+                        send_message_packet(*fake_, fake_session, ++fake_msg_id, 2, m_payload);
+                    }
                 }
             }
         }
 
-        // 3. Peer -> pose/name/events for the Lua script.
+        // 3. Peer -> pose/name/events/messages for the Lua script.
         const int n = net_->recv(buf, sizeof(buf), 3);
+        {
+            std::string tmsg;
+            while (net_->take_status(tmsg)) log(tmsg);
+        }
         if (n < 0) {
             log("Network error while receiving; stopping.");
             break;
@@ -285,6 +419,9 @@ void Engine::run() {
             EventPacket ev;
             AckPacket ack;
             std::string nm;
+            uint32_t m_session = 0, m_id = 0;
+            uint16_t m_kind = 0;
+            std::string m_payload;
             switch (peek_type(buf, len)) {
                 case static_cast<int>(PacketType::Position):
                     if (decode_position(buf, len, pos)) {
@@ -352,8 +489,52 @@ void Engine::run() {
                         log("The other player received the request.");
                     }
                     break;
+                case static_cast<int>(PacketType::Message):
+                    if (decode_message(buf, len, m_session, m_id, m_kind, m_payload)) {
+                        const auto reply = make_message_ack(session, m_id);  // always ack, even duplicates
+                        net_->send(&reply, sizeof(reply));
+                        if (!have_msg_session || m_session != seen_msg_session) {
+                            seen_msg_ids.clear();
+                            seen_msg_order.clear();
+                            seen_msg_session = m_session;
+                            have_msg_session = true;
+                        }
+                        if (seen_msg_ids.insert(m_id).second) {  // first time we see this one
+                            seen_msg_order.push_back(m_id);
+                            if (seen_msg_order.size() > 256) {
+                                seen_msg_ids.erase(seen_msg_order.front());
+                                seen_msg_order.pop_front();
+                            }
+                            InMessage im;
+                            im.n = ++inbox_n;
+                            im.id = m_id;
+                            im.kind = m_kind;
+                            im.payload = m_payload;
+                            inbox.push_back(std::move(im));
+                            if (inbox.size() > kInboxSize) inbox.pop_front();
+                            inbox_dirty = true;
+                            ++st.messages_received;
+                        }
+                    }
+                    break;
+                case static_cast<int>(PacketType::MessageAck):
+                    if (decode_message_ack(buf, len, ack)) {
+                        for (auto it = pending_msgs.begin(); it != pending_msgs.end(); ++it) {
+                            if (it->id == ack.id) {
+                                pending_msgs.erase(it);
+                                break;
+                            }
+                        }
+                    }
+                    break;
                 default: break;  // not ours, or a different protocol version
             }
+        }
+
+        // Hand received messages to the Lua script (retried if Lua happened to have the file open).
+        if (inbox_dirty) {
+            const std::vector<InMessage> snapshot(inbox.begin(), inbox.end());
+            if (bridge.publish_messages(session, snapshot)) inbox_dirty = false;
         }
 
         // 4. Connection state, with a log line whenever it changes.
