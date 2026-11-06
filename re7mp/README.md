@@ -130,20 +130,70 @@ will use. Two uses already ride on it:
 
 **Item sync: where it stands.** From your `app.ItemManager` probe: `createItemInstance`, `createDropItemInstance`,
 `setItemGotFlag`, `applyDifficultyItemNumRate`, `hasItemInInventory` and others exist, but none of them is obviously
-"the player picked this up", and the inventory type (`app.Inventory`) hasn't been probed. So the next step is
-discovery, with the **tracer** (Insert > Find item hooks):
+"the player picked this up", and the inventory type (`app.Inventory`) hasn't been probed. So I need to see what the
+game does when you pick something up. That is what "Send me this" is for (next section). With that I can hook the
+pickup, send "player X picked up item Y at position P" over the message channel, and on the other side remove or mark the
+matching item in the world (matched by item id + position, since both games load the same level), plus the
+inventory/give/drop events. Items placed by the difficulty (`applyDifficultyItemNumRate`) and "who gets the item" rules
+(shared vs both get it) need a decision from you.
 
-1. Click "Trace app.ItemManager". Then pick up an item, drop one, combine two, open the supply box.
-2. Watch the REFramework console (or the panel): each call that fires is logged with its arguments, e.g.
-   `app.ItemManager.setItemGotFlag("HandGun")`. Calls are rate limited to a few per second per method.
-3. Do the same for `app.Inventory`, `app.Item`, `app.ItemData`: type the name, "Trace that type"
-   (leave "include get_" off unless you need it; it's noisy).
-4. Send me the log of one pickup, one drop and one use.
+## "Send me this": collecting debug info (three clicks, then send one file)
 
-With that I can hook the pickup, send "player X picked up item Y at position P" over the message channel, and on the
-other side remove or mark the matching item in the world (matched by item id + position, since both games load the
-same level), plus the inventory/give/drop events. Items placed by the difficulty (`applyDifficultyItemNumRate`)
-and "who gets the item" rules (shared vs both get it) need a decision from you.
+Everything the script logs is also written to **`<RE7>\reframework\data\re7mp_debug.json`**. In `re7mp.exe` click
+**Open data folder** to find it. In the game press Insert > RE7 Multiplayer > **Send me this (debug info)**:
+
+1. **Collect game info.** One click, nothing to do in the game. Lists the methods (with their argument types) of the
+   item, inventory, enemy, event and player manager types that exist. (Types that don't exist are just reported as not found.)
+2. **Start tracing items.** Then, in the game: pick up one item, drop one, use or combine one. Each call the game
+   makes while you do that is logged with its arguments.
+3. **Scan for enemies.** Stand where an enemy is visible (any enemy; the first Jack or Molded encounter is fine) and click.
+   Lists enemy-looking objects with their position and components.
+
+Then send me `re7mp_debug.json`. You don't need to understand the contents.
+
+## Hiding the other player
+
+- **After a new game** the other player is hidden for 150 s (`HIDE_AFTER_NEW_GAME` at the top of the Lua), so the
+  opening cutscene doesn't show a body in the same spot as the cutscene camera. It starts when New Game is pressed
+  and again when the synced start happens. The panel shows the countdown and a "Show them now" button; the option
+  can be switched off.
+- **Too close:** the body is also not drawn while it is within 0.8 m of your camera (`HIDE_NEAR_DISTANCE`).
+- Other cutscenes later in the game are not detected yet. That needs a "cutscene is playing" signal from the game;
+  "Collect game info" includes `app.EventManager` for exactly that. Until then, use "Hide them for 60 s" or untick "Show other player".
+
+## If the game crashes: "Fatal D3D error (6)"
+
+That message comes from the game's own DX12 renderer (`renderdevicedx12.cpp`) when the graphics device fails. I can't
+tell from the message alone whether our mod has anything to do with it. Reports for the same error in other RE Engine
+games (RE2, RE4, Monster Hunter Rise) mostly blame running out of video memory, system memory / a too-small Windows
+page file, or the graphics driver; those are forum posts, not an official fix, and they aren't RE7-specific. Things to
+try on the crashing PC, roughly in order:
+
+1. **Find out if the mod is involved:** play the same stretch with `reframework\autorun\re7mp.lua` removed (close
+   re7mp.exe first, or it reinstalls it), and, if it still happens, with REFramework (`dinput8.dll`) removed too. Note
+   whether the crash happens during loading screens, cutscenes or a new game start.
+2. **Lower VRAM use:** in the RE7 settings keep the memory bar out of the red/orange (lower textures, shadows,
+   disable ray tracing if it's on). Try the DirectX 11 option in the launcher if RE7 offers it on that install.
+3. **Drivers and overlays:** a clean graphics-driver install; no GPU overclock/undervolt; close Discord, GeForce, RTSS /
+   Afterburner overlays. Make sure the Windows page file isn't tiny (system-managed is fine).
+4. **Windows Event Viewer** > Windows Logs > System: look at the time of the crash for "Display" / driver-reset entries.
+5. Send me the REFramework log (a file in the RE7 folder ending in `_framework_log.txt`) and `re7mp_debug.json` after a crash.
+
+In case the mod contributes: this version never gives the renderer NaN or absurd screen coordinates, and the body
+draws only a few dozen shapes per frame, so it should be negligible. The game-freeze fallback is off by default.
+
+## Enemy sync: what I need
+
+Plan (host-authoritative, see the design notes): one player's game runs the enemies, the other's shows them as puppets.
+To start I need:
+
+1. The output of **Collect game info** and **Scan for enemies** (above), taken in a spot with an enemy in view. They tell
+   me how enemies are named, which components hold their AI, health and animation, and which manager owns them.
+2. A decision: **who is the host?** Options: whoever pressed New Game first / whoever is the TCP host / a checkbox in the
+   exe ("My game runs the enemies"). My suggestion is the checkbox, so you choose and can swap.
+3. A **first test scene**: one enemy in one area (e.g. the first encounter you can reach quickly after a save) so I can
+   build positions + rotation + health first, then animation, then damage and spawn/despawn.
+4. A **save near it** is handy but not required: just tell me where it is.
 
 ## Design notes: death and enemies (not built yet)
 

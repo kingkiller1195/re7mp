@@ -1,4 +1,4 @@
--- RE7 multiplayer prototype, Lua side (script v5).
+-- RE7 multiplayer prototype, Lua side (script v6).
 -- re7mp.exe installs this to <RE7>/reframework/autorun/re7mp.lua and talks to it through
 -- JSON files in reframework/data. Edit the copy in the project (lua/re7mp.lua) and rebuild;
 -- the exe overwrites the installed copy.
@@ -31,6 +31,8 @@ local CFG = {
     SMOOTHING = 14.0,         -- higher = snappier, lower = smoother
     TELEPORT_DISTANCE = 15.0, -- a jump bigger than this (metres) snaps instead of gliding
     DEFAULT_NAME = "Player 2",
+    HIDE_AFTER_NEW_GAME = 150, -- seconds the other player stays hidden after a new game starts (opening cutscene)
+    HIDE_NEAR_DISTANCE = 0.8,  -- also hide them while they are this close to your camera (e.g. same cutscene camera)
     BODY_ALPHA = 215,         -- 0-255; the body is an overlay and shows through walls, so it is a little see-through
     READY_TIMEOUT = 120,      -- give up waiting for the other player after this many seconds
     GO_LATCH = 5,             -- keep saying "going" this long so the other side can't miss it
@@ -70,6 +72,8 @@ local state = {
     show_figure = true,      -- master switch for drawing the other player
     show_body = true,        -- the shaded 3D body
     show_skeleton = false,   -- the line skeleton (debug)
+    auto_hide = true,        -- hide the other player after a new game starts
+    hidden_until = 0,        -- os.clock() time until which the other player is hidden
     last_error = nil,
 }
 
@@ -109,6 +113,9 @@ local probe = {
     type_name = "app.ItemManager",
 }
 
+-- Everything said here also goes to reframework/data/re7mp_debug.json, so it can simply be sent as a file.
+local dbg = { lines = {}, dirty = false, last_flush = 0 }
+
 local function say(msg)
     local text = "[re7mp] " .. tostring(msg)
     if log and log.info then
@@ -116,6 +123,27 @@ local function say(msg)
     else
         print(text)
     end
+    dbg.lines[#dbg.lines + 1] = string.format("%.1f  %s", os.clock(), tostring(msg))
+    if #dbg.lines > 3200 then
+        local keep = {}
+        for i = 401, #dbg.lines do keep[#keep + 1] = dbg.lines[i] end
+        dbg.lines = keep
+    end
+    dbg.dirty = true
+end
+
+local function flush_debug(now)
+    if dbg.dirty and now - dbg.last_flush >= 2 then
+        dbg.dirty = false
+        dbg.last_flush = now
+        pcall(json.dump_file, "re7mp_debug.json", { script = "re7mp v6", lines = dbg.lines })
+    end
+end
+
+-- Hide the other player for a while (opening cutscene after a new game), or show them again with 0.
+local function hide_remote(seconds, why)
+    state.hidden_until = os.clock() + seconds
+    if seconds > 0 then say("other player hidden for " .. tostring(seconds) .. " s (" .. tostring(why) .. ")") end
 end
 
 ----------------------------------------------------------------------------------------------
@@ -456,6 +484,7 @@ end
 -- the hook BLOCK that request until both players are ready.
 local function on_local_new_game(difficulty_id)
     local now = os.clock()
+    if state.auto_hide then hide_remote(CFG.HIDE_AFTER_NEW_GAME, "new game pressed") end
     if now < lobby.suppress_until then return false end -- we started it ourselves
     if lobby.phase == "idle" and now - state.remote_changed_at > CFG.STALE_AFTER then
         say("New game started with nobody connected: not waiting for anyone.")
@@ -542,6 +571,7 @@ local function update_lobby(now)
             lobby.phase = "done"
             lobby.need_clear = true
             lobby.suppress_until = now + 20 -- don't treat our own start as a new request
+            if state.auto_hide then hide_remote(CFG.HIDE_AFTER_NEW_GAME, "new game starting") end
 
             if kind == "freeze" then
                 release_game() -- the game's own request was never blocked: just let it carry on
@@ -687,7 +717,10 @@ end
 -- the level). That is expected until the other player gets a real in-game avatar.
 ----------------------------------------------------------------------------------------------
 local function project(p)
-    return draw.world_to_screen(Vector3f.new(p[1], p[2], p[3]))
+    local sp = draw.world_to_screen(Vector3f.new(p[1], p[2], p[3]))
+    -- Never hand NaN or huge coordinates to the renderer.
+    if sp and sp.x == sp.x and sp.y == sp.y and math.abs(sp.x) < 20000 and math.abs(sp.y) < 20000 then return sp end
+    return nil
 end
 
 local function line3(a, b, color)
@@ -877,9 +910,21 @@ local function draw_tag(pos, label, color)
     if tag then draw.text(label, tag.x - #label * 3.5, tag.y - 14, color) end
 end
 
+-- Why the other player is not being drawn right now, or nil if they should be.
+local function remote_hidden(now)
+    if now < state.hidden_until then return "hidden after the new game (" .. math.ceil(state.hidden_until - now) .. " s)" end
+    local lp, rp = state.local_pos, state.render_pos
+    if lp and rp then
+        local dx, dy, dz = rp.x - lp.x, rp.y - lp.y, rp.z - lp.z
+        if dx * dx + dy * dy + dz * dz < CFG.HIDE_NEAR_DISTANCE ^ 2 then return "too close to your camera" end
+    end
+    return nil
+end
+
 local function draw_remote(now)
     if not state.show_figure or not state.remote or not state.render_pos then return end
     if avatar.obj and not avatar.show_skeleton then return end -- a cloned model is standing in
+    if remote_hidden(now) then return end
     local stale = (now - state.remote_changed_at) > CFG.STALE_AFTER
     local color = stale and 0xFF888888 or 0xFF00FF00
     local label = state.remote_name or CFG.DEFAULT_NAME
@@ -1066,8 +1111,9 @@ local function method_signature(m)
     return ok and text or ""
 end
 
-local function probe_type(name, list_all, keywords)
+local function probe_type(name, list_all, keywords, limit)
     keywords = keywords or PROBE_KEYWORDS
+    limit = limit or 80
     local ok, err = pcall(function()
         local td = sdk.find_type_definition(name)
         if not td then
@@ -1088,7 +1134,7 @@ local function probe_type(name, list_all, keywords)
                     end
                 end
             end
-            if match and shown < 80 then
+            if match and shown < limit then
                 shown = shown + 1
                 probe_add("    " .. mname .. method_signature(m))
             end
@@ -1329,9 +1375,11 @@ local function update_avatar()
     if not avatar.xf then return end
     local pos, fwd = state.render_pos, state.render_fwd
     if not pos or not fwd or not state.remote then return end
+    local hidden = remote_hidden(os.clock()) ~= nil
     local ok, err = pcall(function()
         local yaw = math.atan(fwd[1], fwd[3]) + CFG.MODEL_YAW_OFFSET
-        avatar.xf:call("set_Position", Vector3f.new(pos.x, pos.y - CFG.EYE_HEIGHT, pos.z))
+        local y = hidden and -10000 or (pos.y - CFG.EYE_HEIGHT) -- "hidden" = parked far below the world
+        avatar.xf:call("set_Position", Vector3f.new(pos.x, y, pos.z))
         avatar.xf:call("set_EulerAngle", Vector3f.new(0, yaw, 0))
     end)
     if not ok then
@@ -1339,6 +1387,55 @@ local function update_avatar()
         say("avatar update failed, removing the clone: " .. avatar.error)
         remove_clone()
     end
+end
+
+----------------------------------------------------------------------------------------------
+-- "Send me this": one-click collectors. Everything is saved to reframework/data/re7mp_debug.json.
+----------------------------------------------------------------------------------------------
+local COLLECT_TYPES = {
+    "app.Inventory", "app.Item", "app.ItemData", "app.ItemManager", "app.SupplyBoxData",
+    "app.EnemyManager", "app.EventManager", "app.PlayerManager", "app.CharacterManager", "app.MapManager",
+}
+
+local function collect_info()
+    probe.lines = {}
+    say("=== collect: new-game method signatures ===")
+    probe_signatures()
+    for _, n in ipairs(COLLECT_TYPES) do
+        say("=== collect: " .. n .. " ===")
+        probe_type(n, true, nil, 250)
+    end
+    say("=== collect: done ===")
+end
+
+-- Lists GameObjects that look like enemies: a component whose type name contains "enemy" or "em" + digits,
+-- or a name like em1234. Run it in a room where an enemy is visible.
+local function scan_enemies()
+    say("=== enemy scan ===")
+    local found, seen = 0, 0
+    local ok, err = pcall(each_gameobject, function(go, path)
+        seen = seen + 1
+        local name_hit = path:lower():find("/em%d%d%d%d") ~= nil
+        local okc, comps = pcall(component_names, go)
+        local comp_hit = false
+        if okc then
+            for _, c in ipairs(comps) do
+                local low = c:lower()
+                if low:find("enemy", 1, true) or low:find("^app%.em") then comp_hit = true end
+            end
+        end
+        if (name_hit or comp_hit) and found < 80 then
+            found = found + 1
+            local pos = ""
+            pcall(function()
+                local p = go:call("get_Transform"):call("get_Position")
+                pos = string.format("  at %.1f, %.1f, %.1f", p.x, p.y, p.z)
+            end)
+            say(path .. "  [" .. (okc and table.concat(comps, ", ") or "?") .. "]" .. pos)
+        end
+    end, 15000)
+    if not ok then say("enemy scan error: " .. tostring(err)) end
+    say(string.format("=== enemy scan done: %d candidates among %d objects ===", found, seen))
 end
 
 ----------------------------------------------------------------------------------------------
@@ -1362,6 +1459,7 @@ re.on_frame(function()
         pcall(read_messages)
     end
     flush_messages(now)
+    flush_debug(now)
     update_remote(now, dt)
     update_lobby(now)
     update_avatar()
@@ -1384,6 +1482,15 @@ re.on_draw_ui(function()
     if cb then state.show_body = vb end
     local cs, vs = imgui.checkbox("Debug skeleton (lines)", state.show_skeleton)
     if cs then state.show_skeleton = vs end
+    local ch, vh = imgui.checkbox("Hide them for a while after a new game (cutscenes)", state.auto_hide)
+    if ch then state.auto_hide = vh end
+    local why = remote_hidden(os.clock())
+    if why then
+        imgui.text("Other player not drawn: " .. why)
+        if os.clock() < state.hidden_until and imgui.button("Show them now") then state.hidden_until = 0 end
+    elseif imgui.button("Hide them for 60 s") then
+        hide_remote(60, "manual")
+    end
 
     local lp, r = state.local_pos, state.remote
     imgui.text(lp and string.format("You:    %.2f, %.2f, %.2f", lp.x, lp.y, lp.z) or "You:    (no camera yet)")
@@ -1433,6 +1540,22 @@ re.on_draw_ui(function()
             local c3, v3 = imgui.checkbox("Log new-game calls to the console", RE7.trace_on)
             if c3 then RE7.trace_on = v3 end
             for i = math.max(1, #RE7.trace_lines - 12), #RE7.trace_lines do imgui.text(RE7.trace_lines[i]) end
+        end)
+        if not ok then imgui.text("UI error: " .. tostring(err)) end
+        imgui.tree_pop()
+    end
+
+    if imgui.tree_node("Send me this (debug info)") then
+        local ok, err = pcall(function()
+            imgui.text("Everything below is saved to reframework\\data\\re7mp_debug.json.")
+            imgui.text("In re7mp.exe click 'Open data folder' and send me that file.")
+            if imgui.button("1. Collect game info") then collect_info() end
+            if imgui.button("2. Start tracing items (then pick up and drop an item)") then
+                for _, n in ipairs({ "app.ItemManager", "app.Inventory", "app.Item" }) do trace_type(n, "", false) end
+            end
+            if imgui.button("3. Scan for enemies (stand where one is visible)") then scan_enemies() end
+            imgui.text(string.format("Debug log: %d lines", #dbg.lines))
+            if imgui.button("Clear the debug log") then dbg.lines = {} dbg.dirty = true end
         end)
         if not ok then imgui.text("UI error: " .. tostring(err)) end
         imgui.tree_pop()
@@ -1527,4 +1650,4 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 
-say("script v5 loaded")
+say("script v6 loaded")

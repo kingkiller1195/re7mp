@@ -11,6 +11,7 @@
 #endif
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
 
@@ -66,6 +67,7 @@ enum : int {
     IDC_BOT_ORBIT = 1021,  // IDC_BOT_ORBIT and IDC_BOT_STAT must stay consecutive
     IDC_BOT_STAT = 1022,
     IDC_BOT_TELE = 1023,
+    IDC_OPEN_DATA = 1024,
 };
 
 struct App {
@@ -460,6 +462,7 @@ void create_controls() {
 
     g.start = make(L"BUTTON", L"Start", BS_DEFPUSHBUTTON | tab, 0, 12, 222, 120, 32, IDC_START);
     make(L"BUTTON", L"Install Lua script", BS_PUSHBUTTON | tab, 0, 140, 222, 150, 32, IDC_INSTALL);
+    make(L"BUTTON", L"Open data folder", BS_PUSHBUTTON | tab, 0, 298, 222, 150, 32, IDC_OPEN_DATA);
 
     make(L"STATIC", L"Game hook:", 0, 0, 12, 270, 90, 20, -1);
     g.st_hook = make(L"STATIC", L"Not running", 0, 0, 110, 270, 458, 20, IDC_ST_HOOK);
@@ -518,6 +521,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_NAME:
                     if (HIWORD(wp) == EN_CHANGE && g.ui_running) g.engine.set_name(narrow(get_text(g.name)));
                     break;
+                case IDC_OPEN_DATA: {  // where re7mp_debug.json (the file to send to the developer) lives
+                    fs::path game;
+                    if (game_dir_ok(game)) {
+                        const fs::path data = data_dir_for(game);
+                        std::error_code ec;
+                        fs::create_directories(data, ec);
+                        ShellExecuteW(g.hwnd, L"open", data.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    } else {
+                        log_line("Pick your RE7 folder first.");
+                    }
+                    break;
+                }
                 case IDC_INSTALL: {
                     fs::path game;
                     if (game_dir_ok(game)) install_script(game);
