@@ -177,7 +177,7 @@ void load_ini() {
     SetWindowTextW(g.name, buf);
     GetPrivateProfileStringW(L"re7mp", L"mode", L"loopback", buf, 1024, p.c_str());
     CheckRadioButton(g.hwnd, IDC_MODE_LOOP, IDC_MODE_NET, lstrcmpiW(buf, L"network") == 0 ? IDC_MODE_NET : IDC_MODE_LOOP);
-    GetPrivateProfileStringW(L"re7mp", L"transport", L"udp", buf, 1024, p.c_str());
+    GetPrivateProfileStringW(L"re7mp", L"transport", L"tcp-host", buf, 1024, p.c_str());
     CheckRadioButton(g.hwnd, IDC_TR_UDP, IDC_TR_JOIN,
                      lstrcmpiW(buf, L"tcp-host") == 0 ? IDC_TR_HOST : lstrcmpiW(buf, L"tcp-join") == 0 ? IDC_TR_JOIN : IDC_TR_UDP);
     GetPrivateProfileStringW(L"re7mp", L"bot", L"orbit", buf, 1024, p.c_str());
@@ -441,9 +441,10 @@ void create_controls() {
     make(L"BUTTON", L"Network (real peer)", BS_AUTORADIOBUTTON, 0, 330, 50, 238, 22, IDC_MODE_NET);
 
     make(L"STATIC", L"Connection:", 0, 0, 12, 84, 80, 20, -1);
-    make(L"BUTTON", L"UDP (fast)", BS_AUTORADIOBUTTON | WS_GROUP | tab, 0, 96, 82, 100, 22, IDC_TR_UDP);
-    make(L"BUTTON", L"TCP: I host", BS_AUTORADIOBUTTON, 0, 206, 82, 120, 22, IDC_TR_HOST);
-    make(L"BUTTON", L"TCP: I join", BS_AUTORADIOBUTTON, 0, 336, 82, 120, 22, IDC_TR_JOIN);
+    make(L"BUTTON", L"UDP (fallback)", BS_AUTORADIOBUTTON | WS_GROUP | tab, 0, 96, 82, 108, 22, IDC_TR_UDP);
+    make(L"BUTTON", L"TCP: I host", BS_AUTORADIOBUTTON, 0, 212, 82, 100, 22, IDC_TR_HOST);
+    make(L"BUTTON", L"TCP: I join", BS_AUTORADIOBUTTON, 0, 318, 82, 100, 22, IDC_TR_JOIN);
+    make(L"STATIC", L"TCP is recommended", 0, 0, 424, 86, 144, 20, -1);
 
     make(L"STATIC", L"Port:", 0, 0, 12, 118, 84, 20, -1);
     g.port = make(L"EDIT", L"27015", ES_AUTOHSCROLL | ES_NUMBER | tab, WS_EX_CLIENTEDGE, 96, 114, 70, 24, IDC_PORT);

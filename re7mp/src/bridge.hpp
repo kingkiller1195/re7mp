@@ -3,7 +3,7 @@
 // <RE7 folder>/reframework/data and are plain JSON.
 //
 //   re7mp_out.json      Lua -> engine   local pose+flags  {seq,x,y,z,qx,qy,qz,qw,flags}
-//   re7mp_in.json       engine -> Lua   remote pose+name  {seq,x,y,z,qx,qy,qz,qw,flags,recv_count,name}
+//   re7mp_in.json       engine -> Lua   remote pose+name  {seq,x,y,z,qx,qy,qz,qw,flags,recv_count,name,transport}
 //   re7mp_evt_out.json  Lua -> engine   event to send     {id,type,arg}
 //   re7mp_evt_in.json   engine -> Lua   event received    {session,id,type,arg}
 //   re7mp_msg_out.json  Lua -> engine   messages to send   {msgs:[{id,k,p}, ...]}   (ring of the last ~32)
@@ -176,14 +176,15 @@ public:
         return write_atomic("re7mp_msg_in.tmp", "re7mp_msg_in.json", s.c_str());
     }
 
-    bool publish_remote(const RemotePose& p, uint64_t recv_count, const std::string& name) {
+    bool publish_remote(const RemotePose& p, uint64_t recv_count, const std::string& name,
+                        const char* transport = "udp") {
         char buf[640];
         std::snprintf(buf, sizeof(buf),
                       "{\"seq\":%u,\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"qx\":%.5f,\"qy\":%.5f,\"qz\":%.5f,\"qw\":%.5f,"
-                      "\"flags\":%u,\"recv_count\":%llu,\"name\":\"%s\"}\n",
+                      "\"flags\":%u,\"recv_count\":%llu,\"name\":\"%s\",\"transport\":\"%s\"}\n",
                       p.seq, p.x, p.y, p.z, p.qx, p.qy, p.qz, p.qw, static_cast<unsigned>(p.flags),
                       static_cast<unsigned long long>(recv_count),
-                      json_escape(name).c_str());
+                      json_escape(name).c_str(), transport);
         return write_atomic("re7mp_in.tmp", "re7mp_in.json", buf);
     }
 

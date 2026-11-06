@@ -23,13 +23,14 @@ are looking, and the two games can talk to each other (new-game sync, chat, ping
    - **Loopback test**: a fake player ("Loopback Bot") appears next to you. Needs no network.
    - **Network**: enter the other player's `ip:port` (they enter yours).
 4. Pick the **connection**:
-   - **UDP (fast)**: the default. Both sides enter each other's address; UDP port 27015 must be reachable
-     (LAN, VPN, or port forward).
-   - **TCP: I host / TCP: I join**: reliable and ordered, for when UDP sync misbehaves (loss, odd NATs). One player
-     hosts (listens on the port; the address box is optional and, if filled in, only that IP may connect), the other
-     joins the host's `ip:port`. The joiner retries every second and reconnects by itself if the link drops.
+   - **TCP: I host / TCP: I join** (recommended, and required for the coming enemy sync): reliable and ordered.
+     One player hosts (listens on the port; the address box is optional and, if filled in, only that IP may connect),
+     the other joins the host's `ip:port`. The joiner retries every second and reconnects by itself if the link drops.
      Position updates arrive a little later than with UDP when the network is lossy (TCP waits to resend), which is
-     the trade-off for never losing data. Both players must pick the same family (both UDP, or one host + one join).
+     the trade-off for never losing data.
+   - **UDP (fallback)**: both sides enter each other's address; UDP port 27015 must be reachable. Use it if TCP can't
+     connect on your network. Everything except enemy sync works over UDP. Both players must pick the same family
+     (both UDP, or one host + one join).
 5. Click **Start** (it installs/updates the Lua script), start RE7, load a save. Press Insert for the "RE7 Multiplayer" panel.
 
 **Loopback bot.** *Orbits you* circles you at 3 m, walking. *Stays put* teleports the bot to where you are and keeps
@@ -128,14 +129,20 @@ will use. Two uses already ride on it:
 - **Ping**: "Ping my position" puts a marker at your position on the other player's screen for 12 s, with your name and distance.
   (In loopback mode the bot echoes your chat and returns your ping, so you can try it alone.)
 
-**Item sync: where it stands.** From your `app.ItemManager` probe: `createItemInstance`, `createDropItemInstance`,
-`setItemGotFlag`, `applyDifficultyItemNumRate`, `hasItemInInventory` and others exist, but none of them is obviously
-"the player picked this up", and the inventory type (`app.Inventory`) hasn't been probed. So I need to see what the
-game does when you pick something up. That is what "Send me this" is for (next section). With that I can hook the
-pickup, send "player X picked up item Y at position P" over the message channel, and on the other side remove or mark the
-matching item in the world (matched by item id + position, since both games load the same level), plus the
-inventory/give/drop events. Items placed by the difficulty (`applyDifficultyItemNumRate`) and "who gets the item" rules
-(shared vs both get it) need a decision from you.
+**Item sync, version 1 (new).** An item one player picks up from the world disappears for the other player.
+Built from your item trace: picking something up runs `app.Inventory.addItem(app.Item, ...)` on the item lying in the
+world, and the game then removes it with `app.Item.disableFromScene()`. Crafting and restoring the inventory also call
+`addItem`, but on items created under the player object `Pl0000`, which is how they're told apart. The message carries the
+item id, its object name and position; the other game finds the object with that name within 0.75 m and removes it the
+same way. Panel: Insert > RE7 Multiplayer > Item sync (counters and the last event).
+
+Try it: both players in the same room with a pickup visible (a handgun bullet box, a health item). One picks it up;
+on the other screen it should vanish and the panel says "removed it here". If it says "can't find it", send me the
+debug file (the object's name or position differs between the two games).
+
+Not synced yet: items that come out of drawers and containers (`createDropItemInstance`: the container's own state isn't
+synced, so the second player could open it and get the item again), crafting, ammo use, and "both players get the item"
+(today only the picker gets it). Those need a decision from you plus more trace data.
 
 ## "Send me this": collecting debug info (three clicks, then send one file)
 
@@ -146,10 +153,16 @@ Everything the script logs is also written to **`<RE7>\reframework\data\re7mp_de
    item, inventory, enemy, event and player manager types that exist. (Types that don't exist are just reported as not found.)
 2. **Start tracing items.** Then, in the game: pick up one item, drop one, use or combine one. Each call the game
    makes while you do that is logged with its arguments.
-3. **Scan for enemies.** Stand where an enemy is visible (any enemy; the first Jack or Molded encounter is fine) and click.
-   Lists enemy-looking objects with their position and components.
+3. **Scan for enemies.** Stand where an enemy is visible (Jack, a Molded, anything) and click. It lists enemy-looking
+   objects with their position and components, and then every component type in the scene with a count; the second list
+   shows what the game calls its characters even if my guess misses.
 
-Then send me `re7mp_debug.json`. You don't need to understand the contents.
+Then send me `re7mp_debug.json`. You don't need to understand the contents. The results of steps 1 and 3 are kept in a
+separate "pinned" part of the file, so tracing can't push them out (that happened in the first file you sent: tracing
+flooded the log, and step 1 and 3 weren't in it).
+
+The tracer now skips the methods that fire thousands of times a second, mutes any that still do, and logs each
+method's full signature the first time it fires, so unreadable arguments show their type.
 
 ## Hiding the other player
 
@@ -184,16 +197,20 @@ draws only a few dozen shapes per frame, so it should be negligible. The game-fr
 
 ## Enemy sync: what I need
 
-Plan (host-authoritative, see the design notes): one player's game runs the enemies, the other's shows them as puppets.
-To start I need:
+Decision made: enemy sync runs over **TCP only**; UDP is the fallback for when TCP can't connect (and then there is no
+enemy sync). The panel shows the current connection and says so.
 
-1. The output of **Collect game info** and **Scan for enemies** (above), taken in a spot with an enemy in view. They tell
-   me how enemies are named, which components hold their AI, health and animation, and which manager owns them.
+Plan (host-authoritative, see the design notes): one player's game runs the enemies, the other's shows them as puppets.
+Your earlier probe showed `app.EnemyManager` and `app.EventManager` don't exist in RE7, so I don't yet know where enemies
+live. To start I need:
+
+1. The debug file with **Collect game info** and **Scan for enemies** done, standing where an enemy is in view (the Jack
+   fight is ideal). The enemy list and the component census tell me what the enemies are called and which components
+   hold their AI, health and animation.
 2. A decision: **who is the host?** Options: whoever pressed New Game first / whoever is the TCP host / a checkbox in the
-   exe ("My game runs the enemies"). My suggestion is the checkbox, so you choose and can swap.
-3. A **first test scene**: one enemy in one area (e.g. the first encounter you can reach quickly after a save) so I can
-   build positions + rotation + health first, then animation, then damage and spawn/despawn.
-4. A **save near it** is handy but not required: just tell me where it is.
+   exe ("My game runs the enemies"). My suggestion is the TCP host, since TCP already needs someone to host.
+3. A **first test scene**: one enemy in one area (e.g. the first Jack encounter) so I can build position + rotation +
+   health first, then animation, then damage and spawn/despawn.
 
 ## Design notes: death and enemies (not built yet)
 
@@ -212,8 +229,8 @@ Things to decide and find out before building:
   events, Jack's/Marguerite's special behaviour, and spawning/despawning in sync. Start with plain enemies in one area.
   Needed first: how to enumerate enemies (probe `app.EnemyManager` and use the tracer) and which components hold AI,
   health and animation.
-- **Transport.** Enemy snapshots are state, so they go over the unreliable position-style channel (UDP), while
-  spawn/despawn/damage/death go over the reliable message channel. TCP mode makes everything reliable, at the cost of latency.
+- **Transport.** Decided: enemy sync uses TCP only, so snapshots, spawn/despawn, damage and death are all reliable and
+  ordered. The cost is some latency on a lossy link; if that turns out to hurt, snapshots could move to UDP later.
 
 ## Layout
 
@@ -235,7 +252,9 @@ TCP reconnect after the host restarts, the host's address restriction), and chat
 I also modelled the new-game ready-check state machine in Python (`tools/lobby_sim.py`, 1,000+ scenarios with packet
 loss and lag) and checked the 3D body's face ordering and back-face culling logic in Python.
 
-Not tested: the GUI (only syntax-checked against stand-in headers), the Windows socket code (the TCP and UDP code
+Reported working in-game (by you): the debug logging, the probe panel, and the New Game sync. Item sync is new and untested.
+
+Not tested by me: the GUI (only syntax-checked against stand-in headers), the Windows socket code (the TCP and UDP code
 has Windows branches that I could only read, not run), and the Lua (no interpreter here: only bracket-balance,
 use-before-define and unknown-function checks). In the game itself, unverified: `draw.filled_quad` (the body falls back
 to outlines if it's missing), the tracer's hooks and argument decoding, the message files through `json.dump_file`,

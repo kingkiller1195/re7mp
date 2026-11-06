@@ -1,4 +1,4 @@
--- RE7 multiplayer prototype, Lua side (script v6).
+-- RE7 multiplayer prototype, Lua side (script v7).
 -- re7mp.exe installs this to <RE7>/reframework/autorun/re7mp.lua and talks to it through
 -- JSON files in reframework/data. Edit the copy in the project (lua/re7mp.lua) and rebuild;
 -- the exe overwrites the installed copy.
@@ -11,6 +11,7 @@
 --     and only then does the game go on. When RE7's New Game is detected (app.GameManager.newGameRequest)
 --     that request is BLOCKED until the other player is ready too, then replayed on the agreed
 --     difficulty. The "I'm ready" / "Join" buttons in the panel do the same with a countdown.
+--   * "Item sync": an item one player picks up from the world disappears for the other player.
 --   * "Chat and pings": a reliable message channel to the other player (more uses to come, e.g. items).
 --   * "Find item hooks (tracer)": logs which game methods fire when you pick up or drop items.
 --   * "Avatar (experimental)": scan the scene and try cloning an in-game model instead of the skeleton.
@@ -70,6 +71,7 @@ local state = {
     speed = 0,               -- smoothed horizontal speed in m/s
     walk_phase = 0,
     show_figure = true,      -- master switch for drawing the other player
+    transport = nil,         -- "udp" or "tcp", as reported by re7mp.exe
     show_body = true,        -- the shaded 3D body
     show_skeleton = false,   -- the line skeleton (debug)
     auto_hide = true,        -- hide the other player after a new game starts
@@ -114,7 +116,7 @@ local probe = {
 }
 
 -- Everything said here also goes to reframework/data/re7mp_debug.json, so it can simply be sent as a file.
-local dbg = { lines = {}, dirty = false, last_flush = 0 }
+local dbg = { lines = {}, pinned = {}, pin = false, dirty = false, last_flush = 0 }
 
 local function say(msg)
     local text = "[re7mp] " .. tostring(msg)
@@ -123,7 +125,9 @@ local function say(msg)
     else
         print(text)
     end
-    dbg.lines[#dbg.lines + 1] = string.format("%.1f  %s", os.clock(), tostring(msg))
+    local line = string.format("%.1f  %s", os.clock(), tostring(msg))
+    if dbg.pin and #dbg.pinned < 6000 then dbg.pinned[#dbg.pinned + 1] = line end -- survives the flood of trace lines
+    dbg.lines[#dbg.lines + 1] = line
     if #dbg.lines > 3200 then
         local keep = {}
         for i = 401, #dbg.lines do keep[#keep + 1] = dbg.lines[i] end
@@ -136,7 +140,7 @@ local function flush_debug(now)
     if dbg.dirty and now - dbg.last_flush >= 2 then
         dbg.dirty = false
         dbg.last_flush = now
-        pcall(json.dump_file, "re7mp_debug.json", { script = "re7mp v6", lines = dbg.lines })
+        pcall(json.dump_file, "re7mp_debug.json", { script = "re7mp v7", pinned = dbg.pinned, lines = dbg.lines })
     end
 end
 
@@ -663,6 +667,7 @@ local function read_remote(now)
     if type(data.name) == "string" and data.name ~= "" then state.remote_name = data.name end
     state.remote_count = data.recv_count or state.remote_count
     state.remote_flags = tonumber(data.flags) or 0
+    if type(data.transport) == "string" then state.transport = data.transport end
     if data.seq == state.remote_seq then return end
     state.remote_seq = data.seq
     state.remote_changed_at = now
@@ -1159,6 +1164,12 @@ end
 -- Tracer: hooks every method of a type (rate limited) and logs the calls with their arguments, so you can
 -- see which methods fire when you pick up or drop an item. Hooks last until the scripts are reloaded.
 ----------------------------------------------------------------------------------------------
+-- Methods the 2026-11 item trace showed firing thousands of times a second (every frame, per item).
+local TRACE_SKIP = {
+    set_weapon = true, set_ItemSlotManager = true, set_ItemData = true, itemMegusuriDisp = true,
+    getTotalStackNum = true, getItemDataId = true, hasWeaponInQuickslot = true, isDisplayShotGun = true,
+    set_ItemBoxData = true,
+}
 local tracer = {
     enabled = true,
     type_name = "app.ItemManager",
@@ -1204,7 +1215,7 @@ local function describe_arg(pt, args, idx)
         end
         return tostring(v)
     end)
-    return ok and text or ("?" .. tostring(text))
+    return ok and text or ("<" .. tostring(pt.name) .. ">") -- can't read it: show its type instead
 end
 
 local function trace_method(type_name, m)
@@ -1228,10 +1239,15 @@ local function trace_method(type_name, m)
         pcall(function()
             if not tracer.enabled then return end
             local now = os.clock()
-            local e = tracer.rate[key] or { t = 0, n = 0, dropped = 0 }
+            local e = tracer.rate[key] or { t = 0, n = 0, dropped = 0, muted = false }
             tracer.rate[key] = e
+            if e.muted then return end
             if now - e.t > 1 then
-                if e.dropped > 0 then
+                if e.dropped > 200 then -- fires every frame: say so once and stop logging it
+                    e.muted = true
+                    tracer_add(type_name .. "." .. mname .. ": fires " .. e.dropped .. "+ times a second, muted")
+                    return
+                elseif e.dropped > 0 then
                     tracer_add(type_name .. "." .. mname .. ": " .. e.dropped .. " more calls in the last second")
                 end
                 e.t, e.n, e.dropped = now, 0, 0
@@ -1240,6 +1256,10 @@ local function trace_method(type_name, m)
             if e.n > 3 then
                 e.dropped = e.dropped + 1
                 return
+            end
+            if not e.sig_logged then -- the full signature, once, so unreadable arguments can be identified
+                e.sig_logged = true
+                tracer_add("signature: " .. key)
             end
             local parts = {}
             for i, pt in ipairs(ptypes) do parts[i] = describe_arg(pt, args, i + (is_static and 1 or 2)) end
@@ -1263,6 +1283,7 @@ local function trace_type(type_name, filter, include_getters)
             local name = m:get_name()
             local low = name:lower()
             local skip = low:find("update", 1, true) ~= nil or name == ".ctor" or name == "doAwake"
+                or TRACE_SKIP[name] == true
                 or (not include_getters and low:sub(1, 4) == "get_")
                 or (f ~= "" and not low:find(f, 1, true))
             if not skip and tracer.hook_count < 150 and trace_method(type_name, m) then
@@ -1397,51 +1418,193 @@ local COLLECT_TYPES = {
     "app.EnemyManager", "app.EventManager", "app.PlayerManager", "app.CharacterManager", "app.MapManager",
 }
 
-local function collect_info()
-    probe.lines = {}
-    say("=== collect: new-game method signatures ===")
-    probe_signatures()
-    for _, n in ipairs(COLLECT_TYPES) do
-        say("=== collect: " .. n .. " ===")
-        probe_type(n, true, nil, 250)
-    end
-    say("=== collect: done ===")
+local function pinned(fn)
+    dbg.pin = true
+    local ok, err = pcall(fn)
+    dbg.pin = false
+    if not ok then say("collector error: " .. tostring(err)) end
 end
 
--- Lists GameObjects that look like enemies: a component whose type name contains "enemy" or "em" + digits,
--- or a name like em1234. Run it in a room where an enemy is visible.
+local function collect_info()
+    pinned(function()
+        probe.lines = {}
+        say("=== collect: new-game method signatures ===")
+        probe_signatures()
+        for _, n in ipairs(COLLECT_TYPES) do
+            say("=== collect: " .. n .. " ===")
+            probe_type(n, true, nil, 250)
+        end
+        say("=== collect: done ===")
+    end)
+end
+
+-- Lists GameObjects that look like enemies (a component type containing "enemy" or starting with app.Em, or a
+-- name like em1234), then every component type present in the scene with a count. The second list shows what
+-- the game calls its characters even if the first guess misses.
 local function scan_enemies()
-    say("=== enemy scan ===")
-    local found, seen = 0, 0
-    local ok, err = pcall(each_gameobject, function(go, path)
-        seen = seen + 1
-        local name_hit = path:lower():find("/em%d%d%d%d") ~= nil
-        local okc, comps = pcall(component_names, go)
-        local comp_hit = false
-        if okc then
-            for _, c in ipairs(comps) do
-                local low = c:lower()
-                if low:find("enemy", 1, true) or low:find("^app%.em") then comp_hit = true end
+    pinned(function()
+        say("=== enemy scan ===")
+        local found, seen = 0, 0
+        local census = {}
+        local ok, err = pcall(each_gameobject, function(go, path)
+            seen = seen + 1
+            local name_hit = path:lower():find("/em%d%d%d%d") ~= nil
+            local okc, comps = pcall(component_names, go)
+            local comp_hit = false
+            if okc then
+                for _, c in ipairs(comps) do
+                    census[c] = (census[c] or 0) + 1
+                    local low = c:lower()
+                    if low:find("enemy", 1, true) or low:find("^app%.em") then comp_hit = true end
+                end
             end
+            if (name_hit or comp_hit) and found < 80 then
+                found = found + 1
+                local pos = ""
+                pcall(function()
+                    local p = go:call("get_Transform"):call("get_Position")
+                    pos = string.format("  at %.1f, %.1f, %.1f", p.x, p.y, p.z)
+                end)
+                say(path .. "  [" .. (okc and table.concat(comps, ", ") or "?") .. "]" .. pos)
+            end
+        end, 20000)
+        if not ok then say("enemy scan error: " .. tostring(err)) end
+        say(string.format("=== enemy scan done: %d candidates among %d objects ===", found, seen))
+        say("=== component types in the scene (name x count) ===")
+        local names = {}
+        for n in pairs(census) do names[#names + 1] = n end
+        table.sort(names)
+        for _, n in ipairs(names) do
+            if n:find("^app%.") then say(n .. " x" .. census[n]) end
         end
-        if (name_hit or comp_hit) and found < 80 then
-            found = found + 1
-            local pos = ""
-            pcall(function()
-                local p = go:call("get_Transform"):call("get_Position")
-                pos = string.format("  at %.1f, %.1f, %.1f", p.x, p.y, p.z)
-            end)
-            say(path .. "  [" .. (okc and table.concat(comps, ", ") or "?") .. "]" .. pos)
+        say("=== component census done ===")
+    end)
+end
+
+----------------------------------------------------------------------------------------------
+-- Item sync, version 1: an item one player picks up from the world disappears for the other player.
+--
+-- Based on the item trace: picking something up runs app.Inventory.addItem(app.Item, ...) on the item that
+-- lies in the world, and the game then removes that item with app.Item.disableFromScene(). Crafting and
+-- restoring an inventory also call addItem, but on items created under the player object "Pl0000", which
+-- is how those are told apart from world pickups. The message carries the item's id, its object name and its
+-- position; the other game finds the object with that name near that position and removes it the same way.
+-- Not synced yet: items that come out of drawers/containers, ammo use, "both players get the item".
+----------------------------------------------------------------------------------------------
+local ITEM_MSG = 3
+local items = {
+    enabled = true,
+    sent = 0, received = 0, removed = 0, missed = 0,
+    suppress_until = 0,
+    last = "No item events yet.",
+    hooked = false,
+}
+
+local function item_note(text)
+    items.last = text
+    say("item sync: " .. text)
+end
+
+-- Is this GameObject the player or one of its children (an inventory item rather than a world item)?
+local function is_under_player(go)
+    local node = go
+    for _ = 1, 10 do
+        if not node then return false end
+        if node:call("get_Name") == "Pl0000" then return true end
+        local xf = node:call("get_Transform")
+        local parent = xf and xf:call("get_Parent")
+        node = parent and parent:call("get_GameObject") or nil
+    end
+    return false
+end
+
+-- Runs just before the game adds an item to the inventory.
+local function on_item_added(args)
+    if not items.enabled or os.clock() < items.suppress_until then return end
+    local item = sdk.to_managed_object(args[3])
+    if not item then return end
+    local go = item:call("get_GameObject")
+    if not go or is_under_player(go) then return end -- crafting or restoring the inventory, not a pickup
+    local id = tostring(item:call("getItemDataId"))
+    local name = tostring(go:call("get_Name"))
+    local p = go:call("get_Transform"):call("get_Position")
+    if name:find("|", 1, true) or id:find("|", 1, true) then return end
+    net_send(ITEM_MSG, string.format("%s|%s|%.2f|%.2f|%.2f", id, name, p.x, p.y, p.z))
+    items.sent = items.sent + 1
+    item_note(string.format("you picked up %s (%s) at %.1f, %.1f, %.1f", id, name, p.x, p.y, p.z))
+end
+
+local function remove_world_item(id, name, x, y, z)
+    local best, best_d2
+    local ok, err = pcall(each_gameobject, function(go)
+        local okn, n = pcall(function() return go:call("get_Name") end)
+        if not (okn and n == name) then return end
+        local okp, p = pcall(function() return go:call("get_Transform"):call("get_Position") end)
+        if not (okp and p) then return end
+        local d2 = (p.x - x) ^ 2 + (p.y - y) ^ 2 + (p.z - z) ^ 2
+        if d2 < 0.75 ^ 2 and (best_d2 == nil or d2 < best_d2) then
+            best, best_d2 = go, d2
+            if d2 < 0.05 ^ 2 then return true end -- an exact match: stop searching
         end
-    end, 15000)
-    if not ok then say("enemy scan error: " .. tostring(err)) end
-    say(string.format("=== enemy scan done: %d candidates among %d objects ===", found, seen))
+    end, 30000)
+    if not ok then
+        item_note("search failed: " .. tostring(err))
+        return
+    end
+    if not best then
+        items.missed = items.missed + 1
+        item_note(string.format("%s picked up %s (%s) but I can't find it near %.1f, %.1f, %.1f",
+            state.remote_name or CFG.DEFAULT_NAME, id, name, x, y, z))
+        return
+    end
+    items.suppress_until = os.clock() + 1
+    local removed, how = pcall(function()
+        local comp = best:call("getComponent(System.Type)", sdk.typeof("app.Item"))
+        if not comp then error("no app.Item component") end
+        comp:call("disableFromScene") -- what the game itself calls on a picked-up world item
+    end), "disableFromScene"
+    if not removed then
+        how = "destroy"
+        removed = pcall(function() best:call("destroy", best) end)
+    end
+    if removed then
+        items.removed = items.removed + 1
+        item_note(string.format("%s took %s: removed it here (%s)", state.remote_name or CFG.DEFAULT_NAME, id, how))
+    else
+        items.missed = items.missed + 1
+        item_note(string.format("%s took %s: found it but could not remove it", state.remote_name or CFG.DEFAULT_NAME, id))
+    end
+end
+
+net_on(ITEM_MSG, function(payload)
+    local id, name, x, y, z = payload:match("^([^|]*)|([^|]*)|(-?[%d%.]+)|(-?[%d%.]+)|(-?[%d%.]+)$")
+    x, y, z = tonumber(x), tonumber(y), tonumber(z)
+    if not (id and name and x and y and z) then return end
+    items.received = items.received + 1
+    if items.enabled then remove_world_item(id, name, x, y, z) end
+end)
+
+local function install_item_hooks()
+    local td = sdk.find_type_definition("app.Inventory")
+    local m = td and td:get_method("addItem")
+    if not m then
+        say("item sync: app.Inventory.addItem not found, item sync is off")
+        return false
+    end
+    local CALL_ORIGINAL = sdk.PreHookResult and sdk.PreHookResult.CALL_ORIGINAL
+    sdk.hook(m, function(args)
+        local ok, err = pcall(on_item_added, args)
+        if not ok then say("item sync hook error: " .. tostring(err)) end
+        return CALL_ORIGINAL
+    end, function(retval) return retval end)
+    return true
 end
 
 ----------------------------------------------------------------------------------------------
 -- Main loop and UI
 ----------------------------------------------------------------------------------------------
 prime_messages()
+items.hooked = select(2, pcall(install_item_hooks)) == true
 local ok_hook, installed = pcall(RE7.install_new_game_hook, on_local_new_game)
 lobby.hook_installed = ok_hook and installed == true
 
@@ -1500,7 +1663,11 @@ re.on_draw_ui(function()
     else
         imgui.text("Other player: (nothing received)")
     end
-    imgui.text(string.format("Sent: %d   Received: %d", state.seq, state.remote_count))
+    imgui.text(string.format("Sent: %d   Received: %d   Connection: %s", state.seq, state.remote_count,
+        state.transport == "tcp" and "TCP (reliable)" or (state.transport == "udp" and "UDP" or "?")))
+    if state.transport == "udp" then
+        imgui.text("Enemy sync will need TCP. Use UDP only if TCP can't connect.")
+    end
     if state.last_error then imgui.text("Last error: " .. state.last_error) end
 
     if imgui.tree_node("Start together") then
@@ -1556,6 +1723,21 @@ re.on_draw_ui(function()
             if imgui.button("3. Scan for enemies (stand where one is visible)") then scan_enemies() end
             imgui.text(string.format("Debug log: %d lines", #dbg.lines))
             if imgui.button("Clear the debug log") then dbg.lines = {} dbg.dirty = true end
+        end)
+        if not ok then imgui.text("UI error: " .. tostring(err)) end
+        imgui.tree_pop()
+    end
+
+    if imgui.tree_node("Item sync") then
+        local ok, err = pcall(function()
+            local c1, v1 = imgui.checkbox("Sync item pickups", items.enabled)
+            if c1 then items.enabled = v1 end
+            imgui.text("An item you pick up from the world disappears for the other player.")
+            imgui.text(items.hooked and "Hook: on (app.Inventory.addItem)" or "Hook: off (see console)")
+            imgui.text(string.format("Sent %d   received %d   removed here %d   not found %d",
+                items.sent, items.received, items.removed, items.missed))
+            imgui.text(items.last)
+            imgui.text("Not synced yet: drawer/container items, crafting, ammo use, both-get-it.")
         end)
         if not ok then imgui.text("UI error: " .. tostring(err)) end
         imgui.tree_pop()
@@ -1650,4 +1832,4 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 
-say("script v6 loaded")
+say("script v7 loaded")

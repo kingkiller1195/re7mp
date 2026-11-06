@@ -181,13 +181,15 @@ static void test_bridge(const fs::path& tmp) {
     // Publishing: names are JSON-escaped, files readable back.
     RemotePose rp;
     rp.seq = 5; rp.x = 1; rp.y = 2; rp.z = 3; rp.qy = 0.5f; rp.qw = 0.5f; rp.flags = 29;
-    CHECK(b.publish_remote(rp, 4, "Ann \"The Boss\" \\o/"));
+    CHECK(b.publish_remote(rp, 4, "Ann \"The Boss\" \\o/", "tcp"));
     auto t = read_text(d / "re7mp_in.json");
     double v;
     std::string name;
     CHECK(json_num(t, "seq", v) && v == 5 && json_num(t, "z", v) && v == 3 && json_num(t, "qy", v) && v == 0.5 &&
           json_num(t, "flags", v) && v == 29);
     CHECK(json_str(t, "name", name) && name == "Ann \\\"The Boss\\\" \\\\o/");
+    std::string tr;
+    CHECK(json_str(t, "transport", tr) && tr == "tcp");
     CHECK(b.publish_event(99, 3, 1, 2));
     t = read_text(d / "re7mp_evt_in.json");
     CHECK(json_num(t, "session", v) && v == 99 && json_num(t, "id", v) && v == 3 && json_num(t, "arg", v) && v == 2);

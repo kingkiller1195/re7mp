@@ -452,7 +452,7 @@ void Engine::run() {
                                 }
                             }
                             remote_flags = pos.flags;
-                            bridge.publish_remote(rp, st.received, st.remote_name);
+                            bridge.publish_remote(rp, st.received, st.remote_name, cfg_.transport == Transport::Udp ? "udp" : "tcp");
                         }
                     }
                     break;
