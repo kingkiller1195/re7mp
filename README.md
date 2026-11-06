@@ -6,4 +6,6 @@ You need to have reframework installed into the re7 main folder and download and
 
 Latest version of framework: https://github.com/praydog/REFramework
 
+Join the discord to report any bugs or suggest something! https://discord.gg/wFBxvrNeew
+
 This is made using claude and is being tested by me, I would like for a wider test audience and more suggestions!
