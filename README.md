@@ -2,7 +2,7 @@ This is the latest version available, I wish I could code this myself but unfort
 
 Installation:
 
-You need to have reframework installed into the re7 main folder and download and run the exe, you should be able to install the lua file by directing it to your re7 folder with reframework installed. Do a p2p connection from there, other features are being worked on which include the game models being loaded as character models and new game starting being synced.
+You need to have reframework installed into the re7 main folder and download and run the exe, you should be able to install the lua file by directing it to your re7 folder with reframework installed. Do a p2p connection from there, other features are being worked on which include the game models being loaded as character models and new game starting being synced. I suggest using tailscale to connect via a VPN and share IP's with one another.
 
 Latest version of framework: https://github.com/praydog/REFramework
 
