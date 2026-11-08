@@ -16,14 +16,14 @@
 namespace re7mp {
 
 enum class Mode {
-    Network,   // talk to a real peer over UDP
-    Loopback,  // a built-in fake Player 2 (reached over real UDP on 127.0.0.1) orbits you
+    Network,   // talk to a real peer over TCP
+    Loopback,  // a built-in fake Player 2 (reached over real TCP on 127.0.0.1) orbits you
 };
 
+// TCP only (UDP was removed in 9.7: nobody used it; players connect over Tailscale or a forwarded port).
 enum class Transport {
-    Udp,      // symmetric: both sides send to each other (the default)
-    TcpHost,  // reliable: wait for the other player to connect
-    TcpJoin,  // reliable: connect to the other player (who hosts)
+    TcpHost,  // wait for the other player to connect (the default)
+    TcpJoin,  // connect to the other player (who hosts)
 };
 
 enum class BotMode {
@@ -38,8 +38,13 @@ struct Config {
     std::string peer_host;         // network mode only
     uint16_t peer_port = 27015;
     std::string name = "Player";  // shown above you on the other player's screen
-    Transport transport = Transport::Udp;
+    Transport transport = Transport::TcpHost;
     BotMode bot_mode = BotMode::Orbit;  // loopback mode only
+    float bot_pose_first_s = 4.0f;      // loopback bot blocks, crouches and heals in a 16 s loop starting this many seconds in; < 0 = never
+    // Co-op save sharing: saves made while connected are sent to the other player.
+    bool save_sync = false;
+    std::filesystem::path save_dir;  // ...\userdata\<id>\418370\remote\win64_save
+    int save_stable_ms = 2500;       // a save must sit untouched this long before it is sent
 };
 
 struct Status {
@@ -55,6 +60,12 @@ struct Status {
     uint64_t received = 0;
     uint64_t messages_sent = 0;      // reliable messages queued by the game
     uint64_t messages_received = 0;  // reliable messages delivered to the game
+    uint64_t saves_sent = 0;
+    uint64_t saves_received = 0;
+    uint64_t states_sent = 0;      // enemy snapshots sent (TCP only)
+    uint64_t states_received = 0;  // enemy snapshots received
+    std::string last_save_event;
+    int foreign_protocol = 0;  // nonzero: packets are arriving from a re7mp.exe with this (different) protocol version
 };
 
 class Engine {

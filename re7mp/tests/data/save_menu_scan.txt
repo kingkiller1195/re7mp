@@ -1,0 +1,119 @@
+  c_saveslot : via.gui.Panel
+    bg_blur : via.gui.Panel
+      BlurFilter_bg : via.gui.BlurFilter
+      Rect_bg : via.gui.Rect
+    bg : via.gui.Texture (hidden)  ""
+    bg_list : via.gui.Rect
+    c_frame : via.gui.Panel
+      line_h8 : via.gui.Texture  ""
+      line_h7 : via.gui.Texture  ""
+      line_h6 : via.gui.Texture  ""
+      line_h5 : via.gui.Texture  ""
+      line_h4 : via.gui.Texture  ""
+      line_h3 : via.gui.Texture  ""
+      line_h2 : via.gui.Texture  ""
+      line_h1 : via.gui.Texture  ""
+      line_h0 : via.gui.Texture  ""
+      line_R : via.gui.Texture  ""
+      line_L : via.gui.Texture  ""
+      Circle_RB : via.gui.Circle
+      Circle_RT : via.gui.Circle
+      Circle_LB : via.gui.Circle
+      Circle_LT : via.gui.Circle
+    m_title : via.gui.Text  ""
+    c_itemscroll : via.gui.ScrollList
+      mask : via.gui.Rect
+      HitArea_ScrollList : via.gui.HitArea
+      scrollbar : via.gui.ScrollBar
+        Bg : via.gui.Texture  ""
+        Bar : via.gui.Texture  ""
+      item8 : via.gui.SelectItem (hidden)
+        HitArea_SelectItem : via.gui.HitArea
+        cur_sor_lomg : via.gui.TextureSet (hidden)  ""
+        m_objective : via.gui.Text  "Head to the attic"
+        m_time : via.gui.Text  "0:37'09""
+        m_difficulty : via.gui.Text  "Normal"
+        m_place : via.gui.Text  "Guest House 2F"
+        m_chapter : via.gui.Text (hidden)  ""
+        m_day : via.gui.Text  "11/07/2026 00:04:56"
+        m_number : via.gui.Text  "8"
+      item7 : via.gui.SelectItem
+        HitArea_SelectItem : via.gui.HitArea
+        cur_sor_lomg : via.gui.TextureSet (hidden)  ""
+        m_objective : via.gui.Text  "Head to the attic"
+        m_time : via.gui.Text  "0:27'23""
+        m_difficulty : via.gui.Text  "Normal"
+        m_place : via.gui.Text  "Guest House 2F"
+        m_chapter : via.gui.Text (hidden)  ""
+        m_day : via.gui.Text  "11/06/2026 23:54:53"
+        m_number : via.gui.Text  "7"
+      item6 : via.gui.SelectItem
+        HitArea_SelectItem : via.gui.HitArea
+        cur_sor_lomg : via.gui.TextureSet (hidden)  ""
+        m_objective : via.gui.Text  "Search the old house for the serum"
+        m_time : via.gui.Text  "1:32'55""
+        m_difficulty : via.gui.Text  "Normal"
+        m_place : via.gui.Text  "Main House 1F"
+        m_chapter : via.gui.Text (hidden)  ""
+        m_day : via.gui.Text  "11/06/2026 04:16:11"
+        m_number : via.gui.Text  "6"
+      item5 : via.gui.SelectItem
+        HitArea_SelectItem : via.gui.HitArea
+        cur_sor_lomg : via.gui.TextureSet (hidden)  ""
+        m_objective : via.gui.Text  "Get 3 dog heads and open the door to the yard"
+        m_time : via.gui.Text  "1:13'04""
+        m_difficulty : via.gui.Text  "Normal"
+        m_place : via.gui.Text  "Main House 1F"
+        m_chapter : via.gui.Text (hidden)  ""
+        m_day : via.gui.Text  "11/06/2026 03:55:35"
+        m_number : via.gui.Text  "5"
+      item4 : via.gui.SelectItem
+        HitArea_SelectItem : via.gui.HitArea
+        cur_sor_lomg : via.gui.TextureSet (hidden)  ""
+        m_objective : via.gui.Text  "Get 3 dog heads and open the door to the yard"
+        m_time : via.gui.Text  "1:02'19""
+        m_difficulty : via.gui.Text  "Normal"
+        m_place : via.gui.Text  "Main House 1F"
+        m_chapter : via.gui.Text (hidden)  ""
+        m_day : via.gui.Text  "11/06/2026 03:44:48"
+        m_number : via.gui.Text  "4"
+      item3 : via.gui.SelectItem
+        HitArea_SelectItem : via.gui.HitArea
+        cur_sor_lomg : via.gui.TextureSet (hidden)  ""
+        m_objective : via.gui.Text  "Escape from the house"
+        m_time : via.gui.Text  "0:42'25""
+        m_difficulty : via.gui.Text  "Normal"
+        m_place : via.gui.Text  "Main House 1F"
+        m_chapter : via.gui.Text (hidden)  ""
+        m_day : via.gui.Text  "11/06/2026 03:24:48"
+        m_number : via.gui.Text  "3"
+      item2 : via.gui.SelectItem
+        HitArea_SelectItem : via.gui.HitArea
+        cur_sor_lomg : via.gui.TextureSet (hidden)  ""
+        m_objective : via.gui.Text  "Get 3 dog heads and open the door to the yard"
+        m_time : via.gui.Text  "1:13'26""
+        m_difficulty : via.gui.Text  "Normal"
+        m_place : via.gui.Text  "Main House 1F"
+        m_chapter : via.gui.Text (hidden)  ""
+        m_day : via.gui.Text  "11/07/2026 08:10:07"
+        m_number : via.gui.Text  "2"
+      item1 : via.gui.SelectItem
+        HitArea_SelectItem : via.gui.HitArea
+        cur_sor_lomg : via.gui.TextureSet (hidden)  ""
+        m_objective : via.gui.Text  "Get 3 dog heads and open the door to the yard"
+        m_time : via.gui.Text  "1:07'45""
+        m_difficulty : via.gui.Text  "Normal"
+        m_place : via.gui.Text  "Main House 1F"
+        m_chapter : via.gui.Text (hidden)  ""
+        m_day : via.gui.Text  "11/07/2026 00:36:08"
+        m_number : via.gui.Text  "1"
+      selectitem : via.gui.SelectItem
+        HitArea_SelectItem : via.gui.HitArea
+        cur_sor_lomg : via.gui.TextureSet  ""
+        m_objective : via.gui.Text  "Get 3 dog heads and open the door to the yard"
+        m_time : via.gui.Text  "1:10'43""
+        m_difficulty : via.gui.Text  "Normal"
+        m_place : via.gui.Text  "Main House 1F"
+        m_chapter : via.gui.Text (hidden)  ""
+        m_day : via.gui.Text  "11/07/2026 08:43:23"
+        m_number : via.gui.Text  "Autosave"

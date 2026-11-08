@@ -6,16 +6,22 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <thread>
 #include <tuple>
 
+#include "bot_logic.hpp"
 #include "bridge.hpp"
 #include "engine.hpp"
 #include "game_locator.hpp"
 #include "json_mini.hpp"
 #include "packet.hpp"
+#include "save_sync.hpp"
+#include "updater.hpp"
+#include "version.hpp"
+#include "zip_extract.hpp"
 
 namespace fs = std::filesystem;
 using namespace re7mp;
@@ -190,6 +196,10 @@ static void test_bridge(const fs::path& tmp) {
     CHECK(json_str(t, "name", name) && name == "Ann \\\"The Boss\\\" \\\\o/");
     std::string tr;
     CHECK(json_str(t, "transport", tr) && tr == "tcp");
+    // The exe's release number and protocol version go to the script with every remote pose.
+    std::string exe_ver;
+    CHECK(json_str(t, "exe", exe_ver) && exe_ver == kReleaseVersion);
+    CHECK(json_num(t, "proto", v) && static_cast<int>(v) == static_cast<int>(kProtocolVersion));
     CHECK(b.publish_event(99, 3, 1, 2));
     t = read_text(d / "re7mp_evt_in.json");
     CHECK(json_num(t, "session", v) && v == 99 && json_num(t, "id", v) && v == 3 && json_num(t, "arg", v) && v == 2);
@@ -234,10 +244,10 @@ static void test_loopback(const fs::path& tmp) {
     std::atomic<int> flags{0};
     std::thread g([&] { fake_game(dir, 100.0, 200.0, 4600, &flags); });
     auto in_json = [&] { return read_text(dir / "re7mp_in.json"); };
-    auto in_flags = [&] {
+    auto in_flags = [&] {  // (the bot's pose bits come and go on a timer: the ready check does not look at them)
         double v = -1;
         json_num(in_json(), "flags", v);
-        return static_cast<int>(v);
+        return static_cast<int>(v) & ~static_cast<int>(kFlagPoseMask);
     };
 
     std::this_thread::sleep_for(milliseconds(800));
@@ -301,17 +311,16 @@ static void test_network(const fs::path& tmp) {
     ca.data_dir = tmp / "na";
     cb.data_dir = tmp / "nb";
     ca.mode = cb.mode = Mode::Network;
+    ca.transport = Transport::TcpHost;
+    cb.transport = Transport::TcpJoin;
     ca.listen_port = 28931;
-    ca.peer_host = "127.0.0.1";
-    ca.peer_port = 28932;
     ca.name = "Alice";
-    cb.listen_port = 28932;
     cb.peer_host = "127.0.0.1";
     cb.peer_port = 28931;
     cb.name = "Bob";
     std::string err;
     CHECK(a.start(ca, err));
-    // B starts late: A's event must be retransmitted until B is there to ack it.
+    // B starts late: A's event must be kept (and resent) until B has connected and acked it.
     std::atomic<int> fa{0}, fb{0};
     std::thread g1([&] { fake_game(ca.data_dir, 10.0, 10.0, 2500, &fa); });
     std::this_thread::sleep_for(milliseconds(300));
@@ -363,6 +372,7 @@ static void test_network(const fs::path& tmp) {
     Config bad;
     bad.data_dir = tmp / "bad";
     bad.mode = Mode::Network;
+    bad.transport = Transport::TcpJoin;  // joining without the host's address
     Engine c;
     CHECK(!c.start(bad, err) && !err.empty());
 }
@@ -410,6 +420,109 @@ static size_t inbox_size(const fs::path& dir) {
     if (!mini::parse(read_text(dir / "re7mp_msg_in.json"), v)) return 0;
     const mini::Value* msgs = v.get("msgs");
     return msgs ? msgs->arr.size() : 0;
+}
+
+// ---- (9.13) the loopback bot answers gifts and drops, and can go down and be revived ----
+static void test_bot_logic_units() {
+    CHECK(bot_answer_gift("Herb|2") == "g|Herb|2|ok|the loopback bot took it");
+    CHECK(bot_answer_gift("Herb|0").empty() && bot_answer_gift("Herb").empty() && bot_answer_gift("He rb|1").empty() &&
+          bot_answer_gift("Herb|1000").empty() && bot_answer_gift("Herb|1|2").empty() && bot_answer_gift("|1").empty() &&
+          bot_answer_gift("Herb|-1").empty() && bot_answer_gift("Herb|1x").empty());
+    CHECK(bot_answer_drop("Coin|1|1.00|0.00|-2.50") == "d|Coin|1|ok|the loopback bot sees it on the ground");
+    CHECK(bot_answer_drop("Coin|1|x|0|0").empty() && bot_answer_drop("Coin|1|1|2").empty() && bot_answer_drop("Coin|0|1|2|3").empty() &&
+          bot_answer_drop("Co in|1|1|2|3").empty() && bot_answer_drop("Coin|1|1|2|nan").empty());
+    BotEvent e;
+    CHECK(bot_parse_event("e|heal|Herb|1.00|1.60|-0.50", e) && e.kind == "heal" && e.arg == "Herb" && e.x == 1.0 && e.y == 1.6 &&
+          e.z == -0.5 && bot_is_healing(e));
+    CHECK(bot_parse_event("e|use|RemedyM|0|0|0", e) && bot_is_healing(e));
+    CHECK(bot_parse_event("e|revive|Herb|0|0|0", e) && bot_is_healing(e));
+    CHECK(bot_parse_event("e|down||1|2|3", e) && e.arg.empty() && !bot_is_healing(e));
+    CHECK(!bot_parse_event("h|600|1000|0", e) && !bot_parse_event("e|heal|Herb|1|2", e) && !bot_parse_event("e|he4l|Herb|1|2|3", e) &&
+          !bot_parse_event("e||Herb|1|2|3", e) && !bot_parse_event("e|heal|Herb|1|nan|3", e) && !bot_parse_event("x|heal|Herb|1|2|3", e));
+    CHECK(bot_event_text("down", 1.0, 2.0, 3.0) == "e|down||1.00|2.00|3.00");
+    CHECK(bot_event_text("up", -1.5, 0.0, 10.25) == "e|up||-1.50|0.00|10.25");
+    CHECK(bot_health_text(true) == "h|1|1000|1" && bot_health_text(false) == "h|1000|1000|0");
+    CHECK(bot_command("down") == 1 && bot_command("up") == 0 && bot_command("sideways") == -1 && bot_command("") == -1);
+    CHECK(std::fabs(bot_distance(0, 0, 0, 3, 4, 0) - 5.0) < 1e-9);
+    // the script's revive radius is 3 m since 9.14; the bot allows the same slack (x1.25) the script does
+    CHECK(kBotReviveRadius == 3.75 && bot_heal_reaches(3.0) && bot_heal_reaches(3.75) && !bot_heal_reaches(3.76) && !bot_heal_reaches(5.0));
+}
+
+static bool any_with_prefix(const std::vector<std::string>& v, const std::string& prefix) {
+    for (const auto& s : v) {
+        if (s.compare(0, prefix.size(), prefix) == 0) return true;
+    }
+    return false;
+}
+static int count_with_prefix(const std::vector<std::string>& v, const std::string& prefix) {
+    int n = 0;
+    for (const auto& s : v) {
+        if (s.compare(0, prefix.size(), prefix) == 0) ++n;
+    }
+    return n;
+}
+
+static void test_bot_gifts_and_down(const fs::path& tmp) {
+    const fs::path dir = tmp / "bot913";
+    Engine e;
+    Config cfg;
+    cfg.data_dir = dir;
+    cfg.mode = Mode::Loopback;
+    cfg.transport = Transport::TcpHost;
+    cfg.listen_port = 28983;
+    cfg.name = "Tester";
+    std::string err;
+    CHECK(e.start(cfg, err));
+    fs::create_directories(dir);
+    std::thread g([&] { fake_game(dir, 100.0, 200.0, 8200); });
+    std::this_thread::sleep_for(milliseconds(900));
+    auto bot_at = [&](double& x, double& y, double& z) {
+        const std::string t = read_text(dir / "re7mp_in.json");
+        return json_num(t, "x", x) && json_num(t, "y", y) && json_num(t, "z", z);
+    };
+    // a gift and a drop are answered; a damaged one is not
+    MsgList sent = {{1, 5, "Herb|2"}, {2, 6, "Coin|1|1.00|0.00|2.00"}, {3, 5, "garbage"}};
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(600));
+    auto answers = inbox_payloads(dir, 10);
+    CHECK(answers.size() == 2 && answers[0] == "g|Herb|2|ok|the loopback bot took it" && any_with_prefix(answers, "d|Coin|1|ok|"));
+    // it goes down: it says so, and stays where it fell
+    sent.push_back({4, 11, "down"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(700));
+    auto health = inbox_payloads(dir, 7);
+    CHECK(any_with_prefix(health, "e|down||") && any_with_prefix(health, "h|1|1000|1"));
+    double x1 = 0, y1 = 0, z1 = 0, x2 = 0, y2 = 0, z2 = 0;
+    CHECK(bot_at(x1, y1, z1));
+    std::this_thread::sleep_for(milliseconds(400));
+    CHECK(bot_at(x2, y2, z2) && x1 == x2 && y1 == y2 && z1 == z2);
+    // a heal from far away does nothing; one next to it gets it up, and it walks again
+    sent.push_back({5, 7, "e|heal|Herb|0.00|0.00|0.00"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(500));
+    CHECK(!any_with_prefix(inbox_payloads(dir, 7), "e|up||"));
+    char heal[120];
+    std::snprintf(heal, sizeof(heal), "e|heal|Herb|%.2f|%.2f|%.2f", x2 + 1.0, y2, z2);
+    sent.push_back({6, 7, heal});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(700));
+    health = inbox_payloads(dir, 7);
+    CHECK(count_with_prefix(health, "e|up||") == 1 && any_with_prefix(health, "h|1000|1000|0"));
+    CHECK(bot_at(x1, y1, z1));
+    std::this_thread::sleep_for(milliseconds(300));
+    CHECK(bot_at(x2, y2, z2) && (x1 != x2 || z1 != z2));
+    // told to go down and then to get up
+    sent.push_back({7, 11, "down"});
+    sent.push_back({8, 11, "sideways"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(500));
+    CHECK(count_with_prefix(inbox_payloads(dir, 7), "e|down||") == 2);
+    sent.push_back({9, 11, "up"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(500));
+    CHECK(count_with_prefix(inbox_payloads(dir, 7), "e|up||") == 2);
+    g.join();
+    e.stop();
 }
 
 static void test_json_mini() {
@@ -524,6 +637,87 @@ static void test_stationary_bot(const fs::path& tmp) {
     e.stop();
 }
 
+static void test_bot_pose_schedule() {
+    // The pure schedule: nothing before the first time, then block 3.5 s, walk, crouch 3 s, walk, heal 3.6 s, walk, round again.
+    CHECK(bot_pose_flags(0.0f, 4.0f) == 0 && bot_pose_flags(3.9f, 4.0f) == 0);
+    CHECK(bot_pose_flags(4.0f, 4.0f) == kFlagPoseGuard && bot_pose_flags(7.4f, 4.0f) == kFlagPoseGuard);
+    CHECK(bot_pose_flags(7.6f, 4.0f) == 0 && bot_pose_flags(8.4f, 4.0f) == 0);
+    CHECK(bot_pose_flags(8.6f, 4.0f) == kFlagPoseCrouch && bot_pose_flags(11.4f, 4.0f) == kFlagPoseCrouch);
+    CHECK(bot_pose_flags(11.6f, 4.0f) == 0 && bot_pose_flags(12.4f, 4.0f) == 0);
+    CHECK(bot_pose_flags(12.6f, 4.0f) == kFlagPoseHeal && bot_pose_flags(16.0f, 4.0f) == kFlagPoseHeal);
+    CHECK(bot_pose_flags(16.2f, 4.0f) == 0 && bot_pose_flags(19.9f, 4.0f) == 0);
+    CHECK(bot_pose_flags(20.1f, 4.0f) == kFlagPoseGuard && bot_pose_flags(24.7f, 4.0f) == kFlagPoseCrouch &&
+          bot_pose_flags(28.6f, 4.0f) == kFlagPoseHeal);                                                   // the loop repeats
+    CHECK(bot_pose_flags(5.0f, -1.0f) == 0 && bot_pose_flags(500.0f, -1.0f) == 0);                          // negative = never
+    for (float s = 0; s < 120.0f; s += 0.05f) {  // never two bits at once, never anything outside the three pose bits
+        const uint16_t f = bot_pose_flags(s, 2.0f);
+        CHECK(f == 0 || f == kFlagPoseGuard || f == kFlagPoseHeal || f == kFlagPoseCrouch);
+    }
+    CHECK(kFlagPoseCrouch == 256 && kFlagPoseMask == (64 | 128 | 256));  // (the Lua script uses the same numbers)
+    CHECK((kFlagPoseMask & (kFlagReady | kFlagDiffMask | kFlagSeesReady | kFlagGo | kFlagNoPose)) == 0);  // no clash with the other bits
+}
+
+static void test_bot_poses(const fs::path& tmp) {
+    // The loopback bot blocks, crouches, then heals, so the stand-in's poses can be watched alone. The first block starts at once.
+    const fs::path dir = tmp / "botposes";
+    Engine e;
+    Config cfg;
+    cfg.data_dir = dir;
+    cfg.mode = Mode::Loopback;
+    cfg.listen_port = 28971;
+    cfg.bot_pose_first_s = 0.0f;
+    std::string err;
+    CHECK(e.start(cfg, err));
+    fs::create_directories(dir);
+    std::thread g([&] { fake_game(dir, 100.0, 200.0, 13500); });
+    bool saw_guard = false, saw_heal = false, saw_crouch = false, both = false, in_order = false;
+    int ready_bits = 0;
+    const auto until = std::chrono::steady_clock::now() + milliseconds(13000);
+    while (std::chrono::steady_clock::now() < until) {
+        double v = -1;
+        json_num(read_text(dir / "re7mp_in.json"), "flags", v);
+        const int f = static_cast<int>(v);
+        if (f > 0) {
+            const int bits = f & kFlagPoseMask;
+            if (bits != 0 && (bits & (bits - 1)) != 0) both = true;  // two pose bits in one packet
+            if (f & kFlagPoseGuard) saw_guard = true;
+            if (f & kFlagPoseCrouch) saw_crouch = true;
+            if ((f & kFlagPoseHeal) && saw_crouch && saw_guard) in_order = true;
+            if (f & kFlagPoseHeal) saw_heal = true;
+            ready_bits |= f & ~static_cast<int>(kFlagPoseMask);
+        }
+        std::this_thread::sleep_for(milliseconds(50));
+    }
+    g.join();
+    e.stop();
+    std::printf("  bot poses: guard=%d crouch=%d heal=%d\n", saw_guard, saw_crouch, saw_heal);
+    CHECK(saw_guard && saw_crouch && saw_heal && in_order);  // block, then crouch, then heal
+    CHECK(!both);
+    CHECK(ready_bits == 0);  // it never claims to be ready: only pose bits were set
+
+    // Switched off: the same run with a negative start shows no pose bits at all.
+    const fs::path dir2 = tmp / "botposes_off";
+    Engine e2;
+    Config c2 = cfg;
+    c2.data_dir = dir2;
+    c2.listen_port = 28973;
+    c2.bot_pose_first_s = -1.0f;
+    CHECK(e2.start(c2, err));
+    fs::create_directories(dir2);
+    std::thread g2([&] { fake_game(dir2, 100.0, 200.0, 2500); });
+    bool any = false;
+    const auto until2 = std::chrono::steady_clock::now() + milliseconds(2300);
+    while (std::chrono::steady_clock::now() < until2) {
+        double v = -1;
+        json_num(read_text(dir2 / "re7mp_in.json"), "flags", v);
+        if (v > 0 && (static_cast<int>(v) & kFlagPoseMask)) any = true;
+        std::this_thread::sleep_for(milliseconds(50));
+    }
+    g2.join();
+    e2.stop();
+    CHECK(!any);
+}
+
 static void test_loopback_messages_and_tcp(const fs::path& tmp, Transport transport, uint16_t port, const char* label) {
     const fs::path dir = tmp / (std::string("lbm_") + label);
     Engine e;
@@ -558,7 +752,7 @@ static void test_loopback_messages_and_tcp(const fs::path& tmp, Transport transp
     CHECK(s.messages_sent == 2 && s.messages_received == 2);
     auto log = e.drain_log();
     CHECK(count_lines(log, "never confirmed") == 0);
-    if (transport != Transport::Udp) CHECK(count_lines(log, "TCP: connected to the host") == 1);
+    CHECK(count_lines(log, "TCP: connected to the host") == 1);
     e.stop();
 }
 
@@ -639,10 +833,9 @@ static void test_message_retransmission(const fs::path& tmp) {
     ca.data_dir = tmp / "mr_a";
     cb.data_dir = tmp / "mr_b";
     ca.mode = cb.mode = Mode::Network;
+    ca.transport = Transport::TcpHost;
+    cb.transport = Transport::TcpJoin;
     ca.listen_port = 28961;
-    ca.peer_host = "127.0.0.1";
-    ca.peer_port = 28962;
-    cb.listen_port = 28962;
     cb.peer_host = "127.0.0.1";
     cb.peer_port = 28961;
     std::string err;
@@ -650,7 +843,7 @@ static void test_message_retransmission(const fs::path& tmp) {
     std::this_thread::sleep_for(milliseconds(200));
     write_msgs(ca.data_dir, {{1, 7, "sent before B existed"}});
     std::this_thread::sleep_for(milliseconds(1000));
-    CHECK(b.start(cb, err));  // B appears late: A keeps resending until B acks
+    CHECK(b.start(cb, err));  // B appears late: A keeps the message until B has connected and acked it
     std::this_thread::sleep_for(milliseconds(1200));
     auto got = inbox_payloads(cb.data_dir, 7);
     CHECK(got.size() == 1 && got[0] == "sent before B existed");  // delivered exactly once despite resends
@@ -658,6 +851,902 @@ static void test_message_retransmission(const fs::path& tmp) {
     CHECK(count_lines(loga, "never confirmed") == 0);
     a.stop();
     b.stop();
+}
+
+// ---- enemy snapshots (state blobs) -----------------------------------------------------------
+
+// What the Lua script does: write the latest enemy snapshot.
+static void write_state(const fs::path& dir, uint64_t seq, const std::string& payload) {
+    write_text(dir / "re7mp_state_out.json", "{\"seq\":" + std::to_string(seq) + ",\"p\":" + json_quote(payload) + "}");
+}
+// What the Lua script reads: the blob (and its count) currently in re7mp_state_in.json.
+static bool read_state(const fs::path& dir, std::string& payload, double* n = nullptr) {
+    mini::Value v;
+    if (!mini::parse(read_text(dir / "re7mp_state_in.json"), v)) return false;
+    const mini::Value* p = v.get("p");
+    if (!p) return false;
+    payload = p->str;
+    if (n) {
+        const mini::Value* c = v.get("n");
+        *n = c ? c->num : 0;
+    }
+    return true;
+}
+
+static uint16_t& kind_dummy_ref() {
+    static uint16_t k = 0;
+    return k;
+}
+
+static void test_state_packets(const fs::path& tmp) {
+    const std::string blob = "Em2000,1.50,0.00,-2.25,0,0.7,0,0.7,820,1,3,12,45.5;Em6100,3.00,0.00,4.00,0,0,0,1,-1,1,0,0,0";
+    auto pkt = encode_state(11, 5, blob);
+    uint32_t sess = 0, seq = 0;
+    std::string out;
+    CHECK(pkt.size() == sizeof(StateFixed) + blob.size() && sizeof(StateFixed) == 18);
+    CHECK(decode_state(pkt.data(), pkt.size(), sess, seq, out) && sess == 11 && seq == 5 && out == blob);
+    CHECK(peek_type(pkt.data(), pkt.size()) == static_cast<int>(PacketType::State));
+    CHECK(!decode_state(pkt.data(), pkt.size() - 1, sess, seq, out));    // truncated
+    CHECK(!decode_state(pkt.data(), pkt.size() + 1, sess, seq, out));    // trailing byte
+    CHECK(encode_state(1, 1, "").empty());                               // nothing to send
+    CHECK(encode_state(1, 1, std::string(kMaxStatePayload, 'x')).size() == sizeof(StateFixed) + kMaxStatePayload);
+    CHECK(encode_state(1, 1, std::string(kMaxStatePayload + 1, 'x')).empty());  // too long
+    CHECK(encode_state(1, 1, std::string("a\nb")).empty());              // control character
+    CHECK(encode_state(1, 1, std::string("\xff\xfe")).empty());          // not UTF-8
+    auto bad = pkt;
+    bad[sizeof(Header) + 4] = 0;  // length 0 in the header
+    bad[sizeof(Header) + 5] = 0;
+    CHECK(!decode_state(bad.data(), bad.size(), sess, seq, out));
+    CHECK(!decode_message(pkt.data(), pkt.size(), sess, seq, kind_dummy_ref(), out));  // a state packet is not a message
+
+    // The bridge: Lua writes the snapshot, the engine polls it once per change and publishes received ones.
+    const fs::path d = tmp / "state_bridge";
+    fs::create_directories(d);
+    FileBridge b(d);
+    LocalState ls;
+    CHECK(!b.poll_state(ls));  // no file yet
+    write_state(d, 1, blob);
+    CHECK(b.poll_state(ls) && ls.lua_seq == 1 && ls.payload == blob);
+    CHECK(!b.poll_state(ls));  // unchanged
+    write_state(d, 2, "Em3000,0,0,0,0,0,0,1,-1,1,0,0,0");
+    CHECK(b.poll_state(ls) && ls.lua_seq == 2);
+    write_text(d / "re7mp_state_out.json", "{\"seq\":3,\"p\":\"half writ");  // caught mid-write: retried
+    CHECK(!b.poll_state(ls));
+    write_state(d, 3, "x,y\nz");  // control character in the payload: refused
+    CHECK(!b.poll_state(ls));
+    write_state(d, 4, "ok");
+    CHECK(b.poll_state(ls) && ls.lua_seq == 4);
+    CHECK(b.publish_state(77, 3, "quote\" and \\ slash"));
+    std::string got;
+    double n = 0;
+    CHECK(read_state(d, got, &n) && got == "quote\" and \\ slash" && n == 3);
+    b.clear_stale();
+    CHECK(!fs::exists(d / "re7mp_state_in.json") && !fs::exists(d / "re7mp_state_out.json"));
+}
+
+// Two engines over TCP: the host's snapshot reaches the joiner (latest wins).
+static void test_state_over_tcp(const fs::path& tmp) {
+    Engine host, join;
+    Config ch, cj;
+    ch.data_dir = tmp / "st_host";
+    cj.data_dir = tmp / "st_join";
+    ch.mode = cj.mode = Mode::Network;
+    ch.transport = Transport::TcpHost;
+    cj.transport = Transport::TcpJoin;
+    ch.listen_port = 28981;
+    cj.peer_host = "127.0.0.1";
+    cj.peer_port = 28981;
+    std::string err;
+    CHECK(host.start(ch, err) && join.start(cj, err));
+    std::thread g1([&] { fake_game(ch.data_dir, 0, 0, 2800, nullptr); });
+    std::thread g2([&] { fake_game(cj.data_dir, 5, 5, 2800, nullptr); });
+    std::this_thread::sleep_for(milliseconds(1300));  // connected
+    const std::string a = "Em2000,1.00,0.00,2.00,0,0,0,1,500,1,0,0,0";
+    const std::string b = "Em2000,1.50,0.00,2.50,0,0,0,1,480,1,0,0,0;Em3000,9.00,0.00,9.00,0,0,0,1,-1,1,0,0,0";
+    write_state(ch.data_dir, 1, a);
+    std::this_thread::sleep_for(milliseconds(300));
+    std::string got;
+    double n = 0;
+    CHECK(read_state(cj.data_dir, got, &n) && got == a && n == 1);
+    write_state(ch.data_dir, 2, b);
+    std::this_thread::sleep_for(milliseconds(300));
+    CHECK(read_state(cj.data_dir, got, &n) && got == b && n == 2);
+    CHECK(!fs::exists(ch.data_dir / "re7mp_state_in.json"));  // the host received nothing, so nothing was published
+    g1.join();
+    g2.join();
+    CHECK(host.status().states_sent == 2 && join.status().states_received == 2 && join.status().states_sent == 0);
+    host.stop();
+    join.stop();
+}
+
+// ---- saves -----------------------------------------------------------------------------------
+
+static std::vector<uint8_t> random_bytes(size_t n, uint32_t seed) {
+    std::vector<uint8_t> v(n);
+    uint32_t x = seed * 2654435761u + 1;
+    for (auto& b : v) {
+        x = x * 1664525u + 1013904223u;
+        b = static_cast<uint8_t>(x >> 24);
+    }
+    return v;
+}
+static void write_bytes(const fs::path& p, const std::vector<uint8_t>& v) {
+    fs::create_directories(p.parent_path());
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(v.data()), static_cast<std::streamsize>(v.size()));
+}
+static std::vector<uint8_t> read_bytes(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+static void test_file_packets() {
+    CHECK(crc32("123456789", 9) == 0xCBF43926u);
+    const auto data = random_bytes(5000, 1);
+    auto b = encode_file_begin(7, 3, 5000, crc32(data.data(), data.size()), 12, "CO-OP Alice 2026-11-06 21:04");
+    uint32_t id, total, crc;
+    uint16_t slot;
+    std::string label;
+    CHECK(decode_file_begin(b.data(), b.size(), id, total, crc, slot, label) && id == 3 && total == 5000 && slot == 12 &&
+          label == "CO-OP Alice 2026-11-06 21:04");
+    CHECK(!decode_file_begin(b.data(), b.size() - 1, id, total, crc, slot, label));
+    auto bad = encode_file_begin(7, 3, 0, 1, 1, "x");  // empty file
+    CHECK(!decode_file_begin(bad.data(), bad.size(), id, total, crc, slot, label));
+    bad = encode_file_begin(7, 3, static_cast<uint32_t>(kMaxFileBytes + 1), 1, 1, "x");  // too big
+    CHECK(!decode_file_begin(bad.data(), bad.size(), id, total, crc, slot, label));
+    bad = encode_file_begin(7, 3, 10, 1, 1, std::string("a\nb"));  // control character in the label
+    CHECK(!decode_file_begin(bad.data(), bad.size(), id, total, crc, slot, label));
+    auto c = encode_file_chunk(7, 3, 4096, data.data() + 4096, 904);
+    uint32_t cid, off;
+    const uint8_t* bytes;
+    size_t n;
+    CHECK(decode_file_chunk(c.data(), c.size(), cid, off, bytes, n) && cid == 3 && off == 4096 && n == 904 &&
+          std::memcmp(bytes, data.data() + 4096, 904) == 0);
+    CHECK(!decode_file_chunk(c.data(), c.size() + 1, cid, off, bytes, n));
+    auto e = make_file_end(7, 3);
+    CHECK(decode_file_end(&e, sizeof(e), cid) && cid == 3);
+}
+
+static void test_save_sync_units(const fs::path& tmp) {
+    // RE7's real names (from a real save folder): manual saves are dataNNNSlot.bin, the Autosave is data000.bin
+    CHECK(parse_slot("data001Slot.bin") == 1 && parse_slot("DATA012SLOT.BIN") == 12 && parse_slot("data011Slot.bin") == 11);
+    CHECK(parse_slot("data000.bin") == -1 && parse_slot("data000Slot.bin") == -1);  // the Autosave is not a slot
+    CHECK(parse_slot("data00-1.bin") == -1 && parse_slot("data00-92.bin") == -1 && parse_slot("data012.bin") == -1);  // system files, old guess
+    CHECK(parse_slot("data99Slot.bin") == -1 && parse_slot("remotecache.vdf") == -1 && parse_slot("data012Slot.bin.tmp") == -1 &&
+          parse_slot("data012Slot.bin.re7mp_tmp") == -1 && parse_slot("dataabcSlot.bin") == -1);
+    CHECK(slot_filename(7) == "data007Slot.bin" && parse_slot(slot_filename(42)) == 42);
+
+    // Finding the save folder: the account folder with the newest save wins.
+    const fs::path steam = tmp / "SteamSaves";
+    write_text(steam / "userdata" / "111" / "418370" / "remote" / "win64_save" / "data000.bin", "old");
+    write_text(steam / "userdata" / "222" / "418370" / "remote" / "win64_save" / "data001Slot.bin", "x");
+    fs::create_directories(steam / "userdata" / "333" / "730" / "remote");  // another game
+    std::this_thread::sleep_for(milliseconds(30));
+    write_text(steam / "userdata" / "222" / "418370" / "remote" / "win64_save" / "data002Slot.bin", "newest");
+    auto dirs = find_save_dirs(steam);
+    CHECK(dirs.size() == 2 && dirs[0] == steam / "userdata" / "222" / "418370" / "remote" / "win64_save");
+
+    // Slot picking never lands on a single-player save.
+    const fs::path d = tmp / "slots";
+    fs::create_directories(d);
+    CoopManifest m(tmp / "slots_manifest.json");
+    CHECK(pick_slot(d, 5, m) == 5);                        // free: use the sender's slot
+    write_text(d / "data005Slot.bin", "mine");
+    CHECK(pick_slot(d, 5, m) == 1);                        // occupied by a single-player save: first free slot (slots start at 1)
+    write_text(d / "data001Slot.bin", "mine too");
+    CHECK(pick_slot(d, 5, m) == 2);
+    write_text(d / "data000.bin", "the autosave");         // never a slot to put a co-op save in, never listed
+    CHECK(pick_slot(d, 0, m) == 2);                        // the sender's "slot 0" (an old exe sending its autosave) lands in a free manual slot
+    CoopEntry e;
+    e.slot = 5;
+    e.label = "CO-OP Bob 2026-11-06 20:00";
+    e.from = "Bob";
+    e.crc = 1234;
+    m.upsert(e);
+    CHECK(pick_slot(d, 5, m) == 5);                        // already a co-op slot: it may be replaced
+    CHECK(m.is_coop_slot(5) && !m.is_coop_slot(1) && m.has_crc(1234) && !m.has_crc(1));
+    CHECK(m.is_received_slot(5));
+    // A save you made yourself and sent is co-op too, but an incoming save may not replace it.
+    CoopEntry mine;
+    mine.slot = 6;
+    mine.label = "CO-OP Me 2026-11-07 12:00";
+    mine.role = "sent";
+    mine.partner = "Bob";
+    mine.crc = 777;
+    mine.size = 4;
+    m.upsert(mine);
+    write_text(d / "data006Slot.bin", "mine");
+    CHECK(m.is_coop_slot(6) && !m.is_received_slot(6) && pick_slot(d, 6, m) != 6);
+    CHECK(list_occupied(d) == (std::vector<int>{1, 5, 6}));  // the autosave (data000.bin) is not listed
+    CHECK(m.save("last \"event\"", true, list_occupied(d), "C:\\Steam\\userdata\\759758082\\418370\\remote\\win64_save"));
+    {
+        std::ifstream f(tmp / "slots_manifest.json", std::ios::binary);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        const std::string js = ss.str();
+        CHECK(js.find("\"tag\":\"[CO-OP: sent to Bob]\"") != std::string::npos);  // what the Load screen shows for slot 6: YOUR save, sent to Bob
+        CHECK(js.find("\"tag\":\"[CO-OP: Bob]\"") != std::string::npos);          // ...and for slot 5: the copy received from Bob
+        CHECK(js.find("\"occupied\":[1,5,6]") != std::string::npos);
+        CHECK(js.find("\"dir\":\"C:\\\\Steam\\\\userdata\\\\759758082") != std::string::npos);  // the watched folder, escaped
+        CHECK(js.find("\"role\":\"sent\"") != std::string::npos && js.find("\"role\":\"received\"") != std::string::npos);
+    }
+    CoopManifest m2(tmp / "slots_manifest.json");
+    m2.load();
+    CHECK(m2.entries().size() == 2 && m2.entries()[0].label == "CO-OP Bob 2026-11-06 20:00" && m2.entries()[0].crc == 1234);
+    CHECK(m2.entries()[1].role == "sent" && m2.entries()[1].partner == "Bob" && m2.entries()[1].slot == 6);
+    CHECK(CoopManifest::tag_for(m2.entries()[0]) == "[CO-OP: Bob]" && CoopManifest::tag_for(m2.entries()[1]) == "[CO-OP: sent to Bob]");
+    {   // where a received copy came from and why it is where it is survives a restart
+        CoopEntry r;
+        r.slot = 12;
+        r.label = "CO-OP Bob 2026-11-08 03:00";
+        r.from = r.partner = "Bob";
+        r.crc = 99;
+        r.from_slot = 10;
+        r.why = "slot 10 here holds a save of your own, so it went into the lowest free slot";
+        CoopManifest mw(tmp / "why_manifest.json");
+        mw.upsert(r);
+        CHECK(mw.save("x", true));
+        CoopManifest mr(tmp / "why_manifest.json");
+        mr.load();
+        CHECK(mr.entries().size() == 1 && mr.entries()[0].from_slot == 10 && mr.entries()[0].why == r.why);
+    }
+    for (int i = 1; i <= kMaxSlot; ++i) {
+        if (!fs::exists(d / slot_filename(i))) write_text(d / slot_filename(i), "x");
+    }
+    CHECK(pick_slot(d, 7, m2) == 5);                       // full, but a co-op slot can still be replaced
+    CoopManifest m3(tmp / "no_manifest.json");
+    CHECK(pick_slot(d, 7, m3) == -1);                      // everything holds a single-player save
+
+    // A manifest from an older version (no partner, no role) still loads: it is a received copy, from the sender.
+    write_text(tmp / "old_manifest.json",
+               "{\"enabled\":true,\"last\":\"\",\"entries\":[{\"slot\":4,\"label\":\"CO-OP Zed 2026-11-01 10:00\",\"from\":\"Zed\","
+               "\"when\":\"x\",\"crc\":5,\"size\":9}]}");
+    CoopManifest mo(tmp / "old_manifest.json");
+    mo.load();
+    CHECK(mo.entries().size() == 1 && mo.entries()[0].role == "received" && mo.entries()[0].partner == "Zed");
+
+    // Pruning: a deleted save stops being co-op; a slot reused while we were away (other size or checksum) too.
+    const fs::path pd = tmp / "prune";
+    fs::create_directories(pd);
+    write_text(pd / "data001Slot.bin", "aaaa");
+    write_text(pd / "data002Slot.bin", "bbbbbb");
+    write_text(pd / "data003Slot.bin", "cc");
+    CoopManifest mp(tmp / "prune_manifest.json");
+    auto entry_for = [](int slot, const std::string& body) {
+        CoopEntry x;
+        x.slot = slot;
+        x.crc = crc32(body.data(), body.size());
+        x.size = body.size();
+        x.partner = "Bob";
+        return x;
+    };
+    mp.upsert(entry_for(1, "aaaa"));
+    mp.upsert(entry_for(2, "bbbbbb"));
+    mp.upsert(entry_for(3, "cc"));
+    CHECK(mp.prune(pd, true) == 0);                        // all three are as we left them
+    fs::remove(pd / "data001Slot.bin");
+    CHECK(mp.prune(pd, false) == 1 && !mp.is_coop_slot(1)); // deleted in the game's menu
+    write_text(pd / "data002Slot.bin", "zzzzzz");              // same size, other content: only a content check sees it
+    CHECK(mp.prune(pd, false) == 0 && mp.is_coop_slot(2));
+    CHECK(mp.prune(pd, true) == 1 && !mp.is_coop_slot(2) && mp.is_coop_slot(3));
+    CHECK(mp.remove_slot(3) && !mp.remove_slot(3));
+
+    // Verifying received copies: a copy somebody wrote over (the game, Steam Cloud ...) stops being listed as CO-OP;
+    // one that is unchanged, and the player's own sent saves, are left alone.
+    {
+        const fs::path vd = tmp / "verify";
+        fs::create_directories(vd);
+        write_text(vd / "data001Slot.bin", "from-bob-1");
+        write_text(vd / "data002Slot.bin", "from-bob-2");
+        write_text(vd / "data003Slot.bin", "mine-sent");
+        CoopManifest mv(tmp / "verify_manifest.json");
+        mv.upsert(entry_for(1, "from-bob-1"));
+        mv.upsert(entry_for(2, "from-bob-2"));
+        auto sent = entry_for(3, "mine-sent");
+        sent.role = "sent";
+        mv.upsert(sent);
+        std::map<int, fs::file_time_type> seen;
+        std::vector<int> dropped;
+        CHECK(mv.verify_received(vd, seen, dropped) == 0 && dropped.empty() && seen.size() == 2);  // nothing changed (the sent save is not looked at)
+        write_text(vd / "data002Slot.bin", "SOMETHING-ELSE");
+        fs::last_write_time(vd / "data002Slot.bin", fs::file_time_type::clock::now() + std::chrono::seconds(5));
+        write_text(vd / "data003Slot.bin", "i saved again");
+        CHECK(mv.verify_received(vd, seen, dropped) == 1 && dropped == std::vector<int>{2} && !mv.is_coop_slot(2));
+        CHECK(mv.is_received_slot(1) && mv.is_coop_slot(3));
+        dropped.clear();
+        CHECK(mv.verify_received(vd, seen, dropped) == 0);  // and it is not reported twice
+    }
+
+    // The watcher reports a save once it has been left alone, and only once.
+    const fs::path w = tmp / "watched";
+    write_text(w / "data001Slot.bin", "existing");
+    SaveWatcher sw(w, 200);
+    sw.baseline();
+    auto t0 = SaveWatcher::Clock::now();
+    CHECK(sw.poll(t0).empty());                            // baseline files are not reported
+    write_text(w / "data002Slot.bin", "new");
+    CHECK(sw.poll(t0 + milliseconds(10)).empty());         // just appeared
+    CHECK(sw.poll(t0 + milliseconds(100)).empty());        // still settling
+    auto ready = sw.poll(t0 + milliseconds(400));
+    CHECK(ready.size() == 1 && ready[0].filename() == "data002Slot.bin");
+    CHECK(sw.poll(t0 + milliseconds(900)).empty());        // reported once
+    write_text(w / "data002Slot.bin", "rewritten, longer");
+    CHECK(sw.poll(t0 + milliseconds(1000)).empty());       // changed again: wait
+    CHECK(sw.poll(t0 + milliseconds(1300)).size() == 1);
+    write_text(w / "data003Slot.bin", "ours");
+    sw.ignore_current(w / "data003Slot.bin");
+    CHECK(sw.poll(t0 + milliseconds(2000)).empty());       // files we wrote ourselves are ignored
+    write_text(w / "data000.bin", "autosave written at a checkpoint");
+    write_text(w / "data00-1.bin", "settings");
+    CHECK(sw.poll(t0 + milliseconds(3000)).empty() && sw.poll(t0 + milliseconds(4000)).empty());  // the Autosave and system files are never shared
+}
+
+static std::string slurp_log(Engine& e, std::vector<std::string>& keep) {
+    for (auto& l : e.drain_log()) keep.push_back(l);
+    std::string all;
+    for (auto& l : keep) all += l + "\n";
+    return all;
+}
+
+static void test_save_transfer(const fs::path& tmp) {
+    const fs::path sa = tmp / "saves_a", sb = tmp / "saves_b";
+    fs::create_directories(sa);
+    fs::create_directories(sb);
+    const auto b_single = random_bytes(2000, 99);
+    write_bytes(sb / "data003Slot.bin", b_single);  // the other player's own single-player save in slot 3
+
+    Config ca, cb;
+    ca.data_dir = tmp / "st_a";
+    cb.data_dir = tmp / "st_b";
+    ca.mode = cb.mode = Mode::Network;
+    ca.transport = Transport::TcpHost;
+    cb.transport = Transport::TcpJoin;
+    ca.listen_port = 28981;
+    cb.peer_host = "127.0.0.1";
+    cb.peer_port = 28981;
+    ca.name = "Alice";
+    cb.name = "Bob";
+    ca.save_sync = cb.save_sync = true;
+    ca.save_dir = sa;
+    cb.save_dir = sb;
+    ca.save_stable_ms = cb.save_stable_ms = 300;
+    Engine a, b;
+    std::string err;
+    CHECK(a.start(ca, err) && b.start(cb, err));
+    std::vector<std::string> loga, logb;
+    std::this_thread::sleep_for(milliseconds(1800));  // connect, exchange names
+
+    // Alice saves into slot 3 (Bob's slot 3 is a single-player save, so it must land elsewhere).
+    const auto big = random_bytes(300 * 1024, 1);
+    write_bytes(sa / "data000.bin", random_bytes(4096, 77));  // Alice's autosave changes too: it must stay home
+    write_bytes(sa / "data003Slot.bin", std::vector<uint8_t>(big.begin(), big.begin() + 1000));  // half-written first
+    std::this_thread::sleep_for(milliseconds(150));
+    write_bytes(sa / "data003Slot.bin", big);
+    std::this_thread::sleep_for(milliseconds(2600));
+    CHECK(read_bytes(sb / "data003Slot.bin") == b_single);   // Bob's own save untouched
+    CHECK(fs::exists(sb / "data001Slot.bin") && read_bytes(sb / "data001Slot.bin") == big);  // the co-op copy, first free slot
+    CHECK(!fs::exists(sb / "data000.bin"));                  // Alice's autosave was not sent and Bob has no autosave of it
+    CoopManifest mb(cb.data_dir / "re7mp_coop_saves.json");
+    mb.load();
+    CHECK(mb.entries().size() == 1 && mb.entries()[0].slot == 1 && mb.entries()[0].from == "Alice" &&
+          mb.entries()[0].label.rfind("CO-OP Alice ", 0) == 0);
+    CHECK(mb.entries()[0].role == "received" && mb.entries()[0].partner == "Alice");
+    // ...and it says where the save came from and why it went there: Alice's slot 3 is a save of Bob's own here
+    CHECK(mb.entries()[0].from_slot == 3 && mb.entries()[0].why.find("holds a save of your own") != std::string::npos);
+    CHECK(b.status().last_save_event.find("installed in slot 1") != std::string::npos &&
+          b.status().last_save_event.find("holds a save of your own") != std::string::npos);
+    {   // The saver's own copy is marked too, with the name of the player it was shared with.
+        CoopManifest ma(ca.data_dir / "re7mp_coop_saves.json");
+        ma.load();
+        CHECK(ma.entries().size() == 1 && ma.entries()[0].slot == 3 && ma.entries()[0].role == "sent" &&
+              ma.entries()[0].partner == "Bob" && ma.is_coop_slot(3) && !ma.is_received_slot(3));
+    }
+    CHECK(fs::exists(sa / "data003Slot.bin") && !fs::exists(sa / "data001Slot.bin"));  // nothing echoed back to Alice
+    CHECK(b.status().saves_received == 1 && a.status().saves_sent == 1);
+    std::printf("  save sharing: Alice's slot 3 became Bob's slot 1 (%s)\n", mb.entries().empty() ? "?" : mb.entries()[0].label.c_str());
+
+    // A free slot on the other side keeps its number; rewriting it replaces the co-op copy.
+    const auto s5 = random_bytes(50 * 1024, 5);
+    write_bytes(sa / "data005Slot.bin", s5);
+    std::this_thread::sleep_for(milliseconds(2000));
+    CHECK(read_bytes(sb / "data005Slot.bin") == s5);
+    const auto s5b = random_bytes(60 * 1024, 6);
+    write_bytes(sa / "data005Slot.bin", s5b);
+    std::this_thread::sleep_for(milliseconds(2000));
+    CHECK(read_bytes(sb / "data005Slot.bin") == s5b);
+
+    // And the other direction; the copies Bob received are not sent back.
+    const auto s7 = random_bytes(40 * 1024, 7);
+    write_bytes(sb / "data007Slot.bin", s7);
+    std::this_thread::sleep_for(milliseconds(2000));
+    CHECK(fs::exists(sa / "data007Slot.bin") && read_bytes(sa / "data007Slot.bin") == s7);
+    CHECK(!fs::exists(sa / "data001Slot.bin"));
+
+    // A save made while the other player is not connected stays private.
+    b.stop();
+    std::this_thread::sleep_for(milliseconds(8000));  // long enough for "reachable" to lapse
+    write_bytes(sa / "data009Slot.bin", random_bytes(10 * 1024, 9));
+    write_bytes(sa / "data003Slot.bin", random_bytes(5 * 1024, 13));  // a co-op slot saved over privately
+    std::this_thread::sleep_for(milliseconds(1500));
+    {
+        CoopManifest ma(ca.data_dir / "re7mp_coop_saves.json");
+        ma.load();
+        CHECK(!ma.is_coop_slot(3) && ma.is_coop_slot(5) && !ma.is_coop_slot(9));  // slot 3 is single-player again
+    }
+    CHECK(b.start(cb, err));
+    std::this_thread::sleep_for(milliseconds(4000));
+    CHECK(!fs::exists(sb / "data009Slot.bin"));
+    fs::remove(sa / "data005Slot.bin");  // deleted in the game's menu: no longer listed as co-op
+
+    // A multi-megabyte save.
+    const auto huge = random_bytes(3 * 1024 * 1024, 11);
+    write_bytes(sa / "data011Slot.bin", huge);
+    std::this_thread::sleep_for(milliseconds(4500));
+    CHECK(fs::exists(sb / "data011Slot.bin") && read_bytes(sb / "data011Slot.bin") == huge);
+    std::this_thread::sleep_for(milliseconds(2500));
+    {
+        CoopManifest ma(ca.data_dir / "re7mp_coop_saves.json");
+        ma.load();
+        CHECK(!ma.is_coop_slot(5) && ma.is_coop_slot(11) && ma.entries().size() == 2);  // slot 7's copy from Bob is listed too
+    }
+    slurp_log(a, loga);
+    slurp_log(b, logb);
+    a.stop();
+    b.stop();
+}
+
+static void test_save_loopback_echo(const fs::path& tmp) {
+    std::string err;
+    // Loopback over TCP: the bot sends your save back as its own co-op save.
+    const fs::path saves = tmp / "lb_saves";
+    fs::create_directories(saves);
+    write_bytes(saves / "data002Slot.bin", random_bytes(1000, 2));  // an existing single-player save
+    Config cl;
+    cl.data_dir = tmp / "lb_data";
+    cl.mode = Mode::Loopback;
+    cl.transport = Transport::TcpHost;
+    cl.listen_port = 28995;
+    cl.save_sync = true;
+    cl.save_dir = saves;
+    cl.save_stable_ms = 300;
+    cl.name = "Me";
+    Engine l;
+    CHECK(l.start(cl, err));
+    // A save is only sent while the other player is there ("Saves you make while connected"). The bot appears about 2 s after the start, so
+    // writing at a fixed 1.5 s raced it and failed about half the time: wait until its name has arrived.
+    for (int i = 0; i < 100 && l.status().remote_name.empty(); ++i) std::this_thread::sleep_for(milliseconds(100));
+    CHECK(l.status().remote_name == "Loopback Bot");
+    std::this_thread::sleep_for(milliseconds(500));
+    const auto mine = random_bytes(100 * 1024, 3);
+    write_bytes(saves / "data002Slot.bin", mine);
+    for (int i = 0; i < 100 && !(fs::exists(saves / "data001Slot.bin") && read_bytes(saves / "data001Slot.bin") == mine); ++i) {
+        std::this_thread::sleep_for(milliseconds(100));  // up to 10 s: a slow or busy machine is fine
+    }
+    std::this_thread::sleep_for(milliseconds(300));
+    CHECK(fs::exists(saves / "data001Slot.bin") && read_bytes(saves / "data001Slot.bin") == mine);
+    CoopManifest ml(cl.data_dir / "re7mp_coop_saves.json");
+    ml.load();
+    CHECK(ml.entries().size() == 2);  // the copy in slot 1 from the bot, and your own slot 2, shared with the bot
+    for (const auto& le : ml.entries()) {
+        if (le.slot == 1) CHECK(le.role == "received" && le.partner == "Loopback Bot" && le.label.rfind("CO-OP Loopback Bot ", 0) == 0);
+        else CHECK(le.slot == 2 && le.role == "sent" && le.partner == "Loopback Bot");
+    }
+    l.stop();
+}
+
+// Loopback over TCP: the bot plays the host and sends two pretend enemies, one circling it, one standing still.
+static void test_loopback_enemies(const fs::path& tmp) {
+    const fs::path dir = tmp / "lb_enemies";
+    Engine e;
+    Config cfg;
+    cfg.data_dir = dir;
+    cfg.mode = Mode::Loopback;
+    cfg.transport = Transport::TcpHost;
+    cfg.listen_port = 28987;
+    std::string err;
+    CHECK(e.start(cfg, err));
+    fs::create_directories(dir);
+    std::thread g([&] { fake_game(dir, 100.0, 200.0, 2600, nullptr); });
+    std::this_thread::sleep_for(milliseconds(1200));
+    std::string first, second;
+    double n1 = 0, n2 = 0;
+    CHECK(read_state(dir, first, &n1));
+    std::this_thread::sleep_for(milliseconds(700));
+    CHECK(read_state(dir, second, &n2));
+    g.join();
+    CHECK(n2 > n1 && n1 >= 1);  // snapshots keep arriving
+    // two entries, "Em9999" (circling the bot) and "Em9998" (8 m from where you first were, standing still), 13 fields each
+    auto fields = [](const std::string& blob) {
+        std::vector<std::vector<std::string>> rows;
+        std::stringstream ss(blob);
+        std::string entry;
+        while (std::getline(ss, entry, ';')) {
+            std::vector<std::string> f;
+            std::stringstream es(entry);
+            std::string x;
+            while (std::getline(es, x, ',')) f.push_back(x);
+            rows.push_back(f);
+        }
+        return rows;
+    };
+    const auto r1 = fields(first), r2 = fields(second);
+    CHECK(r1.size() == 2 && r2.size() == 2 && r1[0].size() == 13 && r1[0][0] == "Em9999" && r1[1][0] == "Em9998");
+    if (r1.size() == 2 && r2.size() == 2) {
+        CHECK(r1[1][1] == r2[1][1] && r1[1][3] == r2[1][3]);   // the standing one has not moved
+        CHECK(r1[0][1] != r2[0][1] || r1[0][3] != r2[0][3]);   // the orbiting one has
+        CHECK(std::fabs(std::stod(r1[1][1]) - 108.0) < 1.0);  // 8 m along x from where the fake game first stood (x=100)
+    }
+    CHECK(e.status().states_received >= 2 && e.status().states_sent == 0);
+    e.stop();
+}
+
+
+// ---- versions --------------------------------------------------------------------------------
+
+// A datagram from a re7mp.exe with another protocol version, built the way the real one would be (same header).
+static std::vector<uint8_t> packet_with_version(uint8_t version) {
+    PositionPacket p = make_position(1234, 1, 1, 2, 3, 0, 0, 0, 1, 0);
+    p.h.version = version;
+    const auto* b = reinterpret_cast<const uint8_t*>(&p);
+    return std::vector<uint8_t>(b, b + sizeof(p));
+}
+
+static void test_versions(const fs::path& tmp) {
+    // The release number: "0.<n>", and the same in the Lua script as in src/version.hpp.
+    CHECK(std::regex_match(std::string(kReleaseVersion), std::regex("[0-9]+\\.[0-9]+(\\.[0-9]+)?")));
+    const std::string lua = read_text(RE7MP_LUA_PATH);
+    std::smatch m;
+    CHECK(std::regex_search(lua, m, std::regex("RELEASE = \"([0-9.]+)\"")));
+    CHECK(m.size() > 1 && m[1].str() == kReleaseVersion);
+
+    // Foreign-version detection: ours is not "foreign", another protocol version is, garbage is neither.
+    const auto ours = packet_with_version(kProtocolVersion);
+    const auto old5 = packet_with_version(5);
+    const auto new9 = packet_with_version(9);
+    CHECK(peek_foreign_version(ours.data(), ours.size()) == -1 && peek_type(ours.data(), ours.size()) >= 0);
+    CHECK(peek_foreign_version(old5.data(), old5.size()) == 5 && peek_type(old5.data(), old5.size()) == -1);
+    CHECK(peek_foreign_version(new9.data(), new9.size()) == 9);
+    CHECK(peek_foreign_version("hello world, this is not ours", 29) == -1);
+    CHECK(peek_foreign_version(ours.data(), 4) == -1);
+
+    // An engine receiving a packet from another protocol version reports it, and clears it when a good packet arrives.
+    Engine e;
+    Config c;
+    c.data_dir = tmp / "ver";
+    c.mode = Mode::Network;
+    c.transport = Transport::TcpHost;
+    c.listen_port = 28967;
+    c.name = "Eve";
+    std::string err;
+    CHECK(e.start(c, err));
+    std::string uerr;
+    auto tcp = TcpTransport::create(TcpTransport::Role::Join, 0, "127.0.0.1", 28967, uerr);
+    CHECK(tcp != nullptr);
+    if (tcp) {
+        uint8_t rb[512];
+        for (int i = 0; i < 150 && !tcp->connected(); ++i) tcp->recv(rb, sizeof(rb), 20);  // the client connects while we poll it
+        CHECK(tcp->connected());
+        for (int i = 0; i < 20; ++i) {
+            tcp->send(old5.data(), old5.size());
+            tcp->recv(rb, sizeof(rb), 25);
+        }
+        CHECK(e.status().foreign_protocol == 5);
+        CHECK(count_lines(e.drain_log(), "protocol 5, yours uses") == 1);  // said once, not for every packet
+        for (int i = 0; i < 20; ++i) {
+            tcp->send(ours.data(), ours.size());
+            tcp->recv(rb, sizeof(rb), 25);
+        }
+        CHECK(e.status().foreign_protocol == 0);
+    }
+    e.stop();
+}
+
+
+// ============================================================================================
+// Zip unpacking, the update check, the exe swap and the REFramework installer
+// ============================================================================================
+static std::vector<uint8_t> test_text_block(int n) {  // mirrors text_block() in tools/make_zip_fixtures.py
+    std::string s;
+    for (int i = 0; i < n; ++i) s += "The quick brown fox jumps over " + std::to_string(i) + " lazy dogs\n";
+    return std::vector<uint8_t>(s.begin(), s.end());
+}
+static std::vector<uint8_t> test_fake_exe(size_t n, uint32_t seed) {  // mirrors fake_exe()
+    auto v = random_bytes(n - 2, seed);
+    v.insert(v.begin(), {'M', 'Z'});
+    return v;
+}
+static std::vector<uint8_t> bytes_of(const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); }
+static std::vector<uint8_t> repeat_bytes(const std::string& s, int times) {
+    std::string out;
+    for (int i = 0; i < times; ++i) out += s;
+    return bytes_of(out);
+}
+
+static const ZipEntry* find_entry(const std::vector<ZipEntry>& es, const std::string& name) {
+    for (const auto& e : es) {
+        if (e.name == name) return &e;
+    }
+    return nullptr;
+}
+
+static void test_zip_extract() {
+    const fs::path data = fs::path(RE7MP_TEST_DATA);
+    const auto zip = read_bytes(data / "sample.zip");
+    std::vector<ZipEntry> es;
+    std::string err;
+    CHECK(zip_list(zip, es, err));
+    CHECK(es.size() == 11);
+
+    struct Want {
+        const char* name;
+        std::vector<uint8_t> bytes;
+    };
+    const Want wants[] = {
+        {"hello.txt", bytes_of("Hello, zip!\n")},
+        {"big_text.txt", test_text_block(3000)},
+        {"random.bin", random_bytes(40000, 5)},
+        {"stored.txt", repeat_bytes("stored, not deflated\n", 50)},
+        {"empty.txt", {}},
+        {"dir/nested.txt", repeat_bytes("nested\n", 100)},
+        {"fast.bin", [] {
+             auto v = test_text_block(500);
+             const auto r = random_bytes(3000, 8);
+             v.insert(v.end(), r.begin(), r.end());
+             return v;
+         }()},
+    };
+    for (const auto& w : wants) {
+        const ZipEntry* e = find_entry(es, w.name);
+        std::vector<uint8_t> got;
+        std::string e2;
+        CHECK(e != nullptr);
+        if (!e) continue;
+        const bool ok = zip_read(zip, *e, got, 1 << 20, e2);
+        if (!ok) std::printf("    %s: %s\n", w.name, e2.c_str());
+        CHECK(ok && got == w.bytes);
+    }
+    const ZipEntry* big = find_entry(es, "big_text.txt");
+    CHECK(big && big->method == 8 && big->compressed_size < big->size / 4);      // really compressed (dynamic Huffman)
+    CHECK(find_entry(es, "stored.txt")->method == 0);                             // really stored
+    CHECK(find_entry(es, "dir/") && find_entry(es, "dir/")->is_dir);
+
+    // Too large for the cap, and a wrong size claim.
+    std::vector<uint8_t> out;
+    CHECK(!zip_read(zip, *big, out, 1000, err) && err.find("too large") != std::string::npos);
+
+    // A damaged copy is caught by the checksum; garbage and truncated files are refused politely.
+    {
+        const auto bad = read_bytes(data / "damaged.zip");
+        std::vector<ZipEntry> bes;
+        CHECK(zip_list(bad, bes, err));
+        const ZipEntry* r = find_entry(bes, "random.bin");
+        CHECK(r && !zip_read(bad, *r, out, 1 << 20, err) && err.find("checksum") != std::string::npos);
+        CHECK(zip_read(bad, *find_entry(bes, "hello.txt"), out, 1 << 20, err));  // the other entries are fine
+    }
+    CHECK(!zip_list(bytes_of("not a zip at all, just some text that is long enough"), es, err));
+    CHECK(!zip_list(std::vector<uint8_t>(zip.begin(), zip.begin() + 1000), es, err));
+    CHECK(!zip_list({}, es, err));
+
+    // Unsafe names are recognised; ordinary ones are normalised.
+    CHECK(zip_safe_name("../escape.txt").empty() && zip_safe_name("a/../../b").empty() && zip_safe_name("/abs.txt").empty() &&
+          zip_safe_name("C:/drive.txt").empty() && zip_safe_name("").empty() && zip_safe_name("a/b?.txt").empty());
+    CHECK(zip_safe_name("back\\slash.txt") == "back/slash.txt" && zip_safe_name("dir//x/./y.dll") == "dir/x/y.dll" &&
+          zip_safe_name("reframework/autorun/a.lua") == "reframework/autorun/a.lua");
+    CHECK(zip_name_is("Some/Folder/DINPUT8.DLL", "dinput8.dll") && !zip_name_is("dinput8.dll.bak", "dinput8.dll") &&
+          !zip_name_is("../dinput8.dll", "dinput8.dll"));
+
+    // Raw inflate edge cases: an empty stream, a truncated one, and an output cap.
+    const uint8_t fixed_empty[] = {0x03, 0x00};  // final fixed block with only the end code
+    std::vector<uint8_t> ie;
+    CHECK(inflate_raw(fixed_empty, 2, ie, 10, err) && ie.empty());
+    CHECK(!inflate_raw(fixed_empty, 1, ie, 10, err));
+    const uint8_t stored_abc[] = {0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c'};
+    ie.clear();
+    CHECK(inflate_raw(stored_abc, sizeof(stored_abc), ie, 10, err) && ie == bytes_of("abc"));
+    ie.clear();
+    CHECK(!inflate_raw(stored_abc, sizeof(stored_abc), ie, 2, err));  // larger than allowed
+}
+
+// A fake network: url -> body, with a list of what was asked for.
+struct FakeHttp : HttpClient {
+    std::map<std::string, std::vector<uint8_t>> pages;
+    std::vector<std::string> asked;
+    bool get(const std::string& url, std::vector<uint8_t>& body, std::string& err, const Progress& progress) override {
+        asked.push_back(url);
+        const auto it = pages.find(url);
+        if (it == pages.end()) {
+            err = "HTTP 404 (not found)";
+            return false;
+        }
+        body = it->second;
+        if (progress) progress(body.size(), body.size());
+        return true;
+    }
+};
+
+static const char* kReleasesJson = R"([
+ {"tag_name":"beta6","name":"v0.6","draft":false,"prerelease":true,"html_url":"https://github.com/kingkiller1195/re7mp/releases/tag/beta6","body":"Playtest build",
+  "assets":[{"name":"re7mp.exe","size":120000,"browser_download_url":"https://github.com/kingkiller1195/re7mp/releases/download/beta6/re7mp.exe"}]},
+ {"tag_name":"beta7","name":"v0.7","draft":true,"prerelease":false,"html_url":"x","body":"unpublished draft","assets":[]},
+ {"tag_name":"beta5","name":"v0.5","draft":false,"prerelease":false,"html_url":"https://github.com/kingkiller1195/re7mp/releases/tag/beta5","body":"This has the new Item sync beta",
+  "assets":[{"name":"re7mp.zip","size":90396,"browser_download_url":"https://github.com/kingkiller1195/re7mp/releases/download/beta5/re7mp.zip"}]},
+ {"tag_name":"Beta","name":"v0.1","draft":false,"prerelease":false,"html_url":"y","body":"Unstable","assets":[]},
+ {"tag_name":"mystery","name":"no version here","draft":false,"prerelease":false,"html_url":"z","body":"","assets":[]}
+])";
+
+static void test_update_check() {
+    // Versions are compared as numbers; tags like "beta5" are not versions, the title is.
+    CHECK(compare_versions("0.10", "0.9") > 0 && compare_versions("0.9", "0.10") < 0 && compare_versions("0.6", "0.6.0") == 0 &&
+          compare_versions("1.0", "0.99") > 0 && compare_versions("0.6", "0.6") == 0 && compare_versions("2", "10") < 0);
+    CHECK(release_version("v0.5", "beta5") == "0.5" && release_version("Beta", "Beta").empty() &&
+          release_version("", "v0.6") == "0.6" && release_version("Version 0.7 beta", "x") == "0.7" &&
+          release_version("", "beta5").empty() && release_version("Release 12", "").empty() &&
+          release_version("v2", "") == "2" && release_version("", "0.6.1-rc1") == "0.6.1" && release_version("x", "0.6x").empty());
+
+    // Picking from the release list: drafts never, pre-releases only on request, newest version wins (not newest position).
+    ReleaseInfo r;
+    std::string err;
+    CHECK(pick_release(kReleasesJson, false, r, err) && r.version == "0.5" && r.tag == "beta5" && r.assets.size() == 1 &&
+          r.assets[0].name == "re7mp.zip" && r.notes.find("Item sync") != std::string::npos);
+    CHECK(pick_release(kReleasesJson, true, r, err) && r.version == "0.6" && r.prerelease && r.assets[0].name == "re7mp.exe");
+    CHECK(pick_release(R"({"tag_name":"beta5","name":"v0.5","assets":[]})", false, r, err) && r.version == "0.5");  // "latest" returns one object
+    CHECK(!pick_release(R"({"message":"Not Found"})", false, r, err) && err.find("Not Found") != std::string::npos);
+    CHECK(!pick_release(R"({"message":"API rate limit exceeded for 1.2.3.4."})", false, r, err) && err.find("rate limit") != std::string::npos);
+    CHECK(!pick_release("[]", false, r, err) && !pick_release("this is not json", false, r, err));
+
+    // Only github links are followed.
+    CHECK(url_is_github("https://github.com/a/b/releases/download/x/re7mp.exe") &&
+          url_is_github("https://objects.githubusercontent.com/github-production-release-asset/abc") &&
+          url_is_github("https://api.github.com/repos/a/b") && url_is_github("https://release-assets.githubusercontent.com/x?y=1"));
+    CHECK(!url_is_github("http://github.com/x") && !url_is_github("https://evilgithub.com/x") && !url_is_github("https://github.com.evil.io/x") &&
+          !url_is_github("https://github.com@evil.io/x") && !url_is_github("https://evil.io/github.com") && !url_is_github("ftp://github.com/x") &&
+          !url_is_github("https://githubusercontent.com.evil.io/x"));
+
+    // Which file of a release is the program.
+    ReleaseInfo a;
+    ReleaseAsset ch;
+    a.assets = {{"notes.txt", "u1", 1}, {"re7mp-windows.zip", "u2", 1}, {"RE7MP.EXE", "u3", 1}};
+    CHECK(choose_asset(a, ch) == AssetKind::Exe && ch.url == "u3");                 // an exe beats a zip
+    a.assets = {{"source.zip", "u1", 1}, {"re7mp_v0.7.exe", "u2", 1}};
+    CHECK(choose_asset(a, ch) == AssetKind::Exe && ch.url == "u2");
+    a.assets = {{"re7mp-src.zip", "u1", 1}, {"re7mp.zip", "u2", 1}};
+    CHECK(choose_asset(a, ch) == AssetKind::Zip && ch.url == "u2");
+    a.assets = {{"notes.txt", "u1", 1}};
+    CHECK(choose_asset(a, ch) == AssetKind::None);
+
+    // The whole check, against a fake GitHub.
+    FakeHttp http;
+    http.pages[kReleasesApiLatest] = bytes_of(R"({"tag_name":"beta5","name":"v0.5","assets":[]})");
+    http.pages[kReleasesApiList] = bytes_of(kReleasesJson);
+    auto c = check_for_update(http, "0.4", false);
+    CHECK(c.state == UpdateCheck::State::Available && c.release.version == "0.5" && c.message.find("0.5") != std::string::npos);
+    c = check_for_update(http, "0.5", false);
+    CHECK(c.state == UpdateCheck::State::UpToDate);
+    c = check_for_update(http, "0.6", false);  // a newer internal build than the newest release: nothing to offer
+    CHECK(c.state == UpdateCheck::State::UpToDate);
+    c = check_for_update(http, "0.5", true);   // a playtester who opted in sees the pre-release
+    CHECK(c.state == UpdateCheck::State::Available && c.release.version == "0.6" && http.asked.back() == kReleasesApiList);
+    http.pages.clear();
+    c = check_for_update(http, "0.5", false);
+    CHECK(c.state == UpdateCheck::State::Failed && c.message.find("Could not check") != std::string::npos);
+    http.pages[kReleasesApiLatest] = bytes_of("<html>captive portal</html>");
+    CHECK(check_for_update(http, "0.5", false).state == UpdateCheck::State::Failed);
+}
+
+static void test_fetch_and_swap(const fs::path& tmp) {
+    const fs::path data = fs::path(RE7MP_TEST_DATA);
+    FakeHttp http;
+    const std::string base = "https://github.com/kingkiller1195/re7mp/releases/download/beta6/";
+    ReleaseInfo r;
+    std::vector<uint8_t> exe;
+    std::string err;
+
+    // A plain exe asset.
+    const auto the_exe = test_fake_exe(120000, 41);
+    http.pages[base + "re7mp.exe"] = the_exe;
+    r.assets = {{"re7mp.exe", base + "re7mp.exe", the_exe.size()}};
+    CHECK(fetch_new_exe(http, r, exe, err, nullptr) && exe == the_exe);
+
+    // A zip with re7mp.exe inside a folder.
+    http.pages[base + "re7mp.zip"] = read_bytes(data / "release.zip");
+    r.assets = {{"re7mp.zip", base + "re7mp.zip", 1}};
+    CHECK(fetch_new_exe(http, r, exe, err, nullptr) && exe == test_fake_exe(90000, 31));
+
+    // Things that must be refused.
+    http.pages[base + "no.zip"] = read_bytes(data / "release_noexe.zip");
+    r.assets = {{"no.zip", base + "no.zip", 1}};
+    CHECK(!fetch_new_exe(http, r, exe, err, nullptr) && err.find("does not contain re7mp.exe") != std::string::npos);
+    http.pages[base + "bad.exe"] = bytes_of(std::string(200000, 'x'));
+    r.assets = {{"re7mp.exe", base + "bad.exe", 1}};
+    CHECK(!fetch_new_exe(http, r, exe, err, nullptr) && err.find("Windows program") != std::string::npos && exe.empty());
+    http.pages["https://evil.example/re7mp.exe"] = the_exe;
+    r.assets = {{"re7mp.exe", "https://evil.example/re7mp.exe", 1}};
+    CHECK(!fetch_new_exe(http, r, exe, err, nullptr) && err.find("not on github.com") != std::string::npos);
+    r.assets = {{"notes.txt", base + "notes.txt", 1}};
+    CHECK(!fetch_new_exe(http, r, exe, err, nullptr) && err.find("no re7mp.exe") != std::string::npos);
+    r.assets = {{"re7mp.exe", base + "missing.exe", 1}};
+    CHECK(!fetch_new_exe(http, r, exe, err, nullptr) && err.find("404") != std::string::npos);
+
+    // Swapping the program: the old one is kept as .old, a second update replaces that, a failure leaves things as they were.
+    const fs::path dir = tmp / "swap";
+    fs::create_directories(dir);
+    const fs::path cur = dir / "re7mp.exe";
+    write_bytes(cur, test_fake_exe(70000, 1));
+    CHECK(swap_in_new_exe(cur, test_fake_exe(70000, 2), err));
+    CHECK(read_bytes(cur) == test_fake_exe(70000, 2) && read_bytes(dir / "re7mp.exe.old") == test_fake_exe(70000, 1) && !fs::exists(dir / "re7mp.exe.new"));
+    CHECK(swap_in_new_exe(cur, test_fake_exe(70000, 3), err));
+    CHECK(read_bytes(cur) == test_fake_exe(70000, 3) && read_bytes(dir / "re7mp.exe.old") == test_fake_exe(70000, 2));
+    cleanup_old_exe(cur);
+    CHECK(fs::exists(cur) && !fs::exists(dir / "re7mp.exe.old"));
+    CHECK(!swap_in_new_exe(dir / "nothere" / "re7mp.exe", test_fake_exe(70000, 4), err) && !fs::exists(dir / "nothere"));
+    fs::remove(cur);
+    CHECK(!swap_in_new_exe(cur, test_fake_exe(70000, 5), err) && !fs::exists(cur) && !fs::exists(dir / "re7mp.exe.new"));  // no program to move aside
+}
+
+static void test_reframework_install(const fs::path& tmp) {
+    const fs::path data = fs::path(RE7MP_TEST_DATA);
+    const std::string url = reframework_url(kReframeworkTag);
+    CHECK(url == std::string("https://github.com/praydog/REFramework/releases/download/") + kReframeworkTag + "/RE7.zip");
+    FakeHttp http;
+    http.pages[url] = read_bytes(data / "refw.zip");
+    std::string msg;
+
+    // A clean game folder: everything in the zip lands where it belongs, and nothing escapes the folder.
+    const fs::path game = tmp / "refw_game";
+    fs::create_directories(game);
+    write_text(game / "re7.exe", "pretend game");
+    CHECK(reframework_state(game).kind == RefwState::Kind::Missing);
+    CHECK(install_reframework(http, game, kReframeworkTag, false, false, msg, nullptr));
+    std::printf("  refw: %s\n", msg.c_str());
+    CHECK(read_bytes(game / "dinput8.dll") == test_fake_exe(80000, 21) && read_bytes(game / "openvr_api.dll") == test_fake_exe(70000, 22));
+    CHECK(fs::exists(game / "reframework" / "autorun" / "example.lua") && fs::exists(game / "reframework" / "data" / "readme.txt"));
+    CHECK(!fs::exists(tmp / "outside.dll") && !fs::exists(tmp.parent_path() / "outside.dll") && msg.find("unsafe") != std::string::npos);
+    CHECK(reframework_state(game).kind == RefwState::Kind::InstalledByUs && reframework_state(game).tag == kReframeworkTag);
+    CHECK(msg.find("Installed REFramework") != std::string::npos && msg.find("3 files") == std::string::npos);
+
+    // Doing it again changes nothing and says so; a script of yours in the reframework folder is never overwritten.
+    write_text(game / "reframework" / "autorun" / "example.lua", "-- my own version\n");
+    write_text(game / "reframework" / "autorun" / "re7mp.lua", "-- the mod's script\n");
+    CHECK(install_reframework(http, game, kReframeworkTag, true, false, msg, nullptr));
+    CHECK(msg.find("already installed and up to date") != std::string::npos || msg.find("left as they are") != std::string::npos);
+    CHECK(read_bytes(game / "reframework" / "autorun" / "example.lua") == bytes_of("-- my own version\n"));
+    CHECK(fs::exists(game / "reframework" / "autorun" / "re7mp.lua") && !fs::exists(game / "dinput8.dll.bak"));
+
+    // Someone else's dinput8.dll: left alone unless you say replace, then kept as a backup.
+    const fs::path game2 = tmp / "refw_game2";
+    fs::create_directories(game2);
+    write_bytes(game2 / "dinput8.dll", test_fake_exe(60000, 99));
+    CHECK(reframework_state(game2).kind == RefwState::Kind::InstalledOther);
+    http.asked.clear();
+    CHECK(!install_reframework(http, game2, kReframeworkTag, false, false, msg, nullptr) && http.asked.empty());  // not even downloaded
+    CHECK(read_bytes(game2 / "dinput8.dll") == test_fake_exe(60000, 99) && !fs::exists(game2 / "openvr_api.dll"));
+    CHECK(install_reframework(http, game2, kReframeworkTag, true, false, msg, nullptr));
+    CHECK(read_bytes(game2 / "dinput8.dll") == test_fake_exe(80000, 21) && read_bytes(game2 / "dinput8.dll.bak") == test_fake_exe(60000, 99));
+    CHECK(msg.find("dinput8.dll.bak") != std::string::npos && reframework_state(game2).kind == RefwState::Kind::InstalledByUs);
+    // A later manual change makes it "someone else's" again.
+    write_bytes(game2 / "dinput8.dll", test_fake_exe(80001, 5));
+    CHECK(reframework_state(game2).kind == RefwState::Kind::InstalledOther);
+
+    // dll-only mode.
+    const fs::path game3 = tmp / "refw_game3";
+    fs::create_directories(game3);
+    CHECK(install_reframework(http, game3, kReframeworkTag, false, true, msg, nullptr));
+    CHECK(fs::exists(game3 / "dinput8.dll") && !fs::exists(game3 / "openvr_api.dll") && !fs::exists(game3 / "reframework" / "data" / "readme.txt"));
+    CHECK(fs::is_directory(game3 / "reframework" / "autorun"));  // the script still has its folder
+
+    // Failures change nothing: no download, a zip without the loader, a damaged download, a missing game folder.
+    const fs::path game4 = tmp / "refw_game4";
+    fs::create_directories(game4);
+    http.pages.clear();
+    CHECK(!install_reframework(http, game4, kReframeworkTag, false, false, msg, nullptr) && msg.find("Could not download") != std::string::npos);
+    http.pages[url] = read_bytes(data / "refw_noloader.zip");
+    CHECK(!install_reframework(http, game4, kReframeworkTag, false, false, msg, nullptr) && msg.find("dinput8.dll") != std::string::npos);
+    http.pages[url] = read_bytes(data / "damaged.zip");
+    CHECK(!install_reframework(http, game4, kReframeworkTag, false, false, msg, nullptr));
+    http.pages[url] = bytes_of("<html>not a zip</html> and long enough to pass the size check");
+    CHECK(!install_reframework(http, game4, kReframeworkTag, false, false, msg, nullptr));
+    CHECK(fs::is_empty(game4));
+    CHECK(!install_reframework(http, tmp / "no_such_folder", kReframeworkTag, false, false, msg, nullptr));
 }
 
 int main() {
@@ -674,10 +1763,25 @@ int main() {
     test_loopback(tmp);
     test_network(tmp);
     test_stationary_bot(tmp);
-    test_loopback_messages_and_tcp(tmp, Transport::Udp, 28971, "udp");
+    test_bot_pose_schedule();
+    test_bot_poses(tmp);
     test_loopback_messages_and_tcp(tmp, Transport::TcpHost, 28975, "tcp");
+    test_bot_logic_units();
+    test_bot_gifts_and_down(tmp);
     test_tcp_network(tmp);
     test_message_retransmission(tmp);
+    test_file_packets();
+    test_save_sync_units(tmp);
+    test_save_transfer(tmp);
+    test_save_loopback_echo(tmp);
+    test_state_packets(tmp);
+    test_state_over_tcp(tmp);
+    test_loopback_enemies(tmp);
+    test_versions(tmp);
+    test_zip_extract();
+    test_update_check();
+    test_fetch_and_swap(tmp);
+    test_reframework_install(tmp);
     fs::remove_all(tmp);
     std::printf(g_failed ? "%d check(s) FAILED\n" : "all checks passed\n", g_failed);
     return g_failed ? 1 : 0;

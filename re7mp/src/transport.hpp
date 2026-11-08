@@ -30,26 +30,7 @@ public:
     }
 };
 
-// Plain UDP. Symmetric: both sides bind a local port and send to the other.
-class UdpTransport : public ITransport {
-public:
-    // Returns nullptr and fills `err` on failure.
-    static std::unique_ptr<UdpTransport> create(uint16_t local_port, const std::string& peer_host,
-                                                uint16_t peer_port, std::string& err);
-    ~UdpTransport() override;
-
-    bool send(const void* data, size_t len) override;
-    int recv(void* buf, size_t cap, int timeout_ms) override;
-
-private:
-    UdpTransport() = default;
-    uintptr_t sock_ = static_cast<uintptr_t>(-1);  // SOCKET on Windows, fd elsewhere
-    uint32_t peer_ip_be_ = 0;                      // network byte order
-    uint16_t peer_port_ = 0;                       // host byte order
-    bool wsa_started_ = false;
-};
-
-// TCP: reliable and ordered, for when UDP has trouble (heavy loss, strict NAT with one side forwarded).
+// TCP: reliable and ordered (the only transport since 9.7). The host needs a reachable port (Tailscale, or a forwarded one).
 // Messages are framed with a 2-byte length so datagram-style send/recv keep working. One side Hosts (listens),
 // the other Joins (connects, retrying every second and reconnecting if the link drops).
 class TcpTransport : public ITransport {
@@ -69,8 +50,8 @@ public:
 
 private:
     static constexpr uintptr_t kNoSock = static_cast<uintptr_t>(-1);
-    static constexpr size_t kMaxFrame = 1024;
-    static constexpr size_t kMaxOutBuffer = 65536;
+    static constexpr size_t kMaxFrame = 16384;
+    static constexpr size_t kMaxOutBuffer = 262144;
 
     TcpTransport() = default;
     void service();

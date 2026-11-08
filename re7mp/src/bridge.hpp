@@ -3,11 +3,17 @@
 // <RE7 folder>/reframework/data and are plain JSON.
 //
 //   re7mp_out.json      Lua -> engine   local pose+flags  {seq,x,y,z,qx,qy,qz,qw,flags}
-//   re7mp_in.json       engine -> Lua   remote pose+name  {seq,x,y,z,qx,qy,qz,qw,flags,recv_count,name,transport}
+//   re7mp_in.json       engine -> Lua   remote pose+name  {seq,x,y,z,qx,qy,qz,qw,flags,recv_count,name,transport,role,exe,proto}
 //   re7mp_evt_out.json  Lua -> engine   event to send     {id,type,arg}
 //   re7mp_evt_in.json   engine -> Lua   event received    {session,id,type,arg}
 //   re7mp_msg_out.json  Lua -> engine   messages to send   {msgs:[{id,k,p}, ...]}   (ring of the last ~32)
 //   re7mp_msg_in.json   engine -> Lua   messages received  {epoch,msgs:[{n,id,k,p}, ...]}  (ring of the last ~64)
+//   re7mp_state_out.json Lua -> engine  latest state blob  {seq,p}   p = text, <= 3000 bytes (enemy snapshot)
+//   re7mp_state_in.json  engine -> Lua  latest state blob received  {seq,n,p}   n = how many have arrived
+//
+// The state blob is the host's enemy snapshot: entries separated by ';', each entry
+//   name,x,y,z,qx,qy,qz,qw,hp,flags,bank,motion,frame
+// (hp is -1 when unknown; flags bit 0 = alive). The engine passes it through without reading it.
 //
 // The Lua side writes in place (the reader tolerates half-written files); the engine side
 // writes a temp file and renames it so Lua never sees a partial file.
@@ -24,6 +30,7 @@
 
 #include "json_mini.hpp"
 #include "packet.hpp"
+#include "version.hpp"
 
 namespace re7mp {
 
@@ -53,6 +60,11 @@ struct LocalMessage {  // Lua -> engine
     std::string payload;
 };
 
+struct LocalState {  // Lua -> engine
+    uint64_t lua_seq = 0;
+    std::string payload;
+};
+
 struct InMessage {  // engine -> Lua
     uint64_t n = 0;  // delivery number in this engine run; Lua processes each n once
     uint32_t id = 0;
@@ -66,14 +78,16 @@ public:
         : dir_(std::move(data_dir)),
           pose_out_{dir_ / "re7mp_out.json"},
           evt_out_{dir_ / "re7mp_evt_out.json"},
-          msg_out_{dir_ / "re7mp_msg_out.json"} {}
+          msg_out_{dir_ / "re7mp_msg_out.json"},
+          state_out_{dir_ / "re7mp_state_out.json"} {}
 
     // Deletes leftovers from a previous run so stale positions/events aren't replayed.
     void clear_stale() {
         std::error_code ec;
         for (const char* f : {"re7mp_out.json", "re7mp_in.json", "re7mp_evt_out.json", "re7mp_evt_in.json",
                               "re7mp_in.tmp", "re7mp_evt_in.tmp", "re7mp_msg_out.json", "re7mp_msg_in.json",
-                              "re7mp_msg_in.tmp"}) {
+                              "re7mp_msg_in.tmp", "re7mp_state_out.json", "re7mp_state_in.json",
+                              "re7mp_state_in.tmp"}) {
             std::filesystem::remove(dir_ / f, ec);
         }
     }
@@ -165,6 +179,32 @@ public:
         return !out.empty();
     }
 
+    // True when the game wrote a new enemy snapshot since the last call.
+    bool poll_state(LocalState& out) {
+        std::string text;
+        if (!read_changed(state_out_, text)) return false;
+        mini::Value root;
+        if (!mini::parse(text, root) || root.type != mini::Value::Type::Obj) return false;  // half-written: retry
+        accept(state_out_);
+        const mini::Value* seq = root.get("seq");
+        const mini::Value* p = root.get("p");
+        if (!seq || seq->type != mini::Value::Type::Num || seq->num < 0) return false;
+        if (!p || p->type != mini::Value::Type::Str || p->str.empty() || !valid_state_payload(p->str)) return false;
+        const auto useq = static_cast<uint64_t>(seq->num);
+        if (have_state_seq_ && useq == last_state_seq_) return false;
+        have_state_seq_ = true;
+        last_state_seq_ = useq;
+        out.lua_seq = useq;
+        out.payload = p->str;
+        return true;
+    }
+
+    bool publish_state(uint32_t seq, uint64_t recv_count, const std::string& payload) {
+        std::string s = "{\"seq\":" + std::to_string(seq) + ",\"n\":" + std::to_string(recv_count) + ",\"p\":\"" +
+                        json_escape(payload) + "\"}\n";
+        return write_atomic("re7mp_state_in.tmp", "re7mp_state_in.json", s.c_str());
+    }
+
     bool publish_messages(uint32_t epoch, const std::vector<InMessage>& msgs) {
         std::string s = "{\"epoch\":" + std::to_string(epoch) + ",\"msgs\":[";
         for (size_t i = 0; i < msgs.size(); ++i) {
@@ -177,14 +217,15 @@ public:
     }
 
     bool publish_remote(const RemotePose& p, uint64_t recv_count, const std::string& name,
-                        const char* transport = "udp") {
+                        const char* transport = "tcp", const char* role = "none") {
         char buf[640];
         std::snprintf(buf, sizeof(buf),
                       "{\"seq\":%u,\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"qx\":%.5f,\"qy\":%.5f,\"qz\":%.5f,\"qw\":%.5f,"
-                      "\"flags\":%u,\"recv_count\":%llu,\"name\":\"%s\",\"transport\":\"%s\"}\n",
+                      "\"flags\":%u,\"recv_count\":%llu,\"name\":\"%s\",\"transport\":\"%s\",\"role\":\"%s\","
+                      "\"exe\":\"%s\",\"proto\":%d}\n",
                       p.seq, p.x, p.y, p.z, p.qx, p.qy, p.qz, p.qw, static_cast<unsigned>(p.flags),
                       static_cast<unsigned long long>(recv_count),
-                      json_escape(name).c_str(), transport);
+                      json_escape(name).c_str(), transport, role, kReleaseVersion, static_cast<int>(kProtocolVersion));
         return write_atomic("re7mp_in.tmp", "re7mp_in.json", buf);
     }
 
@@ -261,8 +302,9 @@ private:
     }
 
     std::filesystem::path dir_;
-    Watch pose_out_, evt_out_, msg_out_;
-    bool have_pose_seq_ = false, have_evt_id_ = false;
+    Watch pose_out_, evt_out_, msg_out_, state_out_;
+    bool have_pose_seq_ = false, have_evt_id_ = false, have_state_seq_ = false;
+    uint64_t last_state_seq_ = 0;
     uint32_t last_pose_seq_ = 0;
     uint64_t last_evt_id_ = 0;
     uint64_t last_msg_id_ = 0;

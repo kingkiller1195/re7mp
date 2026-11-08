@@ -95,7 +95,7 @@ InstallResult install_lua(const fs::path& game_dir, const std::string& lua_text)
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) {
-        r.message = "could not create " + dir.string() + ": " + ec.message();
+        r.message = "could not create " + dir.u8string() + ": " + ec.message();
         return r;
     }
     const fs::path file = dir / "re7mp.lua";
@@ -107,18 +107,18 @@ InstallResult install_lua(const fs::path& game_dir, const std::string& lua_text)
     }
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     if (!out) {
-        r.message = "could not write " + file.string();
+        r.message = "could not write " + file.u8string();
         return r;
     }
     out.write(lua_text.data(), static_cast<std::streamsize>(lua_text.size()));
     out.close();
     if (!out) {
-        r.message = "error while writing " + file.string();
+        r.message = "error while writing " + file.u8string();
         return r;
     }
     r.ok = true;
     r.changed = true;
-    r.message = (existing.empty() ? "Installed the Lua script to " : "Updated the Lua script in ") + file.string();
+    r.message = (existing.empty() ? "Installed the Lua script to " : "Updated the Lua script in ") + file.u8string();
     return r;
 }
 

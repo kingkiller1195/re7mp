@@ -1,22 +1,30 @@
 #pragma once
-// Wire format (protocol v2). Little-endian, packed. Every packet starts with a Header.
+// Wire format (protocol v6). Little-endian, packed. Every packet starts with a Header.
 //   Position  46 bytes  camera position + rotation (quaternion) + ready-check flags, sent ~25x/s
-//   Name      45 bytes  display name, repeated every couple of seconds (UDP can drop it)
+//   Name      45 bytes  display name, repeated every couple of seconds
 //   Event     20 bytes  reliable-ish game event (new game + difficulty); resent until acked
 //   EventAck  16 bytes
 //   Message   20 bytes + payload (<= 200): reliable app messages (chat, pings, item events...); resent until acked
 //   MessageAck 16 bytes
+//   FileBegin / FileChunk / FileEnd: a file (a co-op save) sent in pieces over TCP; CRC-checked on arrival
+//   State     18 bytes + payload (<= 3000): unreliable, latest-wins text blob (enemy snapshots), TCP only
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace re7mp {
 
 constexpr uint32_t kMagic = 0x4D374552;  // bytes on the wire: 'R' 'E' '7' 'M'
-constexpr uint8_t kProtocolVersion = 4;
+constexpr uint8_t kProtocolVersion = 6;
 constexpr size_t kMaxPayloadBytes = 200;
+constexpr size_t kMaxStatePayload = 3000;  // an enemy snapshot: a few dozen bytes per enemy
+constexpr size_t kMaxFileBytes = 16u * 1024u * 1024u;  // largest file we will send or accept
+constexpr size_t kFileChunkBytes = 8192;
+constexpr size_t kMaxLabelBytes = 64;
 constexpr size_t kMaxNameBytes = 32;
 
 // Ready-check state carried in every Position packet (state, not events, so a lost packet
@@ -26,7 +34,31 @@ constexpr uint16_t kFlagDiffMask = 6;   // bits 1-2: difficulty 0 Easy / 1 Norma
 constexpr uint16_t kFlagSeesReady = 8;  // "I can see that you are ready"
 constexpr uint16_t kFlagGo = 16;        // "both ready, I'm going" (latched for a few seconds)
 constexpr uint16_t kFlagNoPose = 32;    // position/rotation in this packet are not valid (no camera)
+// Pose bits (9.7): what the sender's body is doing, so the other player's 3D stand-in can show it. The exe passes them
+// through untouched; only the Lua script reads them. 512 and above are free.
+constexpr uint16_t kFlagPoseGuard = 64;   // the player is blocking (arms up)
+constexpr uint16_t kFlagPoseHeal = 128;   // the player is using a healing item
+constexpr uint16_t kFlagPoseCrouch = 256; // the player is crouching (9.9; read from how far their eyes sit above their feet)
+constexpr uint16_t kFlagPoseMask = kFlagPoseGuard | kFlagPoseHeal | kFlagPoseCrouch;
 inline uint8_t flag_difficulty(uint16_t f) { return static_cast<uint8_t>((f & kFlagDiffMask) >> 1); }
+
+// What the loopback bot does with its body (9.8, crouch added in 9.9), so the poses can be watched without a second player.
+// A 16 s loop that starts `first_at` seconds after the engine did: block for 3.5 s, walk, crouch for 3 s, walk, heal for
+// 3.6 s (the length measured in the game), walk. A negative first_at turns the poses off. Never two at once.
+constexpr float kBotPoseLoop = 16.0f;
+constexpr float kBotGuardSecs = 3.5f;
+constexpr float kBotCrouchFrom = 4.5f;
+constexpr float kBotCrouchSecs = 3.0f;
+constexpr float kBotHealFrom = 8.5f;
+constexpr float kBotHealSecs = 3.6f;
+inline uint16_t bot_pose_flags(float seconds, float first_at) {
+    if (first_at < 0.0f || seconds < first_at) return 0;
+    const float t = std::fmod(seconds - first_at, kBotPoseLoop);
+    if (t < kBotGuardSecs) return kFlagPoseGuard;
+    if (t >= kBotCrouchFrom && t < kBotCrouchFrom + kBotCrouchSecs) return kFlagPoseCrouch;
+    if (t >= kBotHealFrom && t < kBotHealFrom + kBotHealSecs) return kFlagPoseHeal;
+    return 0;
+}
 
 enum class PacketType : uint8_t {
     Position = 1,
@@ -35,6 +67,10 @@ enum class PacketType : uint8_t {
     EventAck = 4,
     Message = 5,
     MessageAck = 6,
+    FileBegin = 7,
+    FileChunk = 8,
+    FileEnd = 9,
+    State = 10,
 };
 
 enum class EventType : uint8_t {
@@ -72,15 +108,42 @@ struct AckPacket {
     Header h;
     uint32_t id;
 };
+struct FileBeginFixed {  // followed on the wire by `label_len` label bytes
+    Header h;
+    uint32_t file_id;
+    uint32_t total;  // file size in bytes
+    uint32_t crc;    // CRC-32 of the whole file
+    uint16_t slot;   // save slot number the sender saved into
+    uint8_t label_len;
+};
+struct FileChunkFixed {  // followed on the wire by `len` data bytes
+    Header h;
+    uint32_t file_id;
+    uint32_t offset;
+    uint16_t len;
+};
+struct FileEndPacket {
+    Header h;
+    uint32_t file_id;
+};
 struct MessageFixed {  // followed on the wire by `len` payload bytes
     Header h;
     uint32_t id;
     uint16_t kind;
     uint16_t len;
 };
+struct StateFixed {  // followed on the wire by `len` payload bytes
+    Header h;
+    uint32_t seq;
+    uint16_t len;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(MessageFixed) == 20, "MessageFixed layout changed");
+static_assert(sizeof(StateFixed) == 18, "StateFixed layout changed");
+static_assert(sizeof(FileBeginFixed) == 27, "FileBeginFixed layout changed");
+static_assert(sizeof(FileChunkFixed) == 22, "FileChunkFixed layout changed");
+static_assert(sizeof(FileEndPacket) == 16, "FileEndPacket layout changed");
 static_assert(sizeof(Header) == 12, "Header layout changed");
 static_assert(sizeof(PositionPacket) == 46, "PositionPacket layout changed");
 static_assert(sizeof(NamePacket) == 45, "NamePacket layout changed");
@@ -103,6 +166,15 @@ inline int peek_type(const void* data, size_t len) {
     std::memcpy(&h, data, sizeof(h));
     if (h.magic != kMagic || h.version != kProtocolVersion) return -1;
     return h.type;
+}
+// If this datagram is one of ours (right magic) but from a different protocol version, returns that version; else -1.
+// Lets the exe say "the other player's re7mp.exe is a different version" instead of silently ignoring it.
+inline int peek_foreign_version(const void* data, size_t len) {
+    if (len < sizeof(Header)) return -1;
+    Header h;
+    std::memcpy(&h, data, sizeof(h));
+    if (h.magic != kMagic || h.version == kProtocolVersion) return -1;
+    return h.version;
 }
 inline uint32_t peek_session(const void* data) {
     Header h;
@@ -226,14 +298,16 @@ inline bool decode_ack(const void* data, size_t len, AckPacket& out) {
 // ---- messages ------------------------------------------------------------------------------
 
 // Payloads are short text (UTF-8, no control characters), so they can be passed through JSON files safely.
-inline bool valid_payload(const std::string& p) {
-    if (p.size() > kMaxPayloadBytes) return false;
+inline bool valid_text(const std::string& p, size_t max_bytes) {
+    if (p.size() > max_bytes) return false;
     for (char ch : p) {
         const auto c = static_cast<unsigned char>(ch);
         if (c < 0x20 || c == 0x7F) return false;
     }
     return valid_utf8(p);
 }
+inline bool valid_payload(const std::string& p) { return valid_text(p, kMaxPayloadBytes); }
+inline bool valid_state_payload(const std::string& p) { return valid_text(p, kMaxStatePayload); }
 
 // Writes the packet into `out` (must hold sizeof(MessageFixed) + kMaxPayloadBytes). Returns its size, or 0 if
 // the payload is not valid.
@@ -272,6 +346,132 @@ inline AckPacket make_message_ack(uint32_t session, uint32_t id) {
 inline bool decode_message_ack(const void* data, size_t len, AckPacket& out) {
     if (len != sizeof(AckPacket) || peek_type(data, len) != static_cast<int>(PacketType::MessageAck)) return false;
     std::memcpy(&out, data, sizeof(out));
+    return true;
+}
+
+// ---- state blobs (enemy snapshots) ----------------------------------------------------------
+
+// Unreliable and latest-wins: a lost snapshot is simply replaced by the next one. The engine does not look
+// inside the text; the Lua scripts agree on its format. Returns an empty vector if the payload is not valid.
+inline std::vector<uint8_t> encode_state(uint32_t session, uint32_t seq, const std::string& payload) {
+    if (payload.empty() || !valid_state_payload(payload)) return {};
+    StateFixed f{};
+    f.h = make_header(PacketType::State, session);
+    f.seq = seq;
+    f.len = static_cast<uint16_t>(payload.size());
+    std::vector<uint8_t> out(sizeof(f) + payload.size());
+    std::memcpy(out.data(), &f, sizeof(f));
+    std::memcpy(out.data() + sizeof(f), payload.data(), payload.size());
+    return out;
+}
+
+inline bool decode_state(const void* data, size_t len, uint32_t& session, uint32_t& seq, std::string& payload) {
+    if (len < sizeof(StateFixed) || peek_type(data, len) != static_cast<int>(PacketType::State)) return false;
+    StateFixed f;
+    std::memcpy(&f, data, sizeof(f));
+    if (f.len == 0 || f.len > kMaxStatePayload || len != sizeof(f) + f.len) return false;
+    payload.assign(static_cast<const char*>(data) + sizeof(f), f.len);
+    if (!valid_state_payload(payload)) return false;
+    session = f.h.session;
+    seq = f.seq;
+    return true;
+}
+
+// ---- files (co-op saves) -------------------------------------------------------------------
+
+inline uint32_t crc32(const void* data, size_t len, uint32_t crc = 0) {
+    static const std::array<uint32_t, 256> table = [] {
+        std::array<uint32_t, 256> t{};
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            t[i] = c;
+        }
+        return t;
+    }();
+    crc = ~crc;
+    const auto* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < len; ++i) crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+    return ~crc;
+}
+
+inline bool valid_label(const std::string& l) {
+    if (l.empty() || l.size() > kMaxLabelBytes) return false;
+    for (char ch : l) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x20 || c == 0x7F) return false;
+    }
+    return valid_utf8(l);
+}
+
+inline std::vector<uint8_t> encode_file_begin(uint32_t session, uint32_t id, uint32_t total, uint32_t crc,
+                                              uint16_t slot, const std::string& label) {
+    FileBeginFixed f{};
+    f.h = make_header(PacketType::FileBegin, session);
+    f.file_id = id;
+    f.total = total;
+    f.crc = crc;
+    f.slot = slot;
+    f.label_len = static_cast<uint8_t>(label.size());
+    std::vector<uint8_t> out(sizeof(f) + label.size());
+    std::memcpy(out.data(), &f, sizeof(f));
+    std::memcpy(out.data() + sizeof(f), label.data(), label.size());
+    return out;
+}
+
+inline bool decode_file_begin(const void* data, size_t len, uint32_t& id, uint32_t& total, uint32_t& crc,
+                              uint16_t& slot, std::string& label) {
+    if (len < sizeof(FileBeginFixed) || peek_type(data, len) != static_cast<int>(PacketType::FileBegin)) return false;
+    FileBeginFixed f;
+    std::memcpy(&f, data, sizeof(f));
+    if (len != sizeof(f) + f.label_len || f.total == 0 || f.total > kMaxFileBytes) return false;
+    label.assign(static_cast<const char*>(data) + sizeof(f), f.label_len);
+    if (!valid_label(label)) return false;
+    id = f.file_id;
+    total = f.total;
+    crc = f.crc;
+    slot = f.slot;
+    return true;
+}
+
+inline std::vector<uint8_t> encode_file_chunk(uint32_t session, uint32_t id, uint32_t offset, const uint8_t* bytes,
+                                              size_t n) {
+    FileChunkFixed f{};
+    f.h = make_header(PacketType::FileChunk, session);
+    f.file_id = id;
+    f.offset = offset;
+    f.len = static_cast<uint16_t>(n);
+    std::vector<uint8_t> out(sizeof(f) + n);
+    std::memcpy(out.data(), &f, sizeof(f));
+    std::memcpy(out.data() + sizeof(f), bytes, n);
+    return out;
+}
+
+// On success `bytes` points into `data` (valid as long as `data` is).
+inline bool decode_file_chunk(const void* data, size_t len, uint32_t& id, uint32_t& offset, const uint8_t*& bytes,
+                              size_t& n) {
+    if (len < sizeof(FileChunkFixed) || peek_type(data, len) != static_cast<int>(PacketType::FileChunk)) return false;
+    FileChunkFixed f;
+    std::memcpy(&f, data, sizeof(f));
+    if (f.len == 0 || f.len > kFileChunkBytes || len != sizeof(f) + f.len) return false;
+    id = f.file_id;
+    offset = f.offset;
+    bytes = static_cast<const uint8_t*>(data) + sizeof(f);
+    n = f.len;
+    return true;
+}
+
+inline FileEndPacket make_file_end(uint32_t session, uint32_t id) {
+    FileEndPacket p{};
+    p.h = make_header(PacketType::FileEnd, session);
+    p.file_id = id;
+    return p;
+}
+inline bool decode_file_end(const void* data, size_t len, uint32_t& id) {
+    if (len != sizeof(FileEndPacket) || peek_type(data, len) != static_cast<int>(PacketType::FileEnd)) return false;
+    FileEndPacket p;
+    std::memcpy(&p, data, sizeof(p));
+    id = p.file_id;
     return true;
 }
 
