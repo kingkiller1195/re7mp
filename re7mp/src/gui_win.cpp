@@ -177,7 +177,7 @@ void save_ini() {
     WritePrivateProfileStringW(L"re7mp", L"peer", get_text(g.peer).c_str(), p.c_str());
     WritePrivateProfileStringW(L"re7mp", L"name", get_text(g.name).c_str(), p.c_str());
     WritePrivateProfileStringW(L"re7mp", L"save_dir", get_text(g.savedir).c_str(), p.c_str());
-    WritePrivateProfileStringW(L"re7mp", L"share_saves",
+    WritePrivateProfileStringW(L"re7mp", L"share_saves_on",
                                IsDlgButtonChecked(g.hwnd, IDC_SAVE_SHARE) == BST_CHECKED ? L"1" : L"0", p.c_str());
     WritePrivateProfileStringW(L"re7mp", L"check_updates",
                                IsDlgButtonChecked(g.hwnd, IDC_UPD_AUTO) == BST_CHECKED ? L"1" : L"0", p.c_str());
@@ -200,8 +200,10 @@ void load_ini() {
     SetWindowTextW(g.name, buf);
     GetPrivateProfileStringW(L"re7mp", L"save_dir", L"", buf, 1024, p.c_str());
     SetWindowTextW(g.savedir, buf);
-    GetPrivateProfileStringW(L"re7mp", L"share_saves", L"0", buf, 1024, p.c_str());
-    CheckDlgButton(g.hwnd, IDC_SAVE_SHARE, lstrcmpiW(buf, L"1") == 0 ? BST_CHECKED : BST_UNCHECKED);
+    // Save sharing is ON unless it was switched off (9.22). The key is new, so an old ini that only says "0" because that used to be the
+    // default does not keep it off. WM_CREATE switches it off again when no Steam save folder can be found.
+    GetPrivateProfileStringW(L"re7mp", L"share_saves_on", L"1", buf, 1024, p.c_str());
+    CheckDlgButton(g.hwnd, IDC_SAVE_SHARE, lstrcmpiW(buf, L"0") == 0 ? BST_UNCHECKED : BST_CHECKED);
     GetPrivateProfileStringW(L"re7mp", L"check_updates", L"1", buf, 1024, p.c_str());
     CheckDlgButton(g.hwnd, IDC_UPD_AUTO, lstrcmpiW(buf, L"0") == 0 ? BST_UNCHECKED : BST_CHECKED);
     GetPrivateProfileStringW(L"re7mp", L"mode", L"loopback", buf, 1024, p.c_str());
@@ -868,6 +870,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             fs::path existing;
             if (!game_dir_ok(existing)) detect_game(true);
             if (get_text(g.savedir).empty()) detect_save_dir(true);
+            if (get_text(g.savedir).empty()) {  // no Steam save folder found: nothing to share, so it starts off
+                CheckDlgButton(g.hwnd, IDC_SAVE_SHARE, BST_UNCHECKED);
+                log_line("Save sharing is off: no Steam save folder was found (tick it after typing or detecting the folder).");
+            }
             fs::path game;
             if (game_dir_ok(game)) {
                 log_line("RE7 folder: " + game.u8string());

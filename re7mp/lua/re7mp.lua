@@ -1,4 +1,4 @@
--- RE7 multiplayer prototype, Lua side (release 0.7, build v9.15).
+-- RE7 multiplayer prototype, Lua side (release 0.8, build v9.19).
 -- re7mp.exe installs this to <RE7>/reframework/autorun/re7mp.lua and talks to it through
 -- JSON files in reframework/data. Edit the copy in the project (lua/re7mp.lua) and rebuild;
 -- the exe overwrites the installed copy.
@@ -6,7 +6,7 @@
 -- What it does:
 --   * sends your camera position + rotation to the other player (via re7mp.exe)
 --   * draws the other player as a shaded 3D body (plus an optional debug skeleton) with a name tag,
---     facing where they look, and shows when they block or use a healing item (9.7)
+--     facing where they look, and shows when they block or use a healing item 
 --   * "Start together": a ready check. Both players say they're ready on the same difficulty,
 --     and only then does the game go on. When RE7's New Game is detected (app.GameManager.newGameRequest)
 --     that request is BLOCKED until the other player is ready too, then replayed on the agreed
@@ -35,8 +35,13 @@ local FILES = { -- the bridge files in reframework/data (one table instead of se
     SETTINGS_FILE = "re7mp_settings.json",
 }
 local CFG = {
-    RELEASE = "0.7",          -- the public release number; must equal kReleaseVersion in src/version.hpp (a test checks). Only changes when the owner says.
-    BUILD = "9.15",            -- internal build label (the changelog's v9.x), shown in the panel and debug file
+    RELEASE = "0.8",          -- the public release number; must equal kReleaseVersion in src/version.hpp (a test checks). Only changes when the owner says.
+    BUILD = "9.22",            -- internal build label (the changelog's v9.x), shown in the panel and debug file
+    -- Risky features, each behind a switch that is OFF at the start. When one has been proven in the real game, its
+    -- default here becomes true; nothing else has to change. Neither is saved: a game that crashed with one on starts with it off.
+    ITEM_CREATE_DEFAULT = false, -- let the script ask the game to CREATE items (a gift of a kind you don't hold, a drop on the ground)
+    STORY_SYNC_DEFAULT = false,  -- story / cutscene sync: tell the other player when I start a cutscene
+    STORY_TELEPORT_DEFAULT = false, -- ...and (joiner) move to the host's place when the host starts one
     ver = {},                 -- release / version-check state (see "Version check" below)
     lm = {},                  -- Load screen labels (see "Load screen labels" below)
     SEND_INTERVAL = 0.04,     -- seconds between pose updates (25 Hz)
@@ -58,11 +63,12 @@ local CFG = {
     COUNTDOWN = 3,            -- seconds of countdown after both are ready (manual mode)
     HOLD_SPEED = 0.001,       -- game speed while frozen (near zero rather than exactly zero)
     MODEL_YAW_OFFSET = 0,     -- radians; turn a cloned model if it faces the wrong way (3.14159 = turn around)
-    -- Pose bits (9.7) in the same flags field: what the other player's body is doing. They sit above the ready-check
+    -- Pose bits in the same flags field: what the other player's body is doing. They sit above the ready-check
     -- bits and re7mp.exe passes the flags through unchanged, so no new protocol version was needed.
     POSE_GUARD = 64,          -- "I am blocking"
     POSE_HEAL = 128,          -- "I am using a healing item"
     POSE_CROUCH = 256,        -- "I am crouching" (9.9; the eyes are well below their standing height)
+    POSE_MENU = 512,          -- "I am in my inventory / item box" (9.22; the stand-in looks down at its hands)
     CROUCH_DROP = 0.5,        -- the stand-in's body: how far the eyes sink in a full crouch (metres)
     CROUCH_ENTER = 0.22,      -- measured: the eyes this far below the standing height = crouching ...
     CROUCH_EXIT = 0.12,       -- ... and back up to this = standing again
@@ -100,15 +106,15 @@ local state = {
     show_figure = true,      -- master switch for drawing the other player
     transport = nil,         -- "tcp", as reported by re7mp.exe (UDP was removed in 9.7)
     role = nil,              -- "host" (your game will run the enemies) or "join"
-    pose = { guard = 0, heal = 0, crouch = 0, t = 0 }, -- how far the stand-in is into each pose, 0..1 (smoothed)
-    pose_preview = 1,        -- panel: 1 off, 2 guard, 3 heal, 4 cycle, 5 crouch (shows the poses on the stand-in without the other player doing them)
+    pose = { guard = 0, heal = 0, crouch = 0, menu = 0, t = 0 }, -- how far the stand-in is into each pose, 0..1 (smoothed)
+    pose_preview = 1,        -- panel: 1 off, 2 guard, 3 heal, 4 cycle, 5 crouch, 6 inventory (shows the poses on the stand-in without the other player doing them)
     pose_source = nil,       -- set by the health module: function(now) -> guard, heal, crouch (what MY body is doing)
-    local_pose = { guard = false, heal = false, crouch = false }, -- what I am sending (panel)
-    occlude = true,          -- hide the stand-in while a wall or door is between you and them (9.9)
+    local_pose = { guard = false, heal = false, crouch = false, menu = false }, -- what I am sending (panel)
+    occlude = true,          -- hide the stand-in while a wall is between you and them (9.9; since 9.18 doors and their sensors never count)
     menu_hide = true,        -- hide the stand-in while a game menu (inventory, pause, map ...) is open (9.9, experimental)
-    show_body = true,        -- the shaded 3D body
+    show_body = true,        -- the shaded 3D body (always on since 9.22; no menu option)
     show_skeleton = false,   -- the line skeleton (debug)
-    auto_hide = true,        -- hide the other player after a new game starts
+    auto_hide = true,        -- hide the other player after a new game starts (always on since 9.22; no menu option)
     hidden_until = 0,        -- os.clock() time until which the other player is hidden
     last_error = nil,
 }
@@ -161,16 +167,16 @@ local function say(msg)
     end
     local line = string.format("%.1f  %s", os.clock(), tostring(msg))
     if dbg.pin and #dbg.pinned < 6000 then dbg.pinned[#dbg.pinned + 1] = line end -- survives the flood of trace lines
-    -- (9.11) the journal: everything except the tracer's lines, kept apart so a trace cannot push give/drop/death/menu lines out of the file
-    -- (9.12) ...nor the indented lines of the collectors (a method list of 400 lines pushed the whole journal out of the 0.7 file)
+    -- the journal: everything except the tracer's lines, kept apart so a trace cannot push give/drop/death/menu lines out of the file
+    -- ...nor the indented lines of the collectors (a method list of 400 lines pushed the whole journal out of the 0.7 file)
     if not tostring(msg):find("^%[trace%]") and not tostring(msg):find("^%s") then
         dbg.events[#dbg.events + 1] = line
-        if #dbg.events > 600 then table.remove(dbg.events, 1) end
+        if #dbg.events > 1200 then table.remove(dbg.events, 1) end -- (9.22: 600 before)
     end
     dbg.lines[#dbg.lines + 1] = line
-    if #dbg.lines > 3200 then
+    if #dbg.lines > 4800 then -- (9.22: 3200 before; the file is about 140 bytes a line)
         local keep = {}
-        for i = 401, #dbg.lines do keep[#keep + 1] = dbg.lines[i] end
+        for i = 601, #dbg.lines do keep[#keep + 1] = dbg.lines[i] end
         dbg.lines = keep
     end
     dbg.dirty = true
@@ -620,6 +626,9 @@ local function local_flags(now)
     -- what my body is doing (block / heal) rides along in the same field
     local lp = state.local_pose
     lp.guard, lp.heal, lp.crouch = false, false, false
+    -- in the inventory or the item box: the stand-in on the other side looks down at its hands
+    lp.menu = CFG.menu and CFG.menu.in_inventory() or false
+    if lp.menu then f = f + CFG.POSE_MENU end
     if state.pose_source then
         local okp, g, h, c = pcall(state.pose_source, now)
         if okp then
@@ -846,17 +855,20 @@ local function update_remote(now, dt)
     -- Poses: what their flags say (or the panel's preview), eased in and out so the body does not snap.
     local P = state.pose
     local rf = remote_flags_now(now)
-    -- (9.11) "Bob used a Remedy" also lifts the heal pose for 2.4 s: the hands animation is not a reliable sign of a heal
+    -- "Bob used a Remedy" also lifts the heal pose for 2.4 s: the hands animation is not a reliable sign of a heal
     -- (hands 16 / 17 play when the inventory is looked at too), the item use itself is
     local tg, th, tc = has(rf, CFG.POSE_GUARD) and 1 or 0, (has(rf, CFG.POSE_HEAL) or now < (state.remote_heal_until or 0)) and 1 or 0,
         has(rf, CFG.POSE_CROUCH) and 1 or 0
+    local tm = has(rf, CFG.POSE_MENU) and 1 or 0
     local pv = state.pose_preview
     if pv == 2 then
-        tg, th, tc = 1, 0, 0
+        tg, th, tc, tm = 1, 0, 0, 0
     elseif pv == 3 then
-        tg, th, tc = 0, 1, 0
+        tg, th, tc, tm = 0, 1, 0, 0
     elseif pv == 5 then
-        tg, th, tc = 0, 0, 1
+        tg, th, tc, tm = 0, 0, 1, 0
+    elseif pv == 6 then
+        tg, th, tc, tm = 0, 0, 0, 1
     elseif pv == 4 then -- cycle: block 2.5 s, heal 2.5 s, crouch 2.5 s, stand 1.5 s
         local c = now % 9.0
         tg, th, tc = (c < 2.5) and 1 or 0, (c >= 2.5 and c < 5) and 1 or 0, (c >= 5 and c < 7.5) and 1 or 0
@@ -865,6 +877,7 @@ local function update_remote(now, dt)
     P.guard = P.guard + (tg - P.guard) * pa
     P.heal = P.heal + (th - P.heal) * pa
     P.crouch = (P.crouch or 0) + (tc - (P.crouch or 0)) * pa
+    P.menu = (P.menu or 0) + (tm - (P.menu or 0)) * pa
     P.t = now
     if state.occ then pcall(state.occ.update, now) end
 end
@@ -943,7 +956,7 @@ local function compute_joints(pos, fwd, amp, phase, pz)
         j.hand[k] = J(k * 0.23, sh_u - drop_h, lean * 0.8 - stride)
     end
 
-    -- Poses (9.7). A pose pulls the arms to a target and settles the legs; the weights come from state.pose.
+    -- Poses . A pose pulls the arms to a target and settles the legs; the weights come from state.pose.
     --   guard: both forearms up in front of the face, elbows down and forward (a boxer's cover)
     --   heal:  the left forearm lies across the chest and the right hand brings the item to it, with a small pressing motion
     -- These are stand-ins for the real animations: the shapes are guesses until button 11's recording says what the game does.
@@ -973,7 +986,22 @@ local function compute_joints(pos, fwd, amp, phase, pz)
         if h > 0.5 then j.item = j.hand[1] end -- the thing in their right hand
     end
 
-    -- Crouch (9.9): both legs fold into a squat. The knee is the point of a two-bone leg (thigh = shin = H0*0.28) that
+    -- Inventory : both forearms come up in front of the belt, the hands side by side as if holding the pouch open, and
+    -- the body leans a little toward them while the hands shuffle. A guess at the shape until the game's own animation is recorded.
+    local mn = pz and pz.menu or 0
+    mn = mn * (1 - math.max(g, h))
+    if mn > 0.01 then
+        local fid = 0.02 * math.sin((pz.t or 0) * 3.1)
+        for _, k in ipairs({ 1, -1 }) do
+            j.knee[k] = lerp3(j.knee[k], J(k * 0.1, H * 0.28, 0.04), mn * (1 - cr))
+            j.foot[k] = lerp3(j.foot[k], J(k * 0.1, 0, 0), mn * (1 - cr))
+            j.elbow[k] = lerp3(j.elbow[k], J(k * 0.21, H - 0.52, 0.10), mn)
+            j.hand[k] = lerp3(j.hand[k], J(k * 0.07, H - 0.62 + fid * k, 0.30 + fid), mn)
+        end
+        j.neck = lerp3(j.neck, J(0, H - 0.18, lean + 0.05), mn)
+    end
+
+    -- Crouch : both legs fold into a squat. The knee is the point of a two-bone leg (thigh = shin = H0*0.28) that
     -- bends forward, so the bones keep their length; blended in by how far into the crouch they are, over whatever the legs
     -- were doing (walking, or settled for a block / heal).
     if cr > 0.01 then
@@ -1141,7 +1169,7 @@ local function remote_hidden(now)
 end
 
 ----------------------------------------------------------------------------------------------
--- Walls (9.9). The stand-in is drawn on top of the picture, so it showed through walls and doors. This asks the game's physics
+-- Walls . The stand-in is drawn on top of the picture, so it showed through walls and doors. This asks the game's physics
 -- (a ray from your camera to four points of their body) whether something solid is in the way, and does not draw them while
 -- all four points are covered. Nothing here is a hook: it only asks. If the physics calls do not work in this game, the
 -- status says why, the stand-in stays visible as before, and the debug file lists what the game offers.
@@ -1152,10 +1180,47 @@ end
 state.occ = {
     status = "not tried yet", ready = false, setup_done = false, dead = false, dead_at = nil, blocked = false,
     layers = {}, variant = 1, calibrated = false, calib_round = 0, retry_at = 0, retries = 0, recalibrations = 0,
-    steps = nil, cal_i = 0, floor_hits = { {}, {}, {} }, hit_names = {}, hit_names_n = 0,
+    steps = nil, cal_i = 0, floor_hits = { {}, {}, {}, {} }, hit_names = {}, hit_names_n = 0,
+    retry_delay = 3, fail_pos = nil, scene_way_dead = false, scene_way_error = nil,
     rays = 0, checks = 0, blocked_checks = 0, errors = 0, last_err = nil, check_at = -10, streak = 0, api = {}, methods = {},
-    blocked_since = nil, blocked_from = nil,
+    blocked_since = nil, blocked_from = nil, ignored = {}, ignored_n = 0,
+    clear_streak = 0, skip_names = {}, skip_n = 0, blockers = {}, blockers_n = 0, last_blocker = nil, solid_name = nil,
 }
+-- 4 tests a second (it was 10): steadier, and cheaper. A change needs two tests in a row both ways (about half a second).
+state.occ.CHECK_EVERY = 0.25
+state.occ.RECAL_AFTER, state.occ.RECAL_WALK2 = 60, 225 -- "behind a wall" for 60 s while walking 15 m (it was 30 s and 8 m: 16 recalibrations in one session)
+
+-- What the wall rays hit is not always a wall. The debug files list the names of the things the rays hit, and the top ones
+-- are door SENSORS (CloseSensor 43,648 hits, KnockSensor 20,356, PushSensor, PassSensor: trigger volumes around every door that
+-- are not solid but are found by a ray), safe-room volumes (SafeRoomCollider_*, SafeZone_*), a forbidden-zone trigger
+-- (Mold_Acthion_Kinshi_Zone_*), 400_HardMode_ActivateObject, a water plane and effects (Garden_largewater, Dust_camera,
+-- Outside_shaftsmoke01). They hid the other player behind "walls" that were doors and doorways. You asked that doors never be a
+-- reason to hide them (and that an opened door must not hide them), so anything named like a door or a gate does not count either:
+-- a closed door no longer hides them either (the game's real door state is not read; no door PANEL has appeared in a debug file yet,
+-- only door sensors, so a panel with an unexpected name can still count: the debug file lists what counted as a wall).
+-- The words are matched in lower case; "Door" and "Gate" as written (so "MainDoor" and "Door_1F" match but "Outdoor_Wall"
+-- and "Indoor_Wall" do not), and a lower-case "door" only at the start of a word. "saferoom" alone is not a word: the debug file
+-- has a "c03_TrailerHouse_saferoom" that may be a real wall, while "SafeRoomCollider_*" is the trigger volume.
+-- The 9.17 file adds: Em3000 (an enemy, 1,006 hits: it moves, and standing behind Jack should not hide anyone), NewZoneGroup
+-- (1,840) and InMainHall (524), which are area volumes. So: enemies (Em plus four digits), "zonegroup", and "In" + a capital letter at
+-- the start of a name (InMainHall, but not InnerWall) are not walls either.
+state.occ.NOT_WALL_WORDS = { "sensor", "safezone", "saferoomcollider", "kinshi_zone", "activateobject", "dust_", "water", "smoke", "zonegroup", "stair" }
+state.occ.NOT_WALL_CASE_WORDS = { "Gate", "Door" }
+function state.occ.is_wall(name)
+    if name:match("^Pl%d%d%d%d") ~= nil then return false end -- (your own body)
+    if name:match("^Em%d%d%d%d") ~= nil then return false end -- an enemy
+    if name:match("^In%u") ~= nil then return false end -- an area volume such as InMainHall
+    if state.occ.skip_names[name] then return false end -- a collider you told me is not a wall (panel button)
+    local low = name:lower()
+    for _, w in ipairs(state.occ.NOT_WALL_WORDS) do
+        if low:find(w, 1, true) then return false end
+    end
+    for _, w in ipairs(state.occ.NOT_WALL_CASE_WORDS) do
+        if name:find(w, 1, true) then return false end
+    end
+    if low:match("^door") or low:match("[^a-z]door") then return false end
+    return true
+end
 
 function state.occ.setup()
     local O = state.occ
@@ -1176,7 +1241,7 @@ function state.occ.setup()
             for _, m in ipairs(sdk.find_type_definition(tn):get_methods() or {}) do
                 if #names < 70 then
                     local nm = m:get_name()
-                    -- (9.11) with the parameter types, so the two setRay and the three castRay can be told apart
+                    -- with the parameter types, so the two setRay and the three castRay can be told apart
                     if tn ~= "via.physics.System" or nm:find("^castRay") then
                         pcall(function()
                             local ps = {}
@@ -1199,27 +1264,34 @@ function state.occ.setup()
     end
 end
 
--- (9.11) The first debug file (build 9.9) showed no layer hit the floor, 96 rays in all. So the calibration now tries three ways
+-- The first debug file (build 9.9) showed no layer hit the floor, 96 rays in all. So the calibration now tries three ways
 -- of casting (1: options cleared then all hits on; 2: the options left alone; 3: all hit kinds on and the filter left alone)
 -- on every layer, and keeps the first way that finds the floor.
 function state.occ.new_round()
     local O = state.occ
-    O.steps, O.cal_i, O.floor_hits = {}, 0, { {}, {}, {} }
+    O.steps, O.cal_i, O.floor_hits = {}, 0, { {}, {}, {}, {} }
     for v = 1, 2 do
         for l = 0, 31 do O.steps[#O.steps + 1] = { v, l } end
     end
     O.steps[#O.steps + 1] = { 3, 0 }
+    -- Way 4: the same as way 1 but through castRay(via.Scene, query, result) with the current scene. Tried only from the second
+    -- round on (a round that found nothing), so where the first three ways work nothing changes. The 9.18 file from the trailer house:
+    -- 211 rays in three rounds, no layer found the floor, the only thing ever hit was SafeRoomCollider_TrailerHouse (a trigger volume).
+    if O.calib_round >= 1 and not O.scene_way_dead then
+        for l = 0, 31 do O.steps[#O.steps + 1] = { 4, l } end
+    end
 end
 
 -- Casts one ray; true = something solid is on it, false = clear, nil = the call failed.
 -- A hit on the player's own body (Pl0000 ...) does not count: the ray starts next to the camera.
-function state.occ.cast(layer, ax, ay, az, bx, by, bz, variant)
+function state.occ.cast(layer, ax, ay, az, bx, by, bz, variant, probe)
     local O = state.occ
     variant = variant or O.variant or 1
     local q, r = O.query, O.result
+    O.solid_name = nil
     local ok, res = pcall(function()
         q:call("setRay(via.vec3, via.vec3)", Vector3f.new(ax, ay, az), Vector3f.new(bx, by, bz))
-        if variant == 1 then
+        if variant == 1 or variant == 4 then
             O.api.clear = pcall(q.call, q, "clearOptions")
             pcall(q.call, q, "enableAllHits")
             pcall(q.call, q, "enableNearSort")
@@ -1238,25 +1310,45 @@ function state.occ.cast(layer, ax, ay, az, bx, by, bz, variant)
                 q:call("set_FilterInfo", fi)
             end)
         end
-        sdk.call_native_func(O.physics, O.ptype, "castRay(via.physics.CastRayQuery, via.physics.CastRayResult)", q, r)
+        if variant == 4 then
+            local scene = sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"), sdk.find_type_definition("via.SceneManager"), "get_CurrentScene")
+            if scene == nil then error("no current scene") end -- (fetched for every ray: a scene kept from before a load could be gone)
+            sdk.call_native_func(O.physics, O.ptype, "castRay(via.Scene, via.physics.CastRayQuery, via.physics.CastRayResult)", scene, q, r)
+        else
+            sdk.call_native_func(O.physics, O.ptype, "castRay(via.physics.CastRayQuery, via.physics.CastRayResult)", q, r)
+        end
         local n = tonumber(r:call("get_NumContactPoints")) or 0
         if n == 0 then return false end
         local solid = false
         for i = 0, math.min(n, 4) - 1 do
             local name
             pcall(function() name = r:call("getContactCollidable", i):call("get_GameObject"):call("get_Name") end)
+            if probe ~= nil and type(name) == "string" then probe[name] = (probe[name] or 0) + 1 end -- the wall probe wants every name
             if type(name) == "string" then
-                if O.hit_names[name] == nil and O.hit_names_n < 40 then
+                if O.hit_names[name] == nil and O.hit_names_n < 120 then
                     O.hit_names_n = O.hit_names_n + 1
                     O.hit_names[name] = 0
                 end
                 if O.hit_names[name] then O.hit_names[name] = O.hit_names[name] + 1 end
             end
-            if not (type(name) == "string" and name:match("^Pl%d%d%d%d") ~= nil) then solid = true end
+            if type(name) ~= "string" then
+                solid = true -- (a hit with no readable name stays a wall, as before)
+            elseif O.is_wall(name) then
+                solid = true
+                if O.solid_name == nil then O.solid_name = name end -- the nearest wall-like thing on the ray (the hits are sorted near to far)
+            elseif not name:match("^Pl%d%d%d%d") then
+                if O.ignored[name] == nil and O.ignored_n < 30 then O.ignored_n = O.ignored_n + 1 O.ignored[name] = 0 end
+                if O.ignored[name] then O.ignored[name] = O.ignored[name] + 1 end
+            end
         end
         return solid
     end)
     O.rays = O.rays + 1
+    if not ok and variant == 4 then
+        -- the scene overload is optional: if it fails it is given up on its own and never counts toward "the ray test is dead"
+        O.scene_way_dead, O.scene_way_error = true, tostring(res):sub(1, 100)
+        return nil
+    end
     if not ok then
         O.errors = O.errors + 1
         O.last_err = tostring(res)
@@ -1271,6 +1363,89 @@ function state.occ.cast(layer, ax, ay, az, bx, by, bz, variant)
     return res
 end
 
+-- The wall probe. The walls work in the main house but not by Ethan's car or in the guest house (your notes 1 and 8), and the
+-- test only casts on the two or three layers its calibration found, so a wall on any other layer is invisible to it. This casts
+-- 8 horizontal rays of 6 m from where the camera is, on EVERY layer 0 to 31, and keeps for each layer the names it hit (with how
+-- many rays, and whether the script counts that name as a wall). Stand next to a wall, a door and the car and press the button;
+-- the result is in the debug file (health.occlusion.layer_probe) and in the journal. It changes nothing else.
+function state.occ.probe()
+    local O = state.occ
+    local lp = state.local_pos
+    if not O.ready or O.dead then
+        O.probe_note = "the ray test is not available (" .. tostring(O.status) .. ")"
+        say("walls probe: " .. O.probe_note)
+        return
+    end
+    if not lp then
+        O.probe_note = "no camera position yet"
+        say("walls probe: " .. O.probe_note)
+        return
+    end
+    local res = { at = { math.floor(lp.x * 100) / 100, math.floor(lp.y * 100) / 100, math.floor(lp.z * 100) / 100 }, layers = {}, rays_per_layer = 8, length = 6,
+        layers_in_use = O.layers }
+    local lines, y = {}, lp.y - 0.4
+    for layer = 0, 31 do
+        local hits = {}
+        for k = 0, 7 do
+            local a = k * math.pi / 4
+            O.cast(layer, lp.x, y, lp.z, lp.x + math.cos(a) * 6, y, lp.z + math.sin(a) * 6, O.variant, hits)
+        end
+        local list = {}
+        for nm, c in pairs(hits) do list[#list + 1] = { name = nm, rays = c, counts_as_wall = O.is_wall(nm) } end
+        table.sort(list, function(a, b) if a.rays ~= b.rays then return a.rays > b.rays end return a.name < b.name end)
+        while #list > 8 do table.remove(list) end
+        if #list > 0 then
+            res.layers[tostring(layer)] = list
+            local parts = {}
+            for i = 1, math.min(#list, 4) do parts[#parts + 1] = string.format("%s x%d%s", list[i].name, list[i].rays, list[i].counts_as_wall and "" or " (not a wall)") end
+            lines[#lines + 1] = string.format("layer %d%s: %s", layer, (O.layers and (layer == O.layers[1] or layer == O.layers[2] or layer == O.layers[3])) and " [in use]" or "", table.concat(parts, ", "))
+        end
+    end
+    -- The 9.18 file from the trailer house: no layer found the floor by any of the three ways, in three rounds. So the probe also
+    -- casts one ray straight down (from 0.2 m above the camera to 4 m below) on every layer by EVERY way, 4 being the scene overload,
+    -- and lists for each way the layers that hit anything at all and what (wall or not). "No floor by any way" means this area's
+    -- collision is not reachable by these calls at all; a way that finds it is what the next build should use.
+    res.floor_by_way = {}
+    local floor_any = false
+    for way = 1, 4 do
+        local per, n_found = {}, 0
+        if way == 4 and O.scene_way_dead then
+            res.floor_by_way["4"] = "failed: " .. tostring(O.scene_way_error)
+        else
+            for layer = 0, (way == 3 and 0 or 31) do
+                local hits = {}
+                local r = O.cast(layer, lp.x, lp.y + 0.2, lp.z, lp.x, lp.y - 4.0, lp.z, way, hits)
+                if r == nil and way == 4 then res.floor_by_way["4"] = "failed: " .. tostring(O.scene_way_error) break end
+                local names = {}
+                for nm in pairs(hits) do names[#names + 1] = nm end
+                table.sort(names)
+                while #names > 3 do table.remove(names) end
+                if #names > 0 or r == true then
+                    per[tostring(layer)] = names
+                    n_found = n_found + 1
+                end
+            end
+            if res.floor_by_way[tostring(way)] == nil then res.floor_by_way[tostring(way)] = per end
+        end
+        if n_found > 0 then
+            floor_any = true
+            local parts = {}
+            for layer = 0, 31 do
+                local names = per[tostring(layer)]
+                if names then parts[#parts + 1] = string.format("%d (%s)", layer, #names > 0 and table.concat(names, ", ") or "unnamed") end
+            end
+            lines[#lines + 1] = string.format("straight down, way %d: %d layers hit something: %s", way, n_found, table.concat(parts, "; "):sub(1, 220))
+        end
+    end
+    res.floor_found_by_any_way = floor_any
+    O.probe_result = res
+    O.probe_note = string.format("probed at (%.1f, %.1f, %.1f): %d lines; %s", lp.x, lp.y, lp.z, #lines,
+        floor_any and "something is under your feet for at least one way" or "NOTHING under your feet on any layer by any of the four ways")
+    say("walls probe: " .. O.probe_note)
+    for _, l in ipairs(lines) do say("walls probe:   " .. l) end
+    if #lines == 0 then say("walls probe: nothing within 6 m on any layer (an open place, or the rays do not work here)") end
+end
+
 function state.occ.update(now)
     local O = state.occ
     if not state.occlude then
@@ -1278,7 +1453,7 @@ function state.occ.update(now)
         return
     end
     local lp, rp = state.local_pos, state.render_pos
-    if O.dead and O.dead_at and now - O.dead_at > 60 and O.retries < 5 then -- (9.11) not for good: a new scene may work
+    if O.dead and O.dead_at and now - O.dead_at > 60 and O.retries < 5 then -- not for good: a new scene may work
         O.dead, O.dead_at, O.err_run, O.retries = false, nil, 0, O.retries + 1
         if not O.ready then O.setup_done = false end -- (the singleton / types were missing: look for them again too)
         O.status = "ray test ready: trying again"
@@ -1287,7 +1462,7 @@ function state.occ.update(now)
         O.blocked = false
         return
     end
-    if now - O.check_at < 0.1 then return end -- ten tests a second are plenty
+    if now - O.check_at < (O.calibrated and O.CHECK_EVERY or 0.1) then return end -- (calibrating stays at 10 a second so the layers are found quickly)
     O.check_at = now
     if not O.setup_done then O.setup() end
     if not O.ready or O.dead then
@@ -1304,7 +1479,15 @@ function state.occ.update(now)
     if hl < 0.5 then hl = 1 end
     if not O.calibrated then
         O.blocked = false
-        if now < O.retry_at then return end
+        if now < O.retry_at then
+            -- another spot may have another floor: after 3 m of walking it does not wait any longer
+            local fp = O.fail_pos
+            if fp and (lp.x - fp[1]) ^ 2 + (lp.z - fp[2]) ^ 2 > 9 then
+                O.retry_at, O.fail_pos = now, nil
+            else
+                return
+            end
+        end
         if not O.steps then O.new_round() end
         -- a few rays per test so the game does not hitch: from 0.8 m toward them, 0.2 m up, 4.2 m straight down
         local sx, sz = lp.x + dx / hl * 0.8, lp.z + dz / hl * 0.8
@@ -1313,7 +1496,11 @@ function state.occ.update(now)
             n = n + 1
             local st = O.steps[O.cal_i + 1]
             local hit = O.cast(st[2], sx, lp.y + 0.2, sz, sx, lp.y - 4.0, sz, st[1])
-            if hit == nil then return end
+            if hit == nil then
+                if st[1] ~= 4 then return end
+                O.cal_i = #O.steps -- (the scene overload failed: the rest of the round is the same call, skip it)
+                break
+            end
             O.cal_i = O.cal_i + 1
             if hit then
                 local fh = O.floor_hits[st[1]]
@@ -1323,7 +1510,7 @@ function state.occ.update(now)
         if O.cal_i >= #O.steps then
             O.calib_round = O.calib_round + 1
             local pv
-            for v = 1, 3 do
+            for v = 1, 4 do
                 if #O.floor_hits[v] > 0 then pv = v break end
             end
             if pv then
@@ -1332,11 +1519,16 @@ function state.occ.update(now)
                     if #picked < 3 then picked[#picked + 1] = l end
                 end
                 O.layers, O.variant, O.calibrated = picked, pv, true
+                O.retry_delay, O.fail_pos = 3, nil
                 O.status = "working (collision layers " .. table.concat(picked, ", ") .. ")" .. (pv ~= 1 and (", way " .. pv) or "")
             else
                 O.steps = nil -- the next try starts from scratch (maybe there was no floor under that spot)
-                O.retry_at = now + 45
-                O.status = "unavailable (no collision layer found the floor): the stand-in is not hidden behind walls (trying again in 45 s)"
+                -- It waited 45 s every time ("takes too long to find a collision", your note 2). Now 3 s, 6, 12, 24, then 45, and at once
+                -- after 3 m of walking.
+                local delay = O.retry_delay or 3
+                O.retry_at, O.fail_pos = now + delay, { lp.x, lp.z }
+                O.retry_delay = math.min(delay * 2, 45)
+                O.status = string.format("unavailable (no collision layer found the floor): the stand-in is not hidden behind walls (trying again in %d s, or after you walk 3 m)", delay)
             end
         end
         return
@@ -1345,7 +1537,7 @@ function state.occ.update(now)
     local crouch = (state.pose and state.pose.crouch) or 0
     local he = CFG.EYE_HEIGHT - CFG.CROUCH_DROP * crouch
     local offsets = { 0.05, he * 0.40, he * 0.75, math.max(he - 0.2, 0.3) }
-    local clear = false
+    local clear, first_name = false, nil
     for _, off in ipairs(offsets) do
         local tx, ty, tz = rp.x, rp.y - off, rp.z
         local vx, vy, vz = tx - lp.x, ty - lp.y, tz - lp.z
@@ -1361,6 +1553,7 @@ function state.occ.update(now)
         for _, layer in ipairs(O.layers) do
             if O.cast(layer, ax, ay, az, bx, by, bz, O.variant) == true then
                 covered = true
+                if not first_name then first_name = O.solid_name end
                 break
             end
         end
@@ -1372,39 +1565,75 @@ function state.occ.update(now)
     O.checks = O.checks + 1
     if clear then
         O.streak = 0
-        O.blocked = false
+        O.clear_streak = O.clear_streak + 1
+        if O.clear_streak >= 2 then O.blocked = false end -- two clear tests in a row to show them again
     else
+        O.clear_streak = 0
         O.streak = O.streak + 1
         O.blocked_checks = O.blocked_checks + 1
         if O.streak >= 2 then O.blocked = true end -- (twice in a row: one odd frame does not make them blink)
+        -- which collider is hiding them: shown in the panel (with a button to say it is not a wall) and counted in the debug file
+        local bn = first_name or "(no readable name)"
+        O.last_blocker = bn
+        if O.blockers[bn] == nil and O.blockers_n < 60 then O.blockers_n = O.blockers_n + 1 O.blockers[bn] = 0 end
+        if O.blockers[bn] then O.blockers[bn] = O.blockers[bn] + 1 end
     end
-    -- (9.11) a wall does not follow you: "behind a wall" for 30 s while you walk 8 m means the layers are wrong. Calibrate again.
+    -- a wall does not follow you: "behind a wall" for 30 s while you walk 8 m means the layers are wrong. Calibrate again.
     if O.blocked then
         if not O.blocked_since then O.blocked_since, O.blocked_from = now, { lp.x, lp.z } end
         local mx, mz = lp.x - O.blocked_from[1], lp.z - O.blocked_from[2]
-        if now - O.blocked_since > 30 and mx * mx + mz * mz > 64 then
+        if now - O.blocked_since > O.RECAL_AFTER and mx * mx + mz * mz > O.RECAL_WALK2 then
             O.calibrated, O.layers, O.steps, O.blocked, O.streak, O.blocked_since = false, {}, nil, false, 0, nil
+            O.retry_delay, O.retry_at = 3, 0
             O.recalibrations = O.recalibrations + 1
-            O.status = "ray test ready: they stayed 'behind a wall' while you walked, calibrating again"
-            say("walls: calibrating again (they stayed behind a wall while I walked 8 m)")
+            O.status = "ray test ready: they stayed 'behind a wall' while you walked 15 m, calibrating again"
+            say("walls: calibrating again (they stayed behind a wall while I walked 15 m)")
         end
     else
         O.blocked_since = nil
     end
 end
 
+function state.occ.skip_list()
+    local t = {}
+    for n in pairs(state.occ.skip_names) do t[#t + 1] = n end
+    table.sort(t)
+    return t
+end
+
+-- "This is not a wall": remembered in the settings file. At most 40 names.
+function state.occ.skip_add(name)
+    local O = state.occ
+    if type(name) ~= "string" or name == "" or name == "(no readable name)" then return false end
+    if O.skip_names[name] then return true end
+    if O.skip_n >= 40 then return false end
+    O.skip_names[name], O.skip_n = true, O.skip_n + 1
+    O.blocked, O.streak = false, 0
+    return true
+end
+
+function state.occ.skip_clear()
+    state.occ.skip_names, state.occ.skip_n = {}, 0
+end
+
 function state.occ.report()
     local O = state.occ
     local fh = {}
-    for v = 1, 3 do fh[tostring(v)] = O.floor_hits[v] end
+    for v = 1, 4 do fh[tostring(v)] = O.floor_hits[v] end
     local names = {}
     for nm, c in pairs(O.hit_names) do names[#names + 1] = { name = nm, hits = c } end
     table.sort(names, function(a, b) return a.hits > b.hits end)
     while #names > 15 do table.remove(names) end
-    return { status = O.status, ready = O.ready, calibrated = O.calibrated, layers = O.layers, way_used = O.variant,
-        floor_hit_layers_by_way = fh, calibration_rounds = O.calib_round, retries = O.retries, recalibrations = O.recalibrations,
+    -- the things that were hit and NOT counted as walls (door sensors, doors, safe-room volumes ...)
+    local skipped = {}
+    for nm, c in pairs(O.ignored) do skipped[#skipped + 1] = { name = nm, hits = c } end
+    table.sort(skipped, function(a, b) return a.hits > b.hits end)
+    while #skipped > 15 do table.remove(skipped) end
+    return { status = O.status, layer_probe = O.probe_result, probe_note = O.probe_note, not_walls_hit = skipped, not_wall_words = O.NOT_WALL_WORDS, not_wall_words_as_written = O.NOT_WALL_CASE_WORDS, ready = O.ready, calibrated = O.calibrated, layers = O.layers, way_used = O.variant,
+        floor_hit_layers_by_way = fh, calibration_rounds = O.calib_round, retry_delay_next = O.retry_delay, scene_way = O.scene_way_dead and ("gave up: " .. tostring(O.scene_way_error)) or "not failed", retries = O.retries, recalibrations = O.recalibrations,
         rays = O.rays, checks = O.checks, blocked_checks = O.blocked_checks, errors = O.errors, last_error = O.last_err,
-        api_ok = O.api, hidden_now = O.blocked, things_the_rays_hit = names, methods = O.methods }
+        api_ok = O.api, hidden_now = O.blocked, things_the_rays_hit = names, methods = O.methods,
+        hidden_by = O.blocked and O.last_blocker or nil, last_blocker = O.last_blocker, blockers_counted = O.blockers, names_you_said_are_not_walls = O.skip_list(), check_every_s = O.CHECK_EVERY }
 end
 
 -- Why the OVERLAY (not a cloned model) should not be drawn right now, or nil.
@@ -1413,18 +1642,28 @@ state.overlay_hidden = function(now)
     if why then return why end
     local M = CFG.menu
     if state.menu_hide and M and M.open then return "a game menu is open (" .. tostring(M.which) .. ")" end
-    if state.occlude and state.occ.blocked then return "behind a wall or door" end
+    if state.occlude and state.occ.blocked then return "behind a wall" end
     return nil
 end
 
 local function draw_remote(now)
-    if not state.show_figure or not state.remote or not state.render_pos then return end
-    if avatar.obj and not avatar.show_skeleton then return end -- a cloned model is standing in
-    if state.overlay_hidden(now) then return end
+    if not state.remote or not state.render_pos then return end
+    -- The debug skeleton is never hidden while it is ticked: not by a wall, an open menu, the wait after a new game, being too
+    -- close, the "Show other player" switch or a cloned model. Then only the body and the name are held back (the tag says why).
+    local held_back
+    if not state.show_figure then
+        held_back = "Show other player is off"
+    elseif avatar.obj and not avatar.show_skeleton then
+        held_back = "a cloned model is standing in" -- a cloned model is standing in
+    else
+        held_back = state.overlay_hidden(now)
+    end
+    if held_back and not state.show_skeleton then return end
     local stale = (now - state.remote_changed_at) > CFG.STALE_AFTER
     local color = stale and 0xFF888888 or 0xFF00FF00
     local label = state.remote_name or CFG.DEFAULT_NAME
     if stale then label = label .. " (no signal)" end
+    if held_back then label = label .. " [body held back: " .. held_back .. "]" end
     local is_down = false
     if state.tag_extra and not stale then -- health module: " HP 65%" or " [downed]"
         local okx, extra, xcolor, down = pcall(state.tag_extra)
@@ -1448,7 +1687,7 @@ local function draw_remote(now)
     end
     amp = amp * (1 - 0.85 * math.max(P.guard, P.heal)) -- no walking legs while they block or heal
     local j = compute_joints(pos, fwd, amp, state.walk_phase, P)
-    if state.show_body and state.local_pos then
+    if not held_back and state.show_body and state.local_pos then
         local cam = { state.local_pos.x, state.local_pos.y, state.local_pos.z }
         draw_body(j, fwd, cam, stale and { 150, 150, 150 } or { 90, 255, 130 })
     end
@@ -1558,8 +1797,22 @@ end)
 local function ping_here()
     local p = state.local_pos
     if not p then return end
+    -- one ping a second and a half at most: a held key or a double click must not flood the other player
+    local now = os.clock()
+    if now - (pings.last_sent or -100) < 1.5 then return end
+    pings.last_sent = now
     net_send(2, string.format("%.2f;%.2f;%.2f", p.x, p.y, p.z))
     chat_add("You", "(pinged your position)")
+end
+
+-- Ping and quick messages without typing: F9 pings, and the panel has one-click phrases (they are ordinary chat messages).
+chat.quick = { "Wait for me", "Come here", "Help!", "Found something", "Going ahead" }
+chat.hotkey = 0x78 -- F9
+function chat.update(now)
+    local okk, down = pcall(function() return reframework:is_key_down(chat.hotkey) end)
+    down = okk and down == true
+    if down and not chat.key_was_down and state.remote then ping_here() end
+    chat.key_was_down = down
 end
 
 -- On-screen chat and ping markers
@@ -1753,7 +2006,9 @@ function tracer.crumb(stage, key)
     local now = os.clock()
     if now - tracer.crumb_t >= 1 then tracer.crumb_t, tracer.crumb_n = now, 0 end
     tracer.crumb_n = tracer.crumb_n + 1
-    if tracer.crumb_n > 400 then return end -- a burst (a chapter loading): at most 400 writes a second
+    -- a burst (a chapter loading): at most 400 writes a second. Only the per-call "enter" / "done" crumbs are held back: a
+    -- "clean" or "hooking" written in a burst used to be dropped, and the file then blamed a hook that had long been installed.
+    if tracer.crumb_n > 400 and (stage == "enter" or stage == "done") then return end
     pcall(json.dump_file, tracer.CRUMB_FILE, { stage = stage, call = key, clock = now, time = os.time(), session = tracer.session })
 end
 
@@ -1773,6 +2028,8 @@ function tracer.report_previous()
         text = "The last session ended while the recorder (button 11) was at: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me."
     elseif d.stage == "give" then
         text = "The last session ended while the script was handling an item: " .. d.call .. when .. ". If the game crashed, that call is the suspect: tell me."
+    elseif d.stage == "story" then
+        text = "The last session ended while the script was handling a story event: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me."
     elseif d.stage == "revive" then
         text = "The last session ended while the script was finishing an F8 revive: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me."
     else
@@ -2153,8 +2410,14 @@ end
 -- position; the other game finds the object with that name near that position and removes it the same way.
 -- Not synced yet: items that come out of drawers/containers, ammo use, "both players get the item".
 ----------------------------------------------------------------------------------------------
--- (9.11) Ethan is Pl0000 but Mia's chapters have Pl2000 (the first debug file lists both): any Pl followed by four digits is a player.
-local function is_player_name(n) return type(n) == "string" and n:match("^Pl%d%d%d%d$") ~= nil end
+-- Ethan is Pl0000 but Mia's chapters have Pl2000 (the first debug file lists both): any Pl followed by four digits is a player.
+-- The early game (the car, the forest, the guest house) names the player "Pl0000_Chapter1": the 9.17 debug file lists
+-- "[on Pl0000_Chapter1]" for the player's own components there, and the script found no player at all in those parts (the recorder,
+-- the health and pose hooks and the item owner all depend on finding it). "Pl0000_Chapter" and a number is a player too.
+local function is_player_name(n)
+    if type(n) ~= "string" then return false end
+    return n:match("^Pl%d%d%d%d$") ~= nil or n:match("^Pl%d%d%d%d_Chapter%d+$") ~= nil
+end
 
 local ITEM_MSG = 3
 local items = {
@@ -2303,12 +2566,15 @@ local function hook_method(type_name, method_name, pre, post)
         return false
     end
     local CALL_ORIGINAL = sdk.PreHookResult and sdk.PreHookResult.CALL_ORIGINAL
+    local SKIP_ORIGINAL = sdk.PreHookResult and sdk.PreHookResult.SKIP_ORIGINAL
     local errors = 0
     sdk.hook(m, function(args)
         local ok, err = pcall(pre, args)
         if not ok then
             errors = errors + 1
             if errors <= 3 then say("hook error in " .. method_name .. ": " .. tostring(err)) end -- (9.13: three times, not for ever)
+        elseif err == "skip" and SKIP_ORIGINAL ~= nil then
+            return SKIP_ORIGINAL -- only the execution test's opt-in "block the game over" returns this; every other callback returns nothing
         end
         return CALL_ORIGINAL
     end, function(retval)
@@ -2336,7 +2602,7 @@ local function find_named_object(name, max_nodes)
     return found
 end
 
--- (9.13) WHICH copy of the item manager? In the 0.7 and 0.8 files the one sdk.get_managed_singleton gives was an empty shell:
+-- WHICH copy of the item manager? In the 0.7 and 0.8 files the one sdk.get_managed_singleton gives was an empty shell:
 -- findItemData("Herb"), get_ItemDataIDNames and every create call answered nil, so no item could be created or dropped. The
 -- game's real manager sits on the object "SystemObject" (the older traces show findItemDataInternal "[on SystemObject]"). So the
 -- copies are collected (components in the scene, the one on SystemObject, the singleton) and the first that knows an item wins.
@@ -2371,7 +2637,7 @@ function mgr.im_candidates(walk)
     end
     local ok, s = pcall(sdk.get_managed_singleton, "app.ItemManager")
     if ok then add("the managed singleton", s) end
-    -- (9.14) The game's own copy is a candidate only if it knows items: in the 9.13 file it did not (findItemData -> nil), it
+    -- The game's own copy is a candidate only if it knows items: in the 9.13 file it did not (findItemData -> nil), it
     -- replaced the good copy at the next craft, and every creation after that failed.
     if mgr.captured_im and mgr.im_knows(mgr.captured_im) then add("the one the game's own createItemInstance call used", mgr.captured_im) end
     return out
@@ -2558,9 +2824,25 @@ local give = {
     inv_list = nil, inv_note = nil, inv_at = -10, inv_dirty = false,
     hooked = false,
     sent = 0, received = 0, dropped = 0, failed = 0,
-    out = {},    -- (9.11) what I sent and have no answer for yet: { kind = "g"/"d", id, n, at }
-    inbox = {},  -- (9.11) gifts that arrived while the game could not take them yet (no player object): { id, n, tries, next_at }
+    out = {},    -- what I sent and have no answer for yet: { kind = "g"/"d", id, n, at }
+    inbox = {},  -- gifts that arrived while the game could not take them yet (no player object): { id, n, tries, next_at }
     last = "Nothing given or dropped yet.",
+    -- Creating an item (createItemInstance / createDropItemInstance) is the one thing that crashed the real game, every time
+    -- it actually produced an object. So it is a switch, off at the start and not saved. Off: a gift can only make a stack you
+    -- already hold bigger (proven in the real game), and anything else is refused, so it stays with the sender.
+    make_new = CFG.ITEM_CREATE_DEFAULT,
+    in_update = false,   -- with make_new: do the creation inside the game's UpdateBehavior step instead of the render frame
+    update_step = false, -- true only while the UpdateBehavior callback is running the inbox
+    refused = 0,         -- gifts / drops refused because creation is off
+    -- Kinds whose inventory entry THIS SCRIPT created (not one that only grew): in the 9.18 test, giving one away (the game then
+    -- takes it out with Inventory.reduceItem) ended in a crash, and one of the two adds was followed by a crash 0.3 to 0.6 s later with no
+    -- button pressed. So such an item is not given away unless the box in the lab section is ticked. Not saved.
+    made = {}, allow_made = false, refused_made = 0,
+    -- Taking out a WHOLE inventory entry (the last unit of a kind) with reduceItem(id, n, true) crashed the game every time it was
+    -- tried (a script-made ChemicalS twice, a FlameBulletS you gave away one by one: the first four gave fine, the fifth was the last).
+    -- Taking some of a stack never did. So a give that would empty an entry is refused unless this is ticked, and then it uses the
+    -- other value of the third argument, the one crafting uses. Not saved.
+    last_ok = false, refused_last = 0, reopen_seen = 0, reopen_after_ours = 0, last_call_at = -100, whole_entry_removals = 0,
 }
 
 local function give_note(text)
@@ -2576,6 +2858,125 @@ local function as_text(v)
     local ok, t = pcall(function() return v:call("ToString()") end)
     if ok and type(t) == "string" then return t end
     return nil
+end
+
+----------------------------------------------------------------------------------------------
+-- Model probe. Read-only, one press: finds the characters in the scene that carry a mesh (Ethan, Mia, Jack, the enemies, the
+-- headless Mia of the shipwreck) and writes down for each one its object name, its mesh file, how many joints it has, how far it
+-- is from you, and for the three nearest the whole joint list (name and parent). That is what is needed to choose a real model for
+-- the other player (Mia, if Ethan cannot be found), to map her skeleton onto the stand-in's, and to stand a real enemy model in
+-- for the red boxes. Nothing is cloned, moved or hidden. The result is in the debug file as health.model_probe and in the journal.
+----------------------------------------------------------------------------------------------
+CFG.mprobe = { filter = "pl;em;mia;ethan;jack;marguerite;lucas;zoe;chara", result = nil, status = "Not used yet.", last_at = -100 }
+function CFG.mprobe.try(obj, names, ...)
+    for _, n in ipairs(names) do
+        local ok, v = pcall(obj.call, obj, n, ...)
+        if ok and v ~= nil then return v, n end
+    end
+    return nil, nil
+end
+function CFG.mprobe.text(v)
+    if v == nil then return nil end
+    local t = type(v)
+    if t == "string" then return v end
+    if t == "number" or t == "boolean" then return tostring(v) end
+    for _, m in ipairs({ "get_ResourcePath", "getResourcePath", "ToString()", "ToString" }) do
+        local ok, r = pcall(v.call, v, m)
+        if ok and type(r) == "string" and r ~= "" then return r end
+    end
+    return nil
+end
+function CFG.mprobe.words()
+    local out = {}
+    for w in tostring(CFG.mprobe.filter or ""):lower():gmatch("[^;,%s]+") do out[#out + 1] = w end
+    return out
+end
+-- The joints of a transform: { "name<parent", ... } (at most 140).
+function CFG.mprobe.joints(xf)
+    local MP = CFG.mprobe
+    local arr, how = MP.try(xf, { "get_Joints", "getJoints" })
+    if arr == nil then return nil, 0, "no joint list from the transform" end
+    local els
+    pcall(function() els = arr:get_elements() end)
+    if not els then return nil, 0, "joint list is not an array" end
+    local out = {}
+    for i, j in ipairs(els) do
+        if i > 140 then break end
+        local nm = MP.text(MP.try(j, { "get_Name", "getName" })) or "?"
+        local par = MP.try(j, { "get_Parent", "getParent" })
+        local pn = par and MP.text(MP.try(par, { "get_Name", "getName" })) or nil
+        out[#out + 1] = pn and (nm .. "<" .. pn) or nm
+    end
+    return out, #els, how
+end
+
+function CFG.mprobe.scan()
+    local MP = CFG.mprobe
+    local words = MP.words()
+    local lp = state.local_pos
+    local res = { filter = MP.filter, build = CFG.BUILD, found = {}, scanned = 0, errors = 0, at_s = math.floor(os.clock()) }
+    MP.last_at = os.clock()
+    local ok, err = pcall(each_gameobject, function(go, path)
+        res.scanned = res.scanned + 1
+        local okn, name = pcall(function() return go:call("get_Name") end)
+        name = okn and tostring(name) or "?"
+        local low = (path .. " " .. name):lower()
+        local match = false
+        for _, w in ipairs(words) do
+            if low:find(w, 1, true) then match = true break end
+        end
+        if not match or #res.found >= 90 then return false end
+        local okc, comps = pcall(component_names, go)
+        local mesh_comp
+        if okc then
+            for _, cn in ipairs(comps) do
+                if cn == "render.Mesh" then mesh_comp = true end
+            end
+        end
+        if not mesh_comp then return false end -- only things that are drawn with a mesh: not triggers, sensors or logic objects
+        local e = { name = name, path = path:sub(1, 160), components = comps }
+        pcall(function()
+            local mc = go:call("getComponent(System.Type)", sdk.typeof("via.render.Mesh"))
+            if mc then
+                local mres, via = MP.try(mc, { "getMesh", "get_Mesh", "get_MeshResource" })
+                e.mesh = MP.text(mres)
+                e.mesh_call = via
+                if mres == nil then e.mesh_note = "no mesh resource from getMesh / get_Mesh" end
+                local mats = MP.try(mc, { "get_MaterialNum", "getMaterialNum" })
+                if type(mats) == "number" then e.materials = mats end
+                local drawn = MP.try(mc, { "get_DrawDefault", "get_Enabled" })
+                if drawn ~= nil then e.enabled = drawn == true end
+            end
+        end)
+        pcall(function()
+            local xf = go:call("get_Transform")
+            local p = xf:call("get_Position")
+            e.pos = { math.floor(p.x * 100 + 0.5) / 100, math.floor(p.y * 100 + 0.5) / 100, math.floor(p.z * 100 + 0.5) / 100 }
+            if lp then e.dist = math.floor(math.sqrt((p.x - lp.x) ^ 2 + (p.y - lp.y) ^ 2 + (p.z - lp.z) ^ 2) * 10 + 0.5) / 10 end
+            e.xf = xf
+            local js, n = MP.joints(xf)
+            e.joint_count = n
+            e.joint_list = js
+        end)
+        res.found[#res.found + 1] = e
+        return false
+    end, 20000)
+    if not ok then res.errors = res.errors + 1 res.error = tostring(err):sub(1, 160) end
+    -- the full joint list only for the three nearest (the rest keep just the count)
+    table.sort(res.found, function(a, b) return (a.dist or 1e9) < (b.dist or 1e9) end)
+    for i, e in ipairs(res.found) do
+        e.xf = nil
+        if i > 3 then e.joint_list = nil end
+    end
+    MP.result = res
+    MP.status = string.format("Scanned %d objects, %d with a mesh matched \"%s\".", res.scanned, #res.found, MP.filter)
+    say("model probe: " .. MP.status .. (res.error and (" (stopped: " .. res.error .. ")") or ""))
+    for i, e in ipairs(res.found) do
+        if i <= 25 then
+            say(string.format("model probe: %s | mesh %s | %s joints | %s m | %s", e.name, tostring(e.mesh), tostring(e.joint_count or "?"),
+                tostring(e.dist or "?"), e.path or "?"))
+        end
+    end
 end
 
 give.id_getters = { "getItemDataId", "get_ItemDataId", "getItemId", "get_ItemId", "getName", "get_Name", "getItemName", "get_ItemName" }
@@ -2766,7 +3167,7 @@ local function raw_int(v)
     return v
 end
 
--- (9.13) The journal says what every discard-like call was taken for (25 lines at most): the 0.8 file had a discard that dropped
+-- The journal says what every discard-like call was taken for (25 lines at most): the 0.8 file had a discard that dropped
 -- nothing and left no line at all, so it was impossible to tell which condition had failed.
 function give.discard_note(msg)
     give.discard_lines = (give.discard_lines or 0) + 1
@@ -2775,6 +3176,10 @@ end
 
 -- A drop to be spawned a moment later, after the game has finished the discard. Once per discard: two hooks see the same one.
 function give.queue_drop(id, n, now, how)
+    if not give.make_new then -- safe mode: the game's own discard stands; nothing is created for the ground
+        give.discard_note(string.format("%s: %s x%d discarded as the game does it (item creation is off, so it is not put on the ground)", how, id, n))
+        return
+    end
     local q = give.dropq
     if q and q.id == id and now - q.at < 3 then
         give.discard_note(string.format("%s: %s x%d is already queued for the ground", how, id, n))
@@ -2794,6 +3199,14 @@ local function on_item_reduce(args)
     local id = item and item_id_of(item)
     local n = raw_int(args[3])
     local function skip(why) give.discard_note(string.format("reduceNum(%s x%s) is not a discard I drop: %s", tostring(id), tostring(n), why)) end
+    -- Moving an item into the item box is also a reduceNum, and the inventory menu was in use, so it looked like a discard: the
+    -- 9.18 files have "drop: making Gunpowder / CylinderKey / ShotgunBullet / HandgunBullet / RemedyM for the ground" for item box moves
+    -- (and the other player was told about drops that never happened). The real discard was proven to be InventoryMenu.discardItem
+    -- (9.14 file: menu_discard_calls 1, reduceNum_calls 0), so while that hook is installed reduceNum is never taken for a discard.
+    if give.discard_hooked then
+        give.reduce_ignored = (give.reduce_ignored or 0) + 1
+        return skip("the item box, crafting and using items call reduceNum too; a real discard comes from InventoryMenu.discardItem")
+    end
     if not give.drop_on_discard then return skip("'Discard drops the item' is switched off") end
     local f = give.focus
     if not f or not f.id or now - f.at > 30 then return skip("the inventory menu was not used in the last 30 s") end
@@ -2804,7 +3217,7 @@ local function on_item_reduce(args)
     give.queue_drop(id, n, now, "reduceNum")
 end
 
--- (9.13) The inventory menu's own discard, app.InventoryMenu.discardItem(app.Item) -> Boolean (it is in the file's method list):
+-- The inventory menu's own discard, app.InventoryMenu.discardItem(app.Item) -> Boolean (it is in the file's method list):
 -- the item comes with the call, no "highlighted item" is needed, and the answer says whether it was discarded.
 function give.on_discard_item(args)
     local item = sdk.to_managed_object(args[3])
@@ -2830,7 +3243,7 @@ local function remember_item_manager(args)
     local im = sdk.to_managed_object(args[2])
     if im then
         mgr.captured_im = im
-        -- (9.14) Taken over only when the copy in use does not know the items and this one does. This hook runs for every item
+        -- Taken over only when the copy in use does not know the items and this one does. This hook runs for every item
         -- the game creates, so a copy that knows the items is never replaced, and nothing is asked of it once one is in use.
         if not mgr.item_manager_ok and mgr.im_knows(im) then
             mgr.item_manager, mgr.item_manager_how, mgr.item_manager_ok = im, "the one the game's own createItemInstance call used", true
@@ -2858,6 +3271,7 @@ local function install_give_hooks()
     if hook_method("app.ItemManager", "createItemInstance", remember_item_manager) then n = n + 1 end
     if hook_method("app.Inventory", "getExtendLevelState", remember_inventory) then n = n + 1 end
     if hook_method("app.InventoryMenu", "discardItem", give.on_discard_item, give.after_discard_item) then give.discard_hooked = true end
+    if hook_method("app.Inventory", "reOpenRequestInventoryMenu", give.on_reopen_request) then give.reopen_hooked = true end
     return n >= 2
 end
 
@@ -2875,7 +3289,7 @@ local function game_object_of(obj)
     return go
 end
 
--- (9.12) The game's creation calls answered nothing in the real file ("createItemInstance failed: nil", and a "drop" that was
+-- The game's creation calls answered nothing in the real file ("createItemInstance failed: nil", and a "drop" that was
 -- reported but never appeared: the call had not failed, it had returned nil, which was taken for success). So: every way the
 -- call might be meant is tried (the player object, then the owner the inventory's own entries carry; the name as a plain Lua
 -- string, then as a managed string), the first one that returns an object wins and is remembered, and when none does the
@@ -2889,7 +3303,7 @@ local function item_owner_candidates()
         pname = as_text(player:call("get_Name"))
         out[#out + 1] = { name = "player", go = player }
     end
-    -- (9.14) Only the player. 9.12 and 9.13 also tried "the owner an inventory entry carries", which is an item's own object
+    -- Only the player. 9.12 and 9.13 also tried "the owner an inventory entry carries", which is an item's own object
     -- (sm1852_AntisepticSolutionMedium_Item in the file): handing that to the game's creation code is the likely crash.
     return out
 end
@@ -2931,7 +3345,7 @@ local function item_probe(id, why)
     local im = item_manager()
     if not im then return end
     say("give probe (" .. tostring(why) .. "): item " .. id)
-    for i, c in ipairs(mgr.im_candidates(true)) do -- (9.13) every copy of the manager the game has, and what each one knows
+    for i, c in ipairs(mgr.im_candidates(true)) do -- every copy of the manager the game has, and what each one knows
         local okf, d = pcall(function() return c.obj:call("findItemData", id) end)
         local okn, names = pcall(function() return c.obj:call("get_ItemDataIDNames") end)
         local cnt = okn and names ~= nil and #list_elements(names) or nil
@@ -2965,9 +3379,169 @@ function give.add_note(msg)
     if give.add_lines <= 12 then say("add: " .. msg) end
 end
 
--- (9.14) Crumbs around the calls that make or place items: if the game crashes in one, the next session names it.
+-- Crumbs around the calls that make or place items: if the game crashes in one, the next session names it.
 function give.crumb(what) pcall(tracer.crumb, "give", what) end
 function give.clean() pcall(tracer.crumb, "clean", "item call finished") end
+
+-- THE BLACK BOX. The 9.15 and 9.16 sessions that tried to create an item ended with a crash 0.1 s after the last step, before
+-- the journal (written every 2 s) or the debug file reached the disk, so the files said nothing about the attempt. Now every step of
+-- anything that creates or places an item is written at once to its own small file (re7mp_trail.json, the last 80 steps), and the
+-- debug file is written too. The next start reads the trail back: the debug file has it as health.items.previous_item_trail and the
+-- first journal lines name the last step. The crumb file only names the step that was running; this one has what each step answered.
+give.trail_file = "re7mp_trail.json"
+give.trail_list = {}
+give.previous_trail = nil
+function give.trail(what)
+    local text = tostring(what):gsub("[\r\n]+", " "):sub(1, 400)
+    give.trail_list[#give.trail_list + 1] = { t = math.floor(os.clock() * 1000) / 1000, w = text }
+    if #give.trail_list > 120 then table.remove(give.trail_list, 1) end
+    pcall(json.dump_file, give.trail_file, { session = tracer.session, entries = give.trail_list })
+    say("trail: " .. text)
+    dbg.last_flush = -1e9                 -- the journal normally waits up to 2 s; a crash in between would lose it
+    pcall(flush_debug, os.clock())
+end
+
+-- Start of a session: what did the last one write before it ended?
+-- The sessions before that: the trails of the last 6 sessions are kept in their own file, so a crash followed by a short
+-- session does not wipe the evidence of the crash before it (the debug file lists them as earlier_item_trails).
+give.history_file = "re7mp_trail_history.json"
+give.history = {}
+function give.load_history()
+    local ok, d = pcall(json.load_file, give.history_file)
+    if ok and type(d) == "table" and type(d.sessions) == "table" then give.history = d.sessions end
+end
+
+function give.report_trail()
+    pcall(give.load_history)
+    local ok, d = pcall(json.load_file, give.trail_file)
+    if not ok or type(d) ~= "table" or d.session == tracer.session then return end
+    local entries = type(d.entries) == "table" and d.entries or {}
+    if #entries == 0 then return end
+    give.previous_trail = entries
+    local last = entries[#entries]
+    do
+        local keep = {}
+        for i = math.max(1, #entries - 59), #entries do keep[#keep + 1] = entries[i] end
+        give.history[#give.history + 1] = { ended_at_s = last.t, ended_with = tostring(last.w):sub(1, 200), entries = keep }
+        while #give.history > 6 do table.remove(give.history, 1) end
+        pcall(json.dump_file, give.history_file, { sessions = give.history })
+    end
+    say(string.format("previous session's item trail: %d steps, the last at %s s: %s", #entries, tostring(last.t), tostring(last.w)))
+    pcall(json.dump_file, give.trail_file, { session = tracer.session, entries = {} }) -- (so the same trail is not reported at every start)
+end
+
+-- What an app.Item looks like to the game right now (read-only): its state, stack, the name and slot it carries, and its object.
+function give.snap(item, label)
+    local parts = {}
+    local function try(k, f)
+        local ok, v = pcall(f)
+        parts[#parts + 1] = k .. "=" .. (not ok and "error" or (v == nil and "nil" or tostring(as_text(v) or v)))
+    end
+    try("state", function()
+        local v = item:call("getItemState")
+        local nm = type(v) == "number" and give.enum_names("app.Item.ITEMSTATE")[v] or nil
+        return nm and (tostring(v) .. " " .. nm) or v
+    end)
+    try("stack", function() return item:call("getStackNum") end)
+    local sd
+    pcall(function() sd = item:call("getItemSaveData") end)
+    if sd ~= nil and type(sd) ~= "number" and type(sd) ~= "string" then
+        try("id", function() return sd:get_field("ItemDataID") end)
+        try("slot", function() return sd:get_field("SlotNo") end)
+        try("isUpdate", function() return sd:get_field("IsUpdate") end)
+        try("isDraw", function() return sd:get_field("IsDraw") end)
+    else
+        parts[#parts + 1] = "savedata=none"
+    end
+    try("object", function() return give.info_text(give.go_info(game_object_of(item))) end)
+    try("ItemStackNum", function() return item:get_field("ItemStackNum") end) -- the item's own field, next to what getStackNum says
+    give.trail(label .. ": " .. table.concat(parts, ", "))
+end
+
+-- What the INVENTORY's own entry for a kind looks like (state, stack, slot, object). give.snap only ever looked at the object the
+-- script made; addItem works on a copy, and the copy is what the game keeps drawing, counting and saving. A state other than 2
+-- (INVENTRY_IN), a slot of -1 or a stack of 0 would explain a crash a moment later. Read-only.
+function give.copy_text(id)
+    local okl, list = pcall(inventory_items)
+    if not okl or list == nil then return "the inventory can't be read" end
+    local out = {}
+    for _, e in ipairs(list) do
+        if e.id == id and e.item then
+            local parts = {}
+            local function try(k, f)
+                local ok, v = pcall(f)
+                parts[#parts + 1] = k .. "=" .. (not ok and "error" or (v == nil and "nil" or tostring(as_text(v) or v)))
+            end
+            try("state", function()
+                local v = e.item:call("getItemState")
+                local nm = type(v) == "number" and give.enum_names("app.Item.ITEMSTATE")[v] or nil
+                return nm and (tostring(v) .. " " .. nm) or v
+            end)
+            try("stack", function() return e.item:call("getStackNum") end)
+            pcall(function()
+                local sd = e.item:call("getItemSaveData")
+                if sd ~= nil and type(sd) ~= "number" and type(sd) ~= "string" then
+                    try("slot", function() return sd:get_field("SlotNo") end)
+                end
+            end)
+            try("object", function() return give.info_text(give.go_info(game_object_of(e.item))) end)
+            out[#out + 1] = table.concat(parts, ", ")
+        end
+    end
+    if #out == 0 then return "no entry for " .. tostring(id) end
+    return table.concat(out, " | "):sub(1, 300)
+end
+
+-- After an add: a line in the trail at 0.05 s, 0.15 s, ... so a crash is dated to the moment it happened. Run from give_update.
+give.watch = nil
+function give.watch_start(label, id)
+    give.watch = { label = label, id = id, t0 = os.clock(), i = 1, frames = 0, marks = { 0.05, 0.15, 0.3, 0.6, 1, 2, 4 } }
+    give.crumb(label .. ": done, watching whether the game survives the next seconds")
+end
+function give.watch_update(now)
+    local w = give.watch
+    if not w then return end
+    w.frames = w.frames + 1
+    local m = w.marks[w.i]
+    if m and now - w.t0 >= m then
+        w.i = w.i + 1
+        local held, readable
+        if w.id then held, readable = give.total_of(w.id) end
+        give.trail(string.format("%s: alive %.2f s later (frame %d)%s%s", w.label, now - w.t0, w.frames,
+            readable and string.format(", you hold %d %s", held, w.id) or "",
+            (readable and held > 0 and (w.i == 3 or w.i == 5 or w.i == 8)) and (", copy: " .. give.copy_text(w.id)) or "")) -- at 0.15 s, 0.6 s and the end
+    end
+    if not w.marks[w.i] then
+        give.watch = nil
+        give.clean()
+    end
+end
+
+-- A List<GameObject> for the 4-parameter addItem. The 9.15 file's third form died with the script's own "no list could be made",
+-- so create_instance(<that generic type>) answers nothing in the real game; other ways are tried, and the answer says which worked.
+give.list_how = nil
+function give.make_list()
+    local tn = "System.Collections.Generic.List`1<via.GameObject>"
+    local failed = {}
+    local function try(label, f)
+        local ok, v = pcall(f)
+        if ok and v ~= nil then return v end
+        failed[#failed + 1] = label .. ": " .. (ok and "nothing" or tostring(v):sub(1, 50))
+    end
+    local l = try("sdk.create_instance", function() return sdk.create_instance(tn) end)
+    if l ~= nil then give.list_how = "sdk.create_instance" return l, give.list_how end
+    l = try("type:create_instance", function()
+        local td = sdk.find_type_definition(tn)
+        return td and td:create_instance()
+    end)
+    if l ~= nil then give.list_how = "type:create_instance" return l, give.list_how end
+    l = try("sdk.create_instance(simplified)", function() return sdk.create_instance(tn, true) end)
+    if l ~= nil then give.list_how = "sdk.create_instance(true)" return l, give.list_how end
+    give.list_how = nil
+    return nil, table.concat(failed, "; ")
+end
+give.SIG_ADD2 = "addItem(app.Item, via.GameObject)"
+give.SIG_ADD4 = "addItem(app.Item, via.GameObject, System.Boolean, System.Collections.Generic.List`1<via.GameObject>)"
 
 -- What a GameObject looks like to the engine: its name, parent, position, and whether it is drawn / updated. Read-only.
 function give.go_info(go)
@@ -3018,13 +3592,22 @@ end
 -- Puts an item on the ground (at x, y, z, or just in front of the player's feet if they are nil).
 -- Returns true plus where it ended up, or nil plus the reason. Only an object that came back, and is drawn, counts as done.
 local function spawn_world_item(id, n, x, y, z)
-    if not item_manager() then return nil, "ItemManager not found" end
+    if not give.make_new then -- safe mode: nothing is created, so nothing can be put on the ground either
+        give.refused = give.refused + 1
+        return nil, "item creation is off (safe mode)"
+    end
+    give.crumb("looking for the ItemManager (for the ground)")
+    local im = item_manager()
+    give.clean()
+    if not im then return nil, "ItemManager not found" end
     local player = player_object()
     if not player then return nil, "player object (Pl0000) not found" end
+    give.trail(string.format("drop: making %s x%d for the ground (createDropItemInstance)", id, n))
     give.crumb(string.format("making %s x%d for the ground (createDropItemInstance)", id, n))
     local obj, why = create_item_object("createDropItemInstance", id, n)
     give.clean()
     if obj == nil then
+        give.trail("drop: createDropItemInstance gave nothing: " .. tostring(why))
         item_probe(id, "the item could not be put on the ground")
         return nil, why
     end
@@ -3035,7 +3618,7 @@ local function spawn_world_item(id, n, x, y, z)
     local ppx, ppy, ppz, pfx, pfz = give.player_pose(player)
     local tx, ty, tz = x, y, z
     if tx == nil and ppx then
-        -- (9.14) the game puts a dropped item where its owner is (a drawer, in its own use); the player is the owner here, so the
+        -- the game puts a dropped item where its owner is (a drawer, in its own use); the player is the owner here, so the
         -- item may sit inside the player, or be a child of the player and follow them. Put it down in front of the feet.
         local len = math.sqrt((pfx or 0) ^ 2 + (pfz or 0) ^ 2)
         local ox, oz = 0, 0
@@ -3054,14 +3637,14 @@ local function spawn_world_item(id, n, x, y, z)
     give.drop_note(string.format("%s x%d: object was %s; now %s; player at %s", id, n, give.info_text(before), give.info_text(after),
         ppx and string.format("(%.2f, %.2f, %.2f)", ppx, ppy, ppz) or "?"))
     give.last_drop = { id = id, before = before, after = after }
+    give.trail(string.format("drop: %s x%d placed: was %s; now %s", id, n, give.info_text(before), give.info_text(after)))
+    give.watch_start("drop " .. id, nil)
     if after.draw == false then return nil, "the object that was made is hidden (not drawn), so nobody would see it" end
     return true, after.x or tx, after.y or ty, after.z or tz
 end
 
 local function new_go_list()
-    local ok, l = pcall(function() return sdk.create_instance("System.Collections.Generic.List`1<via.GameObject>") end)
-    if ok then return l end
-    return nil
+    return (give.make_list())
 end
 
 -- The last way in when the game won't create an item: if an item of that name is already in the inventory, its stack grows.
@@ -3127,60 +3710,140 @@ function give.total_of(id)
     return total, true
 end
 
--- Creates the item the way crafting does, then adds it. (9.14) The 9.13 file had "added" items that were never in the
--- inventory: the old code called addItem with a nil list, ignored what it answered (an app.Inventory.AddItemResult) and
--- said "done". Now each form of addItem is tried in turn (the game's own forms: with and without a list), what it answered is
--- written down, and the item only counts as delivered when the inventory really holds more of it than before.
--- Returns true plus how, or false plus why.
+-- true when taking n of `id` would remove an inventory entry altogether (n is at least the smallest stack of that kind; the game
+-- takes from the smallest stack first, as far as the crafting trace shows), false when every stack would only get smaller, nil when the
+-- inventory can't be read or has none of that kind.
+function give.would_empty_entry(id, n)
+    local list = inventory_items()
+    if list == nil then return nil end
+    local smallest
+    for _, e in ipairs(list) do
+        if e.id == id then
+            local c = e.count or 1
+            if not smallest or c < smallest then smallest = c end
+        end
+    end
+    if not smallest then return nil end
+    return n >= smallest, smallest
+end
+
+-- The game's own reduceItem(id, n, TRUE) that removes an entry (door keys, a used Remedy) is followed by
+-- Inventory.reOpenRequestInventoryMenu(); crafting, which passes FALSE, has none. This hook is only there to see whether our call asks for it.
+-- It writes the trail file only (no debug flush: this runs inside the game's own call).
+function give.on_reopen_request(args)
+    give.reopen_seen = give.reopen_seen + 1
+    local now = os.clock()
+    if now - give.last_call_at < 5 then
+        give.reopen_after_ours = give.reopen_after_ours + 1
+        local text = string.format("the game asked for the inventory menu to be re-opened %.2f s after my reduceItem call%s", now - give.last_call_at, give.giving and " (inside the call)" or "")
+        give.trail_list[#give.trail_list + 1] = { t = math.floor(now * 1000) / 1000, w = text }
+        if #give.trail_list > 120 then table.remove(give.trail_list, 1) end
+        pcall(json.dump_file, give.trail_file, { session = tracer.session, entries = give.trail_list })
+    end
+end
+
+-- How a gift becomes part of my inventory. Two ways, the first one always, the second one only when the switch is on:
+--  1. SAFE (proven in the real game, 9.12 ammo): an item of that name is already in the inventory, so its stack grows.
+--  2. EXPERIMENTAL (give.make_new): the game creates the item the way a pickup does (createItemInstance), and addItem puts it in.
+--     Every real-game session in which this actually produced an object ended in a crash, so it is off at the start, it is not
+--     saved, and each step leaves a breadcrumb (re7mp_lastcall.json): the next start's first journal line names the step the game died in.
+-- Returns true plus how, or false plus why (a third value, "later", means: not yet, the game's update step has to do it).
+-- The item only counts as delivered when the inventory really holds more of it than before (the 9.13 file had "added"
+-- items that were never there: addItem answers an app.Inventory.AddItemResult, and ignoring it said "done" for nothing).
 local function add_to_inventory(id, n)
-    local im, player, inv = item_manager(), player_object(), inventory_object()
-    if not im then return false, "ItemManager not found" end
+    local player, inv = player_object(), inventory_object()
     if not player then return false, "player object not found" end
     if not inv then return false, "inventory object not found" end
+    local okb, whyb = bump_existing_stack(id, n)
+    if okb then return true, "added to the stack you already have" end
+    if not give.make_new then
+        give.refused = give.refused + 1
+        give.add_note(string.format("%s x%d refused: %s; item creation is off (safe mode)", id, n, tostring(whyb)))
+        return false, tostring(whyb) .. "; item creation is off (safe mode)"
+    end
+    if give.in_update and not give.update_step then return false, "waiting for the update step", "later" end
+    give.trail(string.format("gift: %s x%d: no stack to grow (%s), so the item is created", id, n, tostring(whyb)))
+    give.crumb("looking for the ItemManager")
+    local im = item_manager()
+    give.clean()
+    if not im then give.trail("gift: no ItemManager") return false, "ItemManager not found" end
     give.crumb(string.format("making %s for the inventory (createItemInstance)", id))
     local created, why = create_item_object("createItemInstance", id)
     give.clean()
     if created == nil then
+        give.trail("gift: createItemInstance gave nothing: " .. tostring(why))
         item_probe(id, "the item could not be created")
-        local okb, whyb = bump_existing_stack(id, n)
-        if okb then return true, "added to the stack you already have" end
         return false, tostring(whyb) .. "; " .. tostring(why) -- (the answer to the other player is cut at 90 characters: the short reason first)
     end
     local item = created
+    give.crumb(string.format("reading the app.Item of the new %s", id))
     pcall(function()
         local td = created:get_type_definition()
         if td and td:get_full_name() == "via.GameObject" then
             item = created:call("getComponent(System.Type)", sdk.typeof("app.Item"))
         end
     end)
-    if item == nil then return false, "the new object has no app.Item" end
-    if n > 1 then pcall(function() item:call("setStackNum", n) end) end
+    give.clean()
+    if item == nil then give.trail("gift: the new object has no app.Item") return false, "the new object has no app.Item" end
+    give.snap(item, string.format("gift: the new %s before anything is done to it", id))
+    -- The 9.17 Lab 2 file: an object made by createItemInstance has a stack of 0 ("stack=0", state LOST). addItem answered
+    -- "Integration" for it, added nothing, and the game died 0.1 s later. (The old code set the count only for n > 1, so every
+    -- single Herb or Chem Fluid went in with 0.) The count is now always set, read back, and an item that does not hold exactly n
+    -- is NOT handed to addItem.
+    give.crumb(string.format("setStackNum(%d) on the new %s", n, id))
+    local oks, errs = pcall(function() item:call("setStackNum", n) end)
+    local okr, got = pcall(function() return item:call("getStackNum") end)
+    give.clean()
+    got = okr and tonumber(got) or nil
+    give.trail(string.format("gift: setStackNum(%d) %s; the stack reads %s", n, oks and "went through" or ("failed: " .. tostring(errs):sub(1, 60)), tostring(got)))
+    if got ~= n then
+        give.trail(string.format("gift: the new item does not hold a stack of %d, so it is NOT added (an item with a stack of 0 was followed by a crash in the 9.17 test)", n))
+        give.add_note(string.format("%s x%d was created but would not take a stack count (it reads %s): not added", id, n, tostring(got)))
+        return false, "the new item would not take a stack count (reads " .. tostring(got) .. ")"
+    end
+    give.crumb(string.format("isAddItem on the new %s", id))
     local okf, fit = pcall(function() return inv:call("isAddItem", item) end)
+    give.clean()
+    give.trail("gift: isAddItem said " .. (okf and give.result_text(fit) or "error"))
     local before = give.total_of(id)
-    local forms = {
-        { "addItem(item, player)", function() return inv:call("addItem(app.Item, via.GameObject)", item, player) end },
-        { "addItem(item, player, false, no list)", function() return inv:call("addItem", item, player, false, nil) end },
-        { "addItem(item, player, false, new list)", function()
-            local l = new_go_list()
-            if l == nil then error("no list could be made") end
-            return inv:call("addItem", item, player, false, l)
-        end },
-    }
+    -- The 9.15 log showed what really ran: only the 2-parameter form. The "no list" form had too few arguments, so REFramework
+    -- refused the call and its zero was read as "Put"; the "new list" form never ran because no list could be made. So: the game's own
+    -- shape (a real list) is tried first when a list can be made (said in the trail), with the full signature so that the right overload
+    -- is called; the 2-parameter overload is the fallback. And once the game has ANSWERED (any result), no other form is tried on the
+    -- same object: a second add of an item the first one may have used up is a risk, not a remedy.
+    local forms = {}
+    local list, list_how = give.make_list()
+    if list ~= nil then
+        forms[#forms + 1] = { "addItem(item, player, false, new list)", function() return inv:call(give.SIG_ADD4, item, player, false, list) end }
+        give.trail("gift: a List<GameObject> was made with " .. tostring(list_how))
+    else
+        give.trail("gift: no List<GameObject> could be made (" .. tostring(list_how) .. "): the 4-parameter addItem is skipped")
+    end
+    forms[#forms + 1] = { "addItem(item, player)", function() return inv:call(give.SIG_ADD2, item, player) end }
     local said = {}
     for _, form in ipairs(forms) do
         give.crumb(string.format("adding %s x%d to the inventory: %s", id, n, form[1]))
+        give.trail("gift: calling " .. form[1])
         local ok, res = pcall(form[2])
-        give.clean()
-        said[#said + 1] = form[1] .. " -> " .. (ok and give.result_text(res) or ("error: " .. tostring(res):sub(1, 40)))
+        said[#said + 1] = form[1] .. " -> " .. (ok and give.result_text(res) or ("error: " .. tostring(res):sub(1, 120)))
+        give.trail("gift: the game answered: " .. said[#said])
         local after, readable = give.total_of(id)
+        give.trail(string.format("gift: you hold %d %s now (before: %d)%s", after, id, before, readable and "" or " - the list can't be read"))
+        give.snap(item, "gift: the new item after " .. form[1])
+        give.watch_start("gift " .. id, id)
         if readable and after > before then
+            if before == 0 then give.made[id] = true end
+            give.trail("gift: the inventory's copy: " .. give.copy_text(id))
             give.add_how = form[1]
             give.add_last = { id = id, form = form[1], answered = said[#said], isAddItem = okf and give.result_text(fit) or "error" }
             if #said > 1 then give.add_note("it took " .. #said .. " tries: " .. table.concat(said, "; ")) end
             return true
         elseif not readable and ok then
+            give.made[id] = true
             give.add_how = form[1]
             return true, "added (the inventory can't be read to check)"
+        elseif ok and type(res) == "number" then
+            break -- the game has answered; see above
         end
     end
     give.add_last = { id = id, form = "none worked", answered = table.concat(said, "; "), isAddItem = okf and give.result_text(fit) or "error" }
@@ -3190,6 +3853,165 @@ local function add_to_inventory(id, n)
     local fit_name = (okf and type(fit) == "number") and tostring(give.enum_names("app.Inventory.AddItemResult")[fit] or "") or ""
     if (okf and fit == false) or fit_name:lower():find("full", 1, true) then return false, "inventory full" end
     return false, "the game did not add it (" .. table.concat(said, "; "):sub(1, 70) .. ")"
+end
+
+-- THE ITEM LAB. One step per button press, in the panel under the creation switch, each step written to the trail at once.
+-- The earlier sessions only ever told us "the game died somewhere after the item was made and added". Pressing the steps one at a
+-- time, with a few seconds between them, says WHICH step starts the trouble: if the game dies after Lab 1 (a bare created object),
+-- making the object is the poison; if it survives that but dies after Lab 2, it is the add; and so on. Use a kind you hold none of.
+give.lab = { id = "ChemicalS", obj = nil, item = nil }
+-- Each lab step honours the "inside the game's update step" box (give.defer runs it at once when the box is not ticked). One of the
+-- two 9.18 adds worked and the game died 0.3 to 0.6 s after the other with nobody pressing anything: if that is the game's update
+-- thread meeting this script's calls from the render frame, the box is the cure, and a run of labs with it on and off shows it.
+function give.lab_deferred(name, fn)
+    return function(...)
+        local args = { ... }
+        give.defer(function() fn(table.unpack(args)) end, function() give.trail(name .. ": the game's update step did not run within 8 s") end)
+    end
+end
+
+function give.lab_create_now()
+    local L = give.lab
+    if L.item and not L.added then give.trail("lab 1: an object is already waiting; add it (Lab 2 or 3) or remove it (Lab 4) first") return end
+    give.trail("lab 1: creating " .. L.id .. " with createItemInstance, and nothing else")
+    give.crumb("lab 1: looking for the ItemManager")
+    local im = item_manager()
+    give.clean()
+    if not im then give.trail("lab 1: no ItemManager") return end
+    give.crumb("lab 1: createItemInstance " .. L.id)
+    local created, why = create_item_object("createItemInstance", L.id)
+    give.clean()
+    if created == nil then give.trail("lab 1: nothing came back: " .. tostring(why)) return end
+    local item = created
+    pcall(function()
+        local td = created:get_type_definition()
+        if td and td:get_full_name() == "via.GameObject" then item = created:call("getComponent(System.Type)", sdk.typeof("app.Item")) end
+    end)
+    if item == nil then give.trail("lab 1: the new object has no app.Item") return end
+    L.obj, L.item, L.added = created, item, false
+    give.snap(item, "lab 1: the new object")
+    give.watch_start("lab 1 (created, not added)", nil)
+end
+give.lab_create = give.lab_deferred("lab 1", give.lab_create_now)
+
+-- which = "2": Lab 2, addItem(item, player); "3": Lab 3, the 4-parameter form with a real list (the number is the button's, and the trail's)
+function give.lab_add_now(which)
+    local L = give.lab
+    if not L.item then give.trail("lab " .. which .. ": no object waiting; press Lab 1 first") return end
+    if L.added then give.trail("lab " .. which .. ": that object was added once already; press Lab 1 for a fresh one (or Lab 4 to remove it)") return end
+    local player, inv = player_object(), inventory_object()
+    if not (player and inv) then give.trail("lab " .. which .. ": no player or inventory object") return end
+    local oksn, stack = pcall(function() return L.item:call("getStackNum") end)
+    stack = oksn and tonumber(stack) or nil
+    if not stack or stack < 1 then
+        give.trail(string.format("lab %s: the waiting object has a stack of %s, so it is not added: addItem answered 'Integration' for such an object and the game died right after (9.17 test). Press Lab 6 first", which, tostring(stack)))
+        return
+    end
+    local before = give.total_of(L.id)
+    give.snap(L.item, "lab " .. which .. ": before addItem")
+    local call
+    if which == "3" then
+        local list, how = give.make_list()
+        if list == nil then give.trail("lab 3: no List<GameObject> could be made (" .. tostring(how) .. "): nothing was added") return end
+        give.trail("lab 3: a List<GameObject> was made with " .. tostring(how))
+        call = function() return inv:call(give.SIG_ADD4, L.item, player, false, list) end
+    else
+        call = function() return inv:call(give.SIG_ADD2, L.item, player) end
+    end
+    give.crumb("lab " .. which .. ": addItem")
+    give.trail("lab " .. which .. ": calling addItem on the waiting object")
+    L.added = true -- (one add per object, whatever the answer: a second one is the risk this lab exists to avoid)
+    local ok, res = pcall(call)
+    give.trail("lab " .. which .. ": the game answered " .. (ok and give.result_text(res) or ("error: " .. tostring(res):sub(1, 120))))
+    local after, readable = give.total_of(L.id)
+    give.trail(string.format("lab %s: you hold %d %s now (before: %d)%s", which, after, L.id, before, readable and "" or " - the list can't be read"))
+    give.snap(L.item, "lab " .. which .. ": after addItem")
+    if after > before and before == 0 then give.made[L.id] = true end
+    give.trail("lab " .. which .. ": the inventory's copy: " .. give.copy_text(L.id)) -- (9.20) the entry the game keeps, not the object made here
+    give.watch_start("lab " .. which .. " (added)", L.id)
+end
+give.lab_add = give.lab_deferred("lab add", give.lab_add_now)
+
+-- Lab 6: the stack count, on its own. A created object reads 0; the game's own code fills the item data in before addItem.
+-- n is 1 (the button as before) or 2: with two in the inventory, the first Lab 7 takes ONE of TWO (the entry stays) and the second
+-- takes the last one (the entry goes), which tells a stack that shrinks from a stack that is removed.
+function give.lab_stack_now(n)
+    n = (n == 2) and 2 or 1
+    local L = give.lab
+    if not L.item then give.trail("lab 6: no object waiting; press Lab 1 first") return end
+    if L.added then give.trail("lab 6: that object was added already; press Lab 1 for a fresh one") return end
+    give.crumb("lab 6: setStackNum(" .. n .. ")")
+    give.trail("lab 6: calling setStackNum(" .. n .. ") on the waiting object, and nothing else")
+    local ok, err = pcall(function() L.item:call("setStackNum", n) end)
+    local okr, got = pcall(function() return L.item:call("getStackNum") end)
+    give.trail(string.format("lab 6: setStackNum(%d) %s; the stack reads %s", n, ok and "went through" or ("failed: " .. tostring(err):sub(1, 80)), tostring(okr and got or "?")))
+    give.snap(L.item, "lab 6: after setStackNum")
+    give.watch_start("lab 6 (stack set)", nil)
+end
+give.lab_stack = give.lab_deferred("lab 6", give.lab_stack_now)
+
+-- The kind the lab works on can be typed (letters, digits and _ only; not while an object is waiting). Lab 5 and Lab 7 on a kind the
+-- GAME put in the inventory (one Herb you picked up, say) show whether taking out the last one is the trouble for any item or only for
+-- the ones this script made.
+function give.lab_set_kind(text)
+    local L = give.lab
+    text = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if text == L.id then return true end
+    if L.item and not L.added then return false, "an object is waiting: add or destroy it first" end
+    if not text:match("^[%w_]+$") or #text > 40 then return false, "letters, digits and _ only" end
+    L.id = text
+    give.trail("lab: the kind is now " .. text)
+    return true
+end
+
+function give.lab_destroy_now()
+    local L = give.lab
+    if not L.item then give.trail("lab 4: no object waiting") return end
+    give.crumb("lab 4: Item.destroyItem")
+    give.trail("lab 4: calling destroyItem on the waiting object")
+    local ok, err = pcall(function() return L.item:call("destroyItem") end)
+    give.trail("lab 4: " .. (ok and "done" or ("error: " .. tostring(err):sub(1, 100))))
+    L.obj, L.item, L.added = nil, nil, false
+    give.watch_start("lab 4 (destroyed)", L.id)
+end
+give.lab_destroy = give.lab_deferred("lab 4", give.lab_destroy_now)
+
+-- Lab 7: take the item out of the inventory again with the very call a give uses (Inventory.reduceItem), and nothing else. A give
+-- of the script-made ChemicalS ended in a crash with no trace of which step did it, because that step wrote nothing. Here the trail
+-- line is written BEFORE the call and the copy's state is written before and after, so the next file names the step.
+function give.lab_take_out_now(flag)
+    if flag ~= false then flag = true end
+    local L = give.lab
+    local held, readable = give.total_of(L.id)
+    local lab = flag and "lab 7" or "lab 8"
+    if not readable or held < 1 then give.trail(lab .. ": you hold no " .. L.id .. " (or the list can't be read): nothing to take out") return end
+    local inv = inventory_object()
+    if not inv then give.trail(lab .. ": no inventory object") return end
+    give.trail(lab .. ": the inventory's copy before: " .. give.copy_text(L.id))
+    give.trail(string.format("%s: you hold %d %s (%s%s); calling Inventory.reduceItem(%s, 1, %s), %s, and nothing else", lab, held, L.id,
+        held == 1 and "this takes the LAST one, the entry goes" or "one of several, the entry stays",
+        give.made[L.id] and ", made by this script" or ", not made by this script", L.id, tostring(flag),
+        flag and "the call a give used to make" or "the way crafting calls it"))
+    give.crumb(lab .. ": Inventory.reduceItem " .. L.id)
+    give.giving, give.last_call_at = true, os.clock()
+    local ok, res = call_str(inv, "reduceItem", L.id, 1, flag)
+    give.giving = false
+    give.clean()
+    local after = give.total_of(L.id)
+    give.trail(string.format("%s: reduceItem %s (it answered %s); you hold %d %s now (before: %d)", lab, ok and "went through" or "failed",
+        tostring(res), after, L.id, held))
+    if after == 0 then give.made[L.id] = nil
+    else give.trail(lab .. ": the inventory's copy after: " .. give.copy_text(L.id)) end
+    give.watch_start(lab .. (flag and " (taken out)" or " (taken out like crafting)"), L.id)
+end
+give.lab_take_out = give.lab_deferred("lab 7", give.lab_take_out_now)
+
+function give.lab_look()
+    local L = give.lab
+    local held, readable = give.total_of(L.id)
+    give.trail(string.format("lab 5: you hold %d %s%s; an object is %s", held, L.id, readable and "" or " (the list can't be read)",
+        (L.item and not L.added) and "waiting" or (L.item and "kept (already added)" or "not waiting")))
+    if L.item then give.snap(L.item, "lab 5: the waiting object") end
 end
 
 -- Hands n of item `id` to the other player.
@@ -3207,8 +4029,31 @@ local function give_item(id, n)
         give_note("can't find your inventory object, nothing was given")
         return false
     end
-    -- (9.12) Nothing leaves your inventory yet: the other game answers first (give_ack) and the item is taken out when it says
+    -- an item this script made is not given away (see give.made); once you hold none of that kind any more the mark is dropped
+    if give.made[id] then
+        local held, readable = give.total_of(id)
+        if readable and held == 0 then
+            give.made[id] = nil
+        elseif not give.allow_made then
+            give.refused_made = give.refused_made + 1
+            give_note(string.format("%s was put in your inventory by this script, not found in the game: giving one away crashed the game in the 9.18 test, so it stays with you (the box in the item lab allows it)", id))
+            return false
+        end
+    end
+    -- a give that would take a whole entry out of the inventory crashed the game in every test: refused unless the lab box is ticked
+    local empties, smallest = give.would_empty_entry(id, n)
+    if empties ~= false and not give.last_ok then
+        give.refused_last = give.refused_last + 1
+        if empties == nil then
+            give_note(string.format("%s: I can't read how many you hold, so I can't tell whether this would take your last one out of the inventory; that crashed the game in every test, so nothing was given", id))
+        else
+            give_note(string.format("%s x%d is your last %s (or a whole stack of it): taking a whole entry out of your inventory crashed the game in every test, so it stays with you. Give fewer than %d, or tick the box in the item lab to try the other way", id, n, id, smallest))
+        end
+        return false
+    end
+    -- Nothing leaves your inventory yet: the other game answers first (give_ack) and the item is taken out when it says
     -- "ok". The versions before this took it at once, and an item the other game could not create was simply gone.
+    give.trail(string.format("give: offering %s x%d%s%s", id, n, give.made[id] and " (an item this script made)" or "", empties and " (the whole entry: the box in the item lab is ticked)" or ""))
     net_send(GIVE_MSG, id .. "|" .. n)
     give.out[#give.out + 1] = { kind = "g", id = id, n = n, at = now }
     give.focus = nil -- the highlighted item just changed
@@ -3231,11 +4076,61 @@ local function give_focused(all)
     give_item(f.id, math.min(n, f.count))
 end
 
--- (9.11) The receiver tells the sender what happened ("g|id|n|ok|how" for a gift, "d|..." for a drop), so a gift that could
+-- The receiver tells the sender what happened ("g|id|n|ok|how" for a gift, "d|..." for a drop), so a gift that could
 -- not be delivered is handed back instead of being lost, and the reason is on the sender's screen and in its journal.
 local function give_ack(kind, id, n, ok, how)
     local text = tostring(how or ""):gsub("[|\r\n]", " ")
     net_send(GIVE_ACK_MSG, string.format("%s|%s|%d|%s|%s", kind, id, n, ok and "ok" or "fail", text:sub(1, 90)))
+end
+
+-- Optional: do the creating inside the game's own UpdateBehavior step (a callback on the game's update, not on the render
+-- frame this script normally runs in). If the crash is a thread problem this is the cure; if not, it changes nothing. Work waits in
+-- give.later (8 s at most; then its on_timeout runs, so a sender is never left waiting).
+give.later = {}
+function give.defer(fn, on_timeout)
+    if not (give.make_new and give.in_update) or give.update_step then
+        fn()
+        return true
+    end
+    give.later[#give.later + 1] = { fn = fn, on_timeout = on_timeout, at = os.clock() }
+    return false
+end
+
+function give.run_later()
+    if #give.later == 0 then return end
+    local q = give.later
+    give.later = {}
+    give.update_step = true
+    give.steps_run = (give.steps_run or 0) + #q
+    for _, w in ipairs(q) do
+        local ok, err = pcall(w.fn)
+        if not ok then say("give: error in the update step: " .. tostring(err)) end
+    end
+    give.update_step = false
+end
+
+-- Called every frame from give_update: work that has waited too long for the update step is given up.
+function give.expire_later(now)
+    for i = #give.later, 1, -1 do
+        local w = give.later[i]
+        if now - w.at > 8 then
+            table.remove(give.later, i)
+            say("give: the game's update step did not run within 8 s: giving up on this one")
+            if w.on_timeout then pcall(w.on_timeout) end
+        end
+    end
+end
+
+-- The UpdateBehavior callback is registered once, the first time the switch is ticked (never otherwise: it costs a Lua call per frame).
+function give.register_step()
+    if give.step_registered then return true end
+    if not re.on_pre_application_entry then
+        give.step_error = "this REFramework has no re.on_pre_application_entry"
+        return false
+    end
+    local ok, err = pcall(re.on_pre_application_entry, "UpdateBehavior", function() give.run_later() end)
+    if ok then give.step_registered = true else give.step_error = tostring(err) end
+    return ok
 end
 
 -- One try at putting a gift in my inventory, else on the ground at my feet. Returns done, ok, how.
@@ -3243,11 +4138,19 @@ end
 local function give_try(id, n, final)
     local who = state.remote_name or CFG.DEFAULT_NAME
     items.suppress_until = os.clock() + 2 -- creating the item must not look like a world pickup
-    local ok, why = add_to_inventory(id, n)
+    local ok, why, later = add_to_inventory(id, n)
+    if later then return false end
     if ok then
         local how = (type(why) == "string" and why ~= "") and why or "in the inventory"
         give_note(string.format("%s gave you %s x%d (%s)", who, id, n, how))
         return true, true, how
+    end
+    if not give.make_new then
+        -- safe mode: refused, so it stays with the sender (unless the game only wasn't ready: that is tried again)
+        if not final and tostring(why):find("not found", 1, true) then return false end
+        give.failed = give.failed + 1
+        give_note(string.format("%s offered you %s x%d but I can't take it: %s", who, id, n, tostring(why)))
+        return true, false, tostring(why)
     end
     local okd, px = spawn_world_item(id, n)
     if okd then
@@ -3266,12 +4169,14 @@ net_on(GIVE_MSG, function(payload)
     n = tonumber(n)
     if not id or not n or n < 1 or n > 999 then return end
     give.received = give.received + 1
-    local done, ok, how = give_try(id, n, false)
-    if done then
-        give_ack("g", id, n, ok, how)
-    else
-        give.inbox[#give.inbox + 1] = { id = id, n = n, tries = 1, next_at = os.clock() + 1 }
-    end
+    give.defer(function()
+        local done, ok, how = give_try(id, n, false)
+        if done then
+            give_ack("g", id, n, ok, how)
+        else
+            give.inbox[#give.inbox + 1] = { id = id, n = n, tries = 1, next_at = os.clock() + 1 }
+        end
+    end, function() give_ack("g", id, n, false, "their game's update step did not run") end)
 end)
 
 net_on(DROP_MSG, function(payload)
@@ -3280,15 +4185,17 @@ net_on(DROP_MSG, function(payload)
     if not (id and n and x and y and z) or n < 1 or n > 999 then return end
     give.received = give.received + 1
     local who = state.remote_name or CFG.DEFAULT_NAME
-    local ok, px, py, pz = spawn_world_item(id, n, x, y, z)
-    if ok then
-        give_note(string.format("%s dropped %s x%d: it is on the ground here too", who, id, n))
-        give_ack("d", id, n, true, "on the ground")
-    else
-        give.failed = give.failed + 1
-        give_note(string.format("%s dropped %s x%d but I could not show it (%s)", who, id, n, tostring(px)))
-        give_ack("d", id, n, false, tostring(px))
-    end
+    give.defer(function()
+        local ok, px, py, pz = spawn_world_item(id, n, x, y, z)
+        if ok then
+            give_note(string.format("%s dropped %s x%d: it is on the ground here too", who, id, n))
+            give_ack("d", id, n, true, "on the ground")
+        else
+            give.failed = give.failed + 1
+            give_note(string.format("%s dropped %s x%d but I could not show it (%s)", who, id, n, tostring(px)))
+            give_ack("d", id, n, false, tostring(px))
+        end
+    end, function() give_ack("d", id, n, false, "their game's update step did not run") end)
 end)
 
 net_on(GIVE_ACK_MSG, function(payload)
@@ -3303,12 +4210,29 @@ net_on(GIVE_ACK_MSG, function(payload)
                 -- they have it: now it leaves my inventory (the health module must not take this reduceItem for "you used a healing item")
                 local inv = inventory_object()
                 local okr, resr = false, nil
-                if inv then
-                    give.giving = true
-                    okr, resr = call_str(inv, "reduceItem", id, n, true)
+                local whole = give.would_empty_entry(id, n) -- read again now: the inventory may have changed since the offer
+                local blocked = inv and whole ~= false and not give.last_ok
+                if blocked then
+                    give.refused_last = give.refused_last + 1
+                    give.trail(string.format("give: %s has %s x%d, but taking it out would remove a whole entry from my inventory: not done (see the item lab box)", who, id, n))
+                elseif inv then
+                    -- written BEFORE the call (the file is flushed at once): a crash inside reduceItem leaves this as the last line
+                    give.trail(string.format("give: %s has %s x%d; taking it out of my inventory with reduceItem%s%s", who, id, n, give.made[id] and " (an item this script made)" or "",
+                        whole and " (the whole entry: third argument false, the way crafting calls it)" or ""))
+                    if give.made[id] then give.trail("give: the inventory's copy before: " .. give.copy_text(id)) end
+                    give.crumb(string.format("giving %s x%d: Inventory.reduceItem", id, n))
+                    give.giving, give.last_call_at = true, os.clock()
+                    if whole then give.whole_entry_removals = give.whole_entry_removals + 1 end
+                    okr, resr = call_str(inv, "reduceItem", id, n, not whole)
                     give.giving = false
+                    give.clean()
+                    give.trail(string.format("give: reduceItem %s (it answered %s)", okr and "went through" or "failed", tostring(resr)))
+                    if give.made[id] then give.watch_start("give " .. id, id) end
                 end
-                if okr and resr ~= false then
+                if blocked then
+                    give.failed = give.failed + 1
+                    give_note(string.format("%s has %s x%d, but it is your last one and taking it out crashed the game in the tests: you both have it now", who, id, n))
+                elseif okr and resr ~= false then
                     give.sent = give.sent + 1
                     give_note(string.format("%s has %s x%d (%s): it left your inventory", who, id, n, how))
                 else
@@ -3332,17 +4256,36 @@ end)
 
 -- Every frame: the Give hotkey, and the delayed spawn after a discard.
 local function give_update(now)
-    -- (9.11) gifts waiting for the player object; and my own gifts and drops nobody has answered
+    pcall(give.watch_update, now) -- the trail's "still alive" lines after an item step
+    -- gifts waiting for the player object; and my own gifts and drops nobody has answered
+    give.expire_later(now)
     for i = #give.inbox, 1, -1 do
         local g = give.inbox[i]
-        if now >= g.next_at then
+        if now >= g.next_at and not g.queued then
             g.tries = g.tries + 1
-            local done, ok, how = give_try(g.id, g.n, g.tries >= 5)
-            if done then
-                table.remove(give.inbox, i)
-                give_ack("g", g.id, g.n, ok, how)
+            local function attempt()
+                g.queued = nil
+                local done, ok, how = give_try(g.id, g.n, g.tries >= 5)
+                if done then
+                    for j = #give.inbox, 1, -1 do
+                        if give.inbox[j] == g then table.remove(give.inbox, j) end
+                    end
+                    give_ack("g", g.id, g.n, ok, how)
+                else
+                    g.next_at = os.clock() + 1
+                end
+            end
+            -- in the update-step mode the retry runs there as well; g.queued keeps one retry from being queued twice
+            if not (give.make_new and give.in_update) or give.update_step then
+                attempt()
             else
-                g.next_at = now + 1
+                g.queued = true
+                give.defer(attempt, function()
+                    for j = #give.inbox, 1, -1 do
+                        if give.inbox[j] == g then table.remove(give.inbox, j) end
+                    end
+                    give_ack("g", g.id, g.n, false, "their game's update step did not run")
+                end)
             end
         end
     end
@@ -3368,24 +4311,26 @@ local function give_update(now)
     local d = give.pending_drop
     if d and now - d.at >= 0.2 then
         give.pending_drop = nil
-        local ok, px, py, pz = spawn_world_item(d.id, d.n)
-        if ok then
-            give.dropped = give.dropped + 1
-            if px == nil and state.local_pos then
-                local lp = state.local_pos
-                px, py, pz = lp.x, lp.y - CFG.EYE_HEIGHT, lp.z
+        give.defer(function()
+            local ok, px, py, pz = spawn_world_item(d.id, d.n)
+            if ok then
+                give.dropped = give.dropped + 1
+                if px == nil and state.local_pos then
+                    local lp = state.local_pos
+                    px, py, pz = lp.x, lp.y - CFG.EYE_HEIGHT, lp.z
+                end
+                if px ~= nil and peer_present(os.clock()) then
+                    net_send(DROP_MSG, string.format("%s|%d|%.2f|%.2f|%.2f", d.id, d.n, px, py, pz))
+                    give.out[#give.out + 1] = { kind = "d", id = d.id, n = d.n, at = os.clock() }
+                end
+                give.last = string.format("you dropped %s x%d on the ground%s", d.id, d.n,
+                    peer_present(os.clock()) and " (the other player sees it too)" or "")
+                say("give: " .. give.last)
+            else
+                give.failed = give.failed + 1
+                give_note(string.format("could not drop %s x%d on the ground: %s", d.id, d.n, tostring(px)))
             end
-            if px ~= nil and peer_present(now) then
-                net_send(DROP_MSG, string.format("%s|%d|%.2f|%.2f|%.2f", d.id, d.n, px, py, pz))
-                give.out[#give.out + 1] = { kind = "d", id = d.id, n = d.n, at = now }
-            end
-            give.last = string.format("you dropped %s x%d on the ground%s", d.id, d.n,
-                peer_present(now) and " (the other player sees it too)" or "")
-            say("give: " .. give.last)
-        else
-            give.failed = give.failed + 1
-            give_note(string.format("could not drop %s x%d on the ground: %s", d.id, d.n, tostring(px)))
-        end
+        end)
     end
 end
 
@@ -3442,7 +4387,7 @@ local function find_enemy_roots()
     local out = {}
     local scene = scene_object()
     if not scene then return out end
-    -- (9.9) the records are rebuilt on every scan, so what was learned about an enemy's health is carried over by the
+    -- the records are rebuilt on every scan, so what was learned about an enemy's health is carried over by the
     -- object's address; before this, the whole health search ran again for every enemy every second
     local old = {}
     for _, o in ipairs(enemy.roots or {}) do
@@ -3525,7 +4470,7 @@ end
 find_health = function(e)
     e.hp_checked = true
     e.hp_tries = (e.hp_tries or 0) + 1
-    e.hp_retry_at = os.clock() + 3 -- (9.9) an enemy that has not started yet has no HealthInfo: look again a few times
+    e.hp_retry_at = os.clock() + 3 -- an enemy that has not started yet has no HealthInfo: look again a few times
     pcall(function()
         local comps = e.go:call("get_Components")
         local best_sc
@@ -3539,7 +4484,7 @@ find_health = function(e)
             end
             if full:find("DamageController$") then
                 dmg_comp = dmg_comp or c
-                e.dmg_comp = e.dmg_comp or c -- (9.10) the joiner's hits are applied through it
+                e.dmg_comp = e.dmg_comp or c -- the joiner's hits are applied through it
             end
             if full:find("DamageController$") or full:find("^app%.Em%d+Status$") then
                 for _, hv in ipairs(fields_of_type(c, "app.HealthInfo")) do
@@ -3727,7 +4672,7 @@ local function enemy_read(now)
                 e.qx, e.qy, e.qz, e.qw = v[5] or 0, v[6] or 0, v[7] or 0, v[8] or 1
                 local fl = math.floor(v[10] or 1)
                 e.hp, e.alive = v[9] or -1, fl % 2 == 1
-                -- (9.10) a snapshot sent just before the host applied our hit still carries the old health: for a moment the host's answer wins
+                -- a snapshot sent just before the host applied our hit still carries the old health: for a moment the host's answer wins
                 if e.ack_hp and now < (e.ack_until or 0) and e.hp > e.ack_hp then e.hp = e.ack_hp end
                 e.inactive = fl >= 2 and flags_reason(fl) or nil -- parked / placeholder objects (see inactive_flags)
                 e.bank, e.motion, e.frame = v[11] or 0, v[12] or 0, v[13] or 0
@@ -3866,7 +4811,7 @@ local function draw_enemies(now)
 end
 
 ----------------------------------------------------------------------------------------------
--- Damage dealt by the joiner (9.10). The joiner sees the host's enemies as red boxes, and its bullets pass through them.
+-- Damage dealt by the joiner . The joiner sees the host's enemies as red boxes, and its bullets pass through them.
 -- JOINER: when a shot is fired (see "shot signal" below) a ray from the camera is tested against the red boxes (and against
 --   walls, with the same physics test the stand-in uses); the nearest box hit sends message kind 9, "x|Em2000|30|x|y|z".
 -- HOST: the message is applied to the host's real enemy through the game's own damage call, so the enemy flinches or dies as
@@ -3891,10 +4836,11 @@ enemy.hit = {
     BOX = { hx = 0.32, hy = 0.95, hz = 0.22, pad = 0.12 }, -- the red box that is drawn, plus a little slack
     TYPES = { "app.WeaponGun", "app.PlayerGun" },
     learn = { on = false, status = "not learned yet", t0 = 0, shots = 0, events = {}, prev = {}, seen = {}, candidates = {} },
-    -- (9.12) the gun's own shot methods (app.PlayerGun.shoot / shootStart: they run once per shot, not every frame). The 0.7 file
+    -- the gun's own shot methods (app.PlayerGun.shoot / shootStart: they run once per shot, not every frame). The 0.7 file
     -- showed no whole-number FIELD of the weapon components goes down when you fire (the loaded bullets are a property of
     -- PlayerGun), so the shot is taken from the game calling these.
-    hook = { on = true, tried = false, installed = {}, missing = {}, counts = {}, pending = nil, error = nil, used = 0 },
+    hook = { on = true, tried = false, installed = {}, missing = {}, counts = {}, pending = nil, error = nil, used = 0,
+        merged = 0, open_name = nil, open_t = 0, open = false, gap_min = nil, gap_max = nil, first_call = nil },
 }
 
 do
@@ -4147,6 +5093,27 @@ function HIT.weapons(now)
     return list
 end
 
+-- One shot of the handgun runs BOTH calls (shootStart, then shoot a moment later, in another frame), and each one was a shot:
+-- two hits per bullet (your note 2). The first call of a shot opens it; the OTHER method within 0.45 s is the same shot and is only
+-- written down (how far apart, which came first), so the next file shows the real order and gap. The same method twice is two shots.
+function HIT.shot_call(name)
+    local K = HIT.hook
+    K.counts[name] = (K.counts[name] or 0) + 1
+    if not K.on then return end
+    local t = os.clock()
+    if K.open and K.open_name ~= name and t - K.open_t < 0.45 then
+        K.open = false
+        K.merged = K.merged + 1
+        local gap = t - K.open_t
+        K.gap_min = K.gap_min and math.min(K.gap_min, gap) or gap
+        K.gap_max = K.gap_max and math.max(K.gap_max, gap) or gap
+        K.first_call = K.first_call or K.open_name
+        return
+    end
+    K.pending = t
+    K.open, K.open_name, K.open_t = true, name, t
+end
+
 function HIT.install_hook()
     local K = HIT.hook
     if K.tried or not K.on then return end
@@ -4162,8 +5129,7 @@ function HIT.install_hook()
         if okm and m then
             tracer.crumb("hooking", "app.PlayerGun." .. name)
             local ok = pcall(sdk.hook, m, function(args)
-                K.counts[name] = (K.counts[name] or 0) + 1
-                if K.on then K.pending = os.clock() end
+                HIT.shot_call(name)
                 return CALL_ORIGINAL
             end, function(retval) return retval end)
             tracer.crumb("clean", "hook installed: app.PlayerGun." .. name)
@@ -4256,7 +5222,7 @@ function HIT.update(now)
         end
         return
     end
-    -- (9.12) a shot the game itself reported (the hook only notes the time; the ray test runs here, in the frame)
+    -- a shot the game itself reported (the hook only notes the time; the ray test runs here, in the frame)
     if HIT.on and HIT.hook.on and not HIT.hook.tried and receiving_enemies() then HIT.install_hook() end
     local pend = HIT.hook.pending
     if pend then
@@ -4316,7 +5282,9 @@ function HIT.report()
         last = HIT.last, host_last = HIT.host_last, host_history = HIT.history,
         signal = HIT.signal, signal_shots = HIT.signal_hits,
         gun_hook = { on = HIT.hook.on, installed = HIT.hook.installed, not_found = HIT.hook.missing, calls = HIT.hook.counts,
-            shots_used = HIT.hook.used, error = HIT.hook.error },
+            shots_used = HIT.hook.used, error = HIT.hook.error,
+            second_call_of_a_shot_merged = HIT.hook.merged, first_call_of_a_shot = HIT.hook.first_call,
+            gap_between_the_two_calls_s = HIT.hook.gap_min and { min = HIT.hook.gap_min, max = HIT.hook.gap_max } or nil },
         learner = { status = L.status, candidates = L.candidates },
         weapon_components = kinds, first_weapon_number_fields = nums }
 end
@@ -4488,7 +5456,7 @@ end
 -- Player health and the "downed" experiment (the module that fills this table is further down, after the death code).
 local pstat = {
     revive_radius = 3.0,    -- metres: how close the helper must be (to use a healing item on you / revive with F8). 9.14: 3 m (was 4): the Baker house halls are narrow
-    revive_hold = 3.0,      -- seconds F8 has to be waited out inside that radius before the item is used (9.14)
+    revive_hold = 3.0,      -- seconds F8 has to be waited out inside that radius before the item is used 
     reviving = nil,         -- { since } while an F8 revive is counting down
     revive_stats = { started = 0, done = 0, cancelled = 0 },
     revive_pct = 30,        -- health you get back when revived, in percent of your maximum
@@ -4517,9 +5485,10 @@ local DEATH_MODES = {
     "Independent (nothing happens)",
     "Shared fate: both players die",
     "Dead player waits for the other (not built yet)",
-    "Downed and revive (EXPERIMENTAL: needs the other player)",
+    "Downed and revive (needs the other player)",
 }
-local death = { mode = 1, suppress_until = 0, last = "No deaths yet.", sent = 0, received = 0 }
+-- the default is "Downed and revive" (4). It only acts while the other player is connected; alone, nothing changes.
+local death = { mode = 4, suppress_until = 0, last = "No deaths yet.", sent = 0, received = 0 }
 
 local function apply_remote_death(who)
     death.received = death.received + 1
@@ -4588,10 +5557,206 @@ end
 RE7.on_gamemode = function(value)
     say("game mode set to " .. tostring(value))
     if RE7.death_value == nil or value ~= RE7.death_value then return end
+    RE7.exec.record("GameMode." .. tostring(RE7.death_name), "over")
+    if RE7.exec.recently_blocked() then return end
     RE7.on_death_signal("game mode " .. tostring(RE7.death_name))
 end
 
--- (9.11) Other ways a death can start. Your notes say the finishers (Jack's grab, Mia in the attic) never reached the game-over
+----------------------------------------------------------------------------------------------
+-- EXECUTION TEST. You asked whether an enemy execution (Jack's grab, Mia in the attic ...) gives a downed screen instead
+-- of death, because the finishers "must have different game over calls". In Downed mode a hit that would kill you is held at 1
+-- health, but a finisher kills by script, not by damage, so the hold cannot stop it, and no debug file has ever shown which
+-- calls a finisher makes (every file so far is from a session with no death at all). Two switches, both off at every start, not
+-- saved:
+--   1. LOG: hooks a few methods of the grab classes (the census names app.PlayerGrappleEm3000, app.Em3000Grapple, Em3100Grapple,
+--      Em4000Grapple, and app.GameOverScreen; at most 24 methods, never getters, 40 recorded calls per method) and writes every
+--      call, every game-over call (the three the script already watches) and the player's health at that moment into the
+--      debug file (health.execution_test). The verdict line says whether the first game over followed a grab and whether health
+--      was still above 0 (then holding the health cannot work for that kind of death).
+--   2. BLOCK (needs Downed mode, the other player connected and not down): the game-over calls setGameOverFlag(true) / doDie are
+--      skipped, health is set to 1 and you go "down" like after a hit. At most 3 per minute, so a game that keeps asking still
+--      ends. I do not know what the game does after a skipped game over (the grab animation may carry on and leave you stuck);
+--      that is what the test is for.
+----------------------------------------------------------------------------------------------
+RE7.exec = { on = false, block = false, installed = false, hooks = {}, events = {}, counts = {}, fires = {}, overs = 0,
+    first_over = nil, before_over = nil, blocked = 0, blocked_at = {}, not_blocked = 0, note = "off" }
+RE7.exec.PRIORITY = {
+    { "die", "dead", "death", "kill", "finish", "execut", "gameover" },
+    { "grapple", "grab", "catch", "caught", "hold", "release", "escape", "cancel", "struggle", "shake", "begin", "start", "end" },
+}
+RE7.exec.TYPES = { "app.PlayerGrappleEm2000", "app.PlayerGrappleEm3000", "app.Em2000Grapple", "app.Em3000Grapple",
+    "app.Em3100Grapple", "app.Em4000Grapple", "app.GameOverScreen" }
+RE7.exec.BLOCKABLE = { dodie = true, setgameoverflag = true, requestgameover = true, startgameover = true, dogameover = true }
+RE7.exec.MAX_HOOKS, RE7.exec.MAX_PER_TYPE, RE7.exec.MAX_FIRES, RE7.exec.RING = 24, 8, 40, 60
+
+function RE7.exec.record(what, kind)
+    local X = RE7.exec
+    if not (X.on or X.block) then return end
+    local now = os.clock()
+    local prev = X.events[#X.events]
+    local ev = { t = math.floor(now * 100) / 100, what = what, kind = kind or "call", hp = pstat.hp, max = pstat.max, down = pstat.downed or nil,
+        gap = prev and (math.floor((now - prev.t) * 100) / 100) or nil }
+    X.events[#X.events + 1] = ev
+    if #X.events > X.RING then table.remove(X.events, 1) end
+    X.counts[what] = (X.counts[what] or 0) + 1
+    if kind == "over" then
+        X.overs = X.overs + 1
+        if not X.first_over then
+            X.first_over = ev
+            X.before_over = {}
+            for i = math.max(1, #X.events - 20), #X.events - 1 do X.before_over[#X.before_over + 1] = X.events[i] end -- (the 20 calls before it)
+        end
+    end
+end
+
+function RE7.exec.fire(what)
+    local X = RE7.exec
+    if not X.on then return end
+    X.fires[what] = (X.fires[what] or 0) + 1
+    if X.fires[what] > X.MAX_FIRES then return end
+    X.record(what, "call")
+end
+
+function RE7.exec.hookable(name)
+    local low = name:lower()
+    if name == ".ctor" or name == ".cctor" or low:find("update", 1, true) or low == "doawake" or low == "doondestroy"
+        or low == "finalize" or low == "dispose" then return false end
+    if low:sub(1, 4) == "get_" or low:sub(1, 2) == "is" or low:sub(1, 3) == "has" or low:sub(1, 3) == "can" then return false end
+    return true
+end
+
+-- Hooks the methods (once, when the first switch is ticked). A crumb names the method being hooked, so a crash says which.
+function RE7.exec.install()
+    local X = RE7.exec
+    if X.installed then return end
+    X.installed = true
+    local types, seen = {}, {}
+    local function add(tn) if not seen[tn] then seen[tn] = true types[#types + 1] = tn end end
+    pcall(function()
+        local go = player_object()
+        for _, c in ipairs(go and go:call("get_Components"):get_elements() or {}) do
+            local full = c:get_type_definition():get_full_name()
+            if full:find("Grapple", 1, true) then add(full) end
+        end
+    end)
+    for _, tn in ipairs(X.TYPES) do add(tn) end
+    for _, tn in ipairs(types) do
+        local td = sdk.find_type_definition(tn)
+        if not td then
+            say("execution test: " .. tn .. " does not exist in this game (skipped)")
+        else
+            local picked, taken = {}, {}
+            local methods = td:get_methods() or {}
+            if tn:find("GameOver", 1, true) then -- the game-over screen is small: every method of it counts, whatever it is called
+                for _, m in ipairs(methods) do
+                    local name = m:get_name()
+                    if #picked < X.MAX_PER_TYPE and not taken[name] and X.hookable(name) then taken[name] = true picked[#picked + 1] = name end
+                end
+            end
+            for _, group in ipairs(X.PRIORITY) do
+                for _, m in ipairs(methods) do
+                    local name = m:get_name()
+                    local low = name:lower()
+                    if #picked < X.MAX_PER_TYPE and not taken[name] and X.hookable(name) then
+                        for _, w in ipairs(group) do
+                            if low:find(w, 1, true) then taken[name] = true picked[#picked + 1] = name break end
+                        end
+                    end
+                end
+            end
+            for _, name in ipairs(picked) do
+                if #X.hooks >= X.MAX_HOOKS then break end
+                pcall(tracer.crumb, "hooking", "execution test: " .. tn .. "." .. name)
+                local what = tn .. "." .. name
+                if hook_method(tn, name, function() X.fire(what) end) then X.hooks[#X.hooks + 1] = what end
+            end
+        end
+    end
+    pcall(tracer.crumb, "clean", "execution test hooks installed")
+    say(string.format("execution test: %d methods are watched: %s", #X.hooks, #X.hooks > 0 and table.concat(X.hooks, ", ") or "none"))
+end
+
+function RE7.exec.set_on(v)
+    local X = RE7.exec
+    X.on = v
+    X.note = v and "logging" or "off"
+    if v then X.install() end
+    say("execution test: logging " .. (v and "ON (experimental)" or "off"))
+end
+
+function RE7.exec.set_block(v)
+    local X = RE7.exec
+    X.block = v
+    say("execution test: blocking a game over and going down instead " .. (v and "ON (experimental)" or "off"))
+end
+
+-- A game-over call is about to run: skip it (and hold you at 1, down) instead? Only for the few calls that end the game.
+function RE7.exec.block_wanted(tn, name)
+    local X = RE7.exec
+    if not X.block or not X.BLOCKABLE[name:lower()] then return false end
+    local now = os.clock()
+    if not (pstat.can_catch and pstat.can_catch(now)) then
+        X.note = "a game over was NOT blocked: Downed mode needs the other player connected and not down"
+        return false
+    end
+    local recent = {}
+    for _, t in ipairs(X.blocked_at) do if now - t < 60 then recent[#recent + 1] = t end end
+    X.blocked_at = recent
+    if #recent >= 3 then -- a game that keeps asking must still be able to end
+        X.not_blocked = X.not_blocked + 1
+        X.note = "a game over was NOT blocked: three were blocked in the last minute already"
+        X.record(tn .. "." .. name .. " (let through: 3 blocked in the last minute)", "info")
+        return false
+    end
+    X.blocked_at[#X.blocked_at + 1] = now
+    X.blocked = X.blocked + 1
+    X.note = "blocked " .. tn .. "." .. name
+    X.record(tn .. "." .. name .. " BLOCKED", "blocked")
+    pcall(pstat.exec_catch, tn .. "." .. name)
+    say("execution test: " .. X.note .. "; held at 1 health, down")
+    return true
+end
+
+-- A game over was blocked in the last 5 s: the other calls that belong to it (the pause flag, the GameMode switch) are not a death
+-- of their own. They are still recorded, and still run (only setGameOverFlag(true) / doDie are ever skipped).
+function RE7.exec.recently_blocked()
+    local X = RE7.exec
+    local last = X.blocked_at[#X.blocked_at]
+    return X.block and last ~= nil and os.clock() - last < 5
+end
+
+function RE7.exec.verdict()
+    local X = RE7.exec
+    if X.overs == 0 then return X.on and "no game over seen yet" or "not running" end
+    local o, g = X.first_over, nil
+    for i = #(X.before_over or {}), 1, -1 do
+        local e = X.before_over[i]
+        if e.kind == "call" and o.t - e.t <= 20 then g = e break end
+    end
+    local hp = o.hp and string.format("%.0f/%.0f", o.hp, o.max or 0) or "unknown"
+    local text
+    if g then
+        text = string.format("the first game over (%s) came %.1f s after %s, with health %s%s", o.what, o.t - g.t, g.what, hp,
+            (o.hp and o.hp > 1) and " (not 0: holding health at 1 cannot stop this kind of death)" or "")
+    else
+        text = string.format("the first game over (%s) came with no grab or finisher call before it, health %s: an ordinary death", o.what, hp)
+    end
+    if X.blocked > 0 then text = text .. string.format("; %d game over(s) were blocked", X.blocked) end
+    return text
+end
+
+function RE7.exec.report()
+    local X = RE7.exec
+    local counts = {}
+    for k, v in pairs(X.counts) do counts[#counts + 1] = { call = k, n = v } end
+    table.sort(counts, function(a, b) if a.n ~= b.n then return a.n > b.n end return a.call < b.call end)
+    while #counts > 20 do table.remove(counts) end
+    return { logging = X.on, block_on = X.block, hooked = X.hooks, calls_seen = counts, game_overs_seen = X.overs,
+        first_game_over = X.first_over, the_20_calls_before_it = X.before_over, blocked = X.blocked, let_through = X.not_blocked,
+        verdict = X.verdict(), note = X.note, latest = X.events }
+end
+
+-- Other ways a death can start. Your notes say the finishers (Jack's grab, Mia in the attic) never reached the game-over
 -- mode switch above. So any method of the game manager or of the player's damage controller that is named like a game over or
 -- a death is watched too (never getters; at most 8 in all; one that fires more than 50 times is ignored as too busy), and
 -- every firing goes into the journal, so the next file shows which call a finisher really makes.
@@ -4621,6 +5786,9 @@ function RE7.install_death_extras()
                                 local okv, v = pcall(function() return sdk.to_int64(args[3]) end)
                                 if okv and type(v) == "number" and v % 256 == 0 then return end
                             end
+                            RE7.exec.record(tn .. "." .. name, "over") -- the execution test writes down every game-over call
+                            if RE7.exec.block_wanted(tn, name) then return "skip" end
+                            if RE7.exec.recently_blocked() then return end -- the rest of a game over that was just blocked is not a death
                             RE7.on_death_signal(name)
                         end) then
                             RE7.death_hooks[#RE7.death_hooks + 1] = tn .. "." .. name
@@ -4654,7 +5822,7 @@ end
 do
 local H = {}
 H.PH_MSG = 7
-H.BOT_MSG = 11 -- (9.13) a command only the loopback bot understands ("down" / "up"); a real player's script has no handler for it
+H.BOT_MSG = 11 -- a command only the loopback bot understands ("down" / "up"); a real player's script has no handler for it
 H.CALL_ORIGINAL = sdk.PreHookResult and sdk.PreHookResult.CALL_ORIGINAL
 
 H.PLAYER_WORDS = { "damage", "guard", "block", "heal", "recover", "health", "hp", "die", "dead", "death", "down", "dying",
@@ -4675,7 +5843,7 @@ H.EVENT_TYPES = { "app.GameEventManager", "app.GameEventController", "app.GameEv
     "app.GameFlowFsmManager", "app.GameFlowActiveControl", "app.ChapterLoadTempManager", "app.ChapterJumpData",
     "app.PlayerEventActionManager", "app.InteractEventAction", "app.DoorEventAction", "app.FadeControl",
     "app.NowLoadingScreen", "app.TriggerInAction" }
--- Opt-in extras (9.6). The 9.5 button 9 hooked 77 DoorPush, 15 InteractObjectBase, 13 GameManager and 75 SaveDataManager
+-- Opt-in extras . The 9.5 button 9 hooked 77 DoorPush, 15 InteractObjectBase, 13 GameManager and 75 SaveDataManager
 -- methods at once and the game crashed a few seconds later while a door was closing; the log cannot say which hook did it.
 -- So these are hand-picked, off by default and ticked one at a time. "=" in front of a name means exactly that method.
 -- The player's doors are app.DoorPush (the 8 DoorEventActions in the scene are monsters' doors and never fired); the
@@ -4866,6 +6034,15 @@ function H.clamp_active(now)
     if r and r.downed and now - r.at < 10 then return false end
     return true
 end
+pstat.can_catch = H.clamp_active -- the execution test asks the same question before it blocks a game over
+
+-- A finisher's game over was skipped by the execution test: hold the health at 1 and go down, as after a hit.
+function pstat.exec_catch(why)
+    H.write_health(1)
+    pstat.clamped = pstat.clamped + 1
+    if not pstat.downed then pstat.pending_down = true end
+    H.note("a game over was blocked (" .. tostring(why) .. "): you are held at 1 health and go down instead")
+end
 
 -- The game reloaded or ended without our help: forget that we were down (nothing to write, the new player is whole).
 function H.reset_down(why, silent)
@@ -4940,7 +6117,7 @@ function pstat.revive_ready(now)
     return true
 end
 
--- F8 / the panel button: start reviving the downed player next to you. (9.15) It uses NO item: the time is the price. You have to stay
+-- F8 / the panel button: start reviving the downed player next to you. It uses NO item: the time is the price. You have to stay
 -- within the revive distance for revive_hold seconds; walking off, going down yourself, them getting up or Cancel stops it. (9.14 took a
 -- Herb / Chem Fluid / Remedy out of the inventory at the end and the game crashed right there, so the inventory is not touched at all
 -- now.) Using a Herb from the inventory menu yourself (the other way to revive) is still immediate, and costs the Herb.
@@ -5026,7 +6203,7 @@ net_on(H.PH_MSG, function(payload)
     elseif kind == "heal" or kind == "use" or kind == "revive" then
         local lp = state.local_pos
         local dist = lp and math.sqrt((tonumber(x) - lp.x) ^ 2 + (tonumber(y) - lp.y) ^ 2 + (tonumber(z) - lp.z) ^ 2) or nil
-        local helped = (kind == "revive" and arg == "") -- (9.15) F8: they stayed next to you, no item
+        local helped = (kind == "revive" and arg == "") -- F8: they stayed next to you, no item
         local what = helped and "helped you up" or string.format("used a %s", arg ~= "" and arg or "healing item")
         if not pstat.downed then
             if not helped then chat_add("Health", string.format("%s used a %s.", who, arg ~= "" and arg or "healing item")) end
@@ -5166,14 +6343,28 @@ dbg.extra = function()
             out.labels_written = CFG.lm.written
             return out
         end)(),
+        story = CFG.story.report(), -- 
+        execution_test = RE7.exec.report(), -- 
         items = { create_worked_with = give.create_how, bumped_stacks = give.bumped or 0, failed_creations = give.create_log,
             sent_ok = give.sent, received = give.received, dropped = give.dropped, failed = give.failed,
             item_manager = { in_use = mgr.item_manager_how, knows_items = mgr.item_manager_ok, copies = mgr.item_manager_list },
-            -- (9.14) what the game answered to the last addItem tries, and what the last dropped object looked like
+            -- what the game answered to the last addItem tries, and what the last dropped object looked like
             last_add = give.add_last, add_worked_with = give.add_how, last_drop = give.last_drop,
+            -- the switch for creating items (off at the start) and what it did
+            -- the black box: every step of the last item attempts, and the last session's, which survives a crash
+            item_trail = give.trail_list, previous_item_trail = give.previous_trail, earlier_item_trails = give.history, list_made_with = give.list_how,
+            lab = { id = give.lab.id, object_waiting = give.lab.item ~= nil and not give.lab.added },
+            whole_entry = { giving_allowed = give.last_ok, refused = give.refused_last, removed_with_false = give.whole_entry_removals,
+                menu_reopen_hooked = give.reopen_hooked == true, menu_reopen_requests_seen = give.reopen_seen, menu_reopen_within_5s_of_my_call = give.reopen_after_ours },
+            made_by_script = (function() local o = {} for k in pairs(give.made) do o[#o + 1] = k end table.sort(o) return { kinds = o, giving_allowed = give.allow_made, refused = give.refused_made } end)(),
+            creation = { on = give.make_new, in_update_step = give.in_update, refused_in_safe_mode = give.refused,
+                update_step_registered = give.step_registered or false, update_step_error = give.step_error,
+                update_step_work_run = give.steps_run or 0, waiting_for_update_step = #give.later },
             add_item_result_names = (function() local o = {} for v, nm in pairs(give.enum_names("app.Inventory.AddItemResult")) do o[tostring(v)] = nm end return o end)(),
+            -- what the item states are called (the 9.17 file: a new object is 6 LOST, the game's own entries are 2)
+            item_state_names = (function() local o = {} for v, nm in pairs(give.enum_names("app.Item.ITEMSTATE")) do o[tostring(v)] = nm end return o end)(),
             discard = { menu_discard_hooked = give.discard_hooked, menu_discard_calls = give.discard_calls or 0,
-                reduceNum_calls = give.reduce_seen or 0, focus_hook_calls = give.hover_seen or 0, switched_on = give.drop_on_discard } },
+                reduceNum_calls = give.reduce_seen or 0, reduceNum_ignored = give.reduce_ignored or 0, focus_hook_calls = give.hover_seen or 0, switched_on = give.drop_on_discard } },
         weapon_lock = { on = H.LOCK.on, status = H.LOCK.status, writes = H.LOCK.writes, rewritten_by_game = H.LOCK.rewritten,
             failed = H.LOCK.fails, restored = H.LOCK.restored,
             -- 9.9: per place in the frame: how often the lock ran there, and how often it found the gate open again
@@ -5197,6 +6388,7 @@ dbg.extra = function()
         occlusion = state.occ and state.occ.report and state.occ.report() or nil,
         enemy_hits = enemy.hit and enemy.hit.report and enemy.hit.report() or nil,
         menus = CFG.menu and CFG.menu.report and CFG.menu.report() or nil,
+        model_probe = CFG.mprobe and CFG.mprobe.result or nil, -- 
         other_player = pstat.remote and { hp = pstat.remote.hp, max = pstat.remote.max, downed = pstat.remote.downed } or nil,
         last = pstat.last,
     }
@@ -5403,7 +6595,7 @@ function pstat.panel()
     else
         imgui.text(who .. ": no health received yet")
     end
-    if state.remote_name == "Loopback Bot" then -- (9.13) the pretend player can be told to go down, so a revive can be tried alone
+    if state.remote_name == "Loopback Bot" then -- the pretend player can be told to go down, so a revive can be tried alone
         imgui.text(string.format("The loopback bot can go down: walk within %.0f m of it and press F8, then stay put for %.0f s (no item needed), or use a heal from the inventory next to it.",
             pstat.revive_radius, pstat.revive_hold))
         if imgui.button("Loopback bot: make it go down") then
@@ -5456,7 +6648,7 @@ function pstat.panel()
     local ok3, ch3, val3 = pcall(imgui.slider_float, "Health after being revived (% of maximum)", pstat.revive_pct, 5, 100)
     if ok3 and ch3 and type(val3) == "number" then pstat.revive_pct = math.max(5, math.min(100, math.floor(val3 + 0.5))) end
     do
-        local okc, cc, vc = pcall(imgui.checkbox, "A downed player can't aim or shoot until revived (EXPERIMENTAL)", H.LOCK.on)
+        local okc, cc, vc = pcall(imgui.checkbox, "A downed player can't aim or shoot until revived", H.LOCK.on)
         if okc and cc and type(vc) == "boolean" then H.LOCK.on = vc end
         imgui.text("    weapon lock: " .. H.LOCK.status)
         local okk, ck, vk = pcall(imgui.checkbox, "    also close it right after the sequence manager's own update (hooks it the first time you go down)", H.LOCK.hooks.on)
@@ -5471,7 +6663,7 @@ function pstat.panel()
     end
     imgui.text("Revive: the other player uses a Herb / Chem Fluid / Remedy within that distance (at once, costs the item), or stays next to you with F8 (takes the time below, costs nothing).")
     imgui.text("You stay where you fell: the game never sees you die, so it does not reload a checkpoint.")
-    imgui.text("EXPERIMENTAL: if the game still ends when you are hit to 0, send me the debug file (button 8).")
+    imgui.text("If the game still ends when you are hit to 0, send me the debug file (button 8).")
 end
 
 ----------------------------------------------------------------------------------------------
@@ -5639,7 +6831,7 @@ function H.pose_read(now)
     end
     P.guard, P.guard_src = guard, src
     P.heal_raw = P.hands_id ~= nil and P.HEAL_HANDS[P.hands_id] == true
-    -- (9.11) hands 16/17 also play while you look at the inventory (your 9.9 notes: "healing animation shows when checking
+    -- hands 16/17 also play while you look at the inventory (your 9.9 notes: "healing animation shows when checking
     -- inventory"). Not a heal while a menu is open, nor for a pose that was already running behind one for half a second.
     if P.heal_raw then
         if CFG.menu and CFG.menu.shown_now == true then
@@ -5660,7 +6852,7 @@ function H.pose_read(now)
     if P.heal_raw then P.heal_reads = P.heal_reads + 1 end
 
     H.pose_eye(go, now)
-    -- (9.11) the game has its own flag: app.PlayerMovement.IsCrouch. In the 9.9 file it was true for 12 % of the readings and
+    -- the game has its own flag: app.PlayerMovement.IsCrouch. In the 9.9 file it was true for 12 % of the readings and
     -- CrouchRate was 1 in the same readings, while the camera-height guess said "crouched" for half of them.
     local isc = H.pose_field(P.comp_by_name["app.PlayerMovement"], "IsCrouch")
     if type(isc) == "boolean" then
@@ -5863,7 +7055,7 @@ function H.lock_hook(tn, td, name, pre, post)
     if not okm or not m then return false end
     tracer.crumb("hooking", tn .. "." .. name)
     local okh = pcall(sdk.hook, m, pre or function() return H.CALL_ORIGINAL end, post or function(retval) return retval end)
-    tracer.crumb("clean", "hook installed: " .. tn .. "." .. name) -- (9.14) otherwise this stayed as "the suspect" for ever: the 0.9 file's first line blamed a hook that had long been installed)
+    tracer.crumb("clean", "hook installed: " .. tn .. "." .. name) -- otherwise this stayed as "the suspect" for ever: the 0.9 file's first line blamed a hook that had long been installed)
     return okh
 end
 
@@ -5965,6 +7157,7 @@ function H.lock_install_hooks()
         end
         say("weapon lock: movement gate: " .. (#M.installed > 0 and table.concat(M.installed, ", ") or "nothing hooked") .. " (you are also put back where you fell if you move)")
     end
+    pcall(tracer.crumb, "clean", "weapon lock hooks installed") -- the last word of the install, whatever came before
 end
 
 function H.lock_leaks()
@@ -6047,7 +7240,7 @@ pstat.lock = H.LOCK -- (the settings read and write the switches through this)
 pcall(H.lock_register_phases)
 
 ----------------------------------------------------------------------------------------------
--- Button 11 (9.7): "Record my player". It NEVER hooks anything. Ten times a second it reads the fields of the player's
+-- Button 11 : "Record my player". It NEVER hooks anything. Ten times a second it reads the fields of the player's
 -- app.Player* components (and one level of the objects they hold) plus a few values of the animation layers, and writes
 -- down every change. Steady noise (anything that changes while you stand still) is muted. The guided script has you
 -- block twice and use a healing item; the report then lists the fields that flipped on both blocks and came back after
@@ -6695,7 +7888,7 @@ end
 end -- do
 
 ----------------------------------------------------------------------------------------------
--- Version check (release 0.7). Each script tells the other which release it is (message kind 8,
+-- Version check (release 0.8). Each script tells the other which release it is (message kind 8,
 -- "v|release|build|exe|protocol") when the other player appears and every 20 s after. A different
 -- release is flagged in the panel and the chat. A script older than this feature sends nothing, so
 -- "no version after 8 s" means an older release. Also checks that re7mp.exe and this script agree.
@@ -7020,7 +8213,7 @@ end
 
 local function tag_of(e)
     if type(e.tag) == "string" and e.tag ~= "" then return e.tag end
-    -- (9.12) a save you made and sent says so: his name is never written on a save that is not his
+    -- a save you made and sent says so: his name is never written on a save that is not his
     if e.role == "sent" then return "[CO-OP: sent to " .. tostring(e.partner or e.from or "Player") .. "]" end
     return "[CO-OP: " .. tostring(e.partner or e.from or "Player") .. "]"
 end
@@ -7365,8 +8558,8 @@ local settings_saved_key, settings_last_check = nil, 0
 
 local function settings_snapshot()
     return {
-        death_mode = death.mode, item_sync = items.enabled, auto_hide = state.auto_hide,
-        show_body = state.show_body, show_skeleton = state.show_skeleton, freeze_instead = lobby.freeze_instead,
+        death_mode_choice = death.mode, item_sync = items.enabled,
+        show_skeleton = state.show_skeleton, freeze_instead = lobby.freeze_instead,
         auto_join = lobby.auto_join, auto_start = lobby.auto_start,
         enemy_mode = enemy.mode, enemy_drive_ai = enemy.drive_ai,
         drop_on_discard = give.drop_on_discard, give_hint = give.hint,
@@ -7375,7 +8568,7 @@ local function settings_snapshot()
         revive_hold = math.floor(pstat.revive_hold * 2 + 0.5) / 2,
         label_loadmenu = CFG.lm.enabled,
         guard_signal = pstat.rec and pstat.rec.signal or nil, use_guard_signal = pstat.rec and pstat.rec.use_signal or false,
-        occlude = state.occlude, menu_hide = state.menu_hide,
+        occlude = state.occlude, menu_hide = state.menu_hide, wall_skip = state.occ.skip_list(),
         weapon_lock = pstat.lock and pstat.lock.on, lock_hook = pstat.lock and pstat.lock.hooks.on,
         lock_guns = pstat.lock and pstat.lock.guns.on, lock_move = pstat.lock and pstat.lock.move.on,
         hit_on = enemy.hit.on, hit_accept = enemy.hit.accept, hit_damage = enemy.hit.damage, shot_signal = enemy.hit.signal,
@@ -7383,24 +8576,23 @@ local function settings_snapshot()
 end
 
 local function settings_key(t)
-    return table.concat({ tostring(t.death_mode), tostring(t.item_sync), tostring(t.auto_hide), tostring(t.show_body),
+    return table.concat({ tostring(t.death_mode_choice), tostring(t.item_sync),
         tostring(t.show_skeleton), tostring(t.freeze_instead), tostring(t.auto_join), tostring(t.auto_start),
         tostring(t.enemy_mode), tostring(t.enemy_drive_ai), tostring(t.drop_on_discard), tostring(t.give_hint),
         tostring(t.hide_near), tostring(t.show_parked), tostring(t.revive_radius), tostring(t.revive_pct), tostring(t.revive_hold),
         tostring(t.label_loadmenu), pstat.rec and pstat.rec.signal_text() or "", tostring(t.use_guard_signal),
-        tostring(t.occlude), tostring(t.menu_hide), tostring(t.weapon_lock), tostring(t.lock_hook), tostring(t.lock_guns), tostring(t.lock_move), tostring(t.hit_on), tostring(t.hit_accept),
+        tostring(t.occlude), tostring(t.menu_hide), table.concat(t.wall_skip, ","), tostring(t.weapon_lock), tostring(t.lock_hook), tostring(t.lock_guns), tostring(t.lock_move), tostring(t.hit_on), tostring(t.hit_accept),
         tostring(t.hit_damage), t.shot_signal and (tostring(t.shot_signal.type) .. "." .. tostring(t.shot_signal.field)) or "" }, "|")
 end
 
 local function load_settings()
     local d = json.load_file(FILES.SETTINGS_FILE)
     if type(d) ~= "table" then return end
-    if type(d.death_mode) == "number" and d.death_mode >= 1 and d.death_mode <= #DEATH_MODES then
-        death.mode = math.floor(d.death_mode)
+    -- (new key in 9.22: an old file's "death_mode" is the old default 1, not a choice, so it is not read)
+    if type(d.death_mode_choice) == "number" and d.death_mode_choice >= 1 and d.death_mode_choice <= #DEATH_MODES then
+        death.mode = math.floor(d.death_mode_choice)
     end
     if type(d.item_sync) == "boolean" then items.enabled = d.item_sync end
-    if type(d.auto_hide) == "boolean" then state.auto_hide = d.auto_hide end
-    if type(d.show_body) == "boolean" then state.show_body = d.show_body end
     if type(d.show_skeleton) == "boolean" then state.show_skeleton = d.show_skeleton end
     if type(d.freeze_instead) == "boolean" then lobby.freeze_instead = d.freeze_instead end
     if type(d.auto_join) == "boolean" then lobby.auto_join = d.auto_join end
@@ -7421,6 +8613,11 @@ local function load_settings()
     if type(d.label_loadmenu) == "boolean" then CFG.lm.enabled = d.label_loadmenu end
     if type(d.occlude) == "boolean" then state.occlude = d.occlude end
     if type(d.menu_hide) == "boolean" then state.menu_hide = d.menu_hide end
+    if type(d.wall_skip) == "table" then
+        for _, n in ipairs(d.wall_skip) do
+            if type(n) == "string" and #n < 100 then state.occ.skip_add(n) end
+        end
+    end
     if pstat.lock and type(d.weapon_lock) == "boolean" then pstat.lock.on = d.weapon_lock end
     if pstat.lock and type(d.lock_hook) == "boolean" then pstat.lock.hooks.on = d.lock_hook end
     if pstat.lock and type(d.lock_guns) == "boolean" then pstat.lock.guns.on = d.lock_guns end
@@ -7467,7 +8664,7 @@ end
 ----------------------------------------------------------------------------------------------
 CFG.menu = { guis = {}, by_path = {}, list_at = -100, scan_i = 1, open = false, which = nil, open_since = 0, clear_at = 0,
     how = "-", polls = 0, listings = 0, errors = 0, hidden_frames = 0, shown_now = false, ignored = {}, fast = {}, fast_at = 0,
-    -- (9.11) the real menus, from the first debug file that listed the game's GUIs (the last part of the path, lower case).
+    -- the real menus, from the first debug file that listed the game's GUIs (the last part of the path, lower case).
     -- A name like "MapMaskGUI" is NOT a menu: after the tape it stayed "showing" for good and hid the other player for minutes.
     KNOWN = { inventorymenu = true, pausemenugui = true, quickequipmenu = true, savemenugui = true, filemenu = true,
         detailsearchgui = true, gui_menu = true, gui_option = true, ui5000 = true, ui5001 = true, objectivegui = true,
@@ -7509,7 +8706,7 @@ end
 
 function CFG.menu.update(now)
     local M = CFG.menu
-    -- (9.11) watched whenever the other player is there, also with the "hide them" box unticked: the heal pose needs to know
+    -- watched whenever the other player is there, also with the "hide them" box unticked: the heal pose needs to know
     -- whether the inventory is open (the hide itself still follows the box, see state.overlay_hidden)
     if not state.remote then
         M.open, M.which, M.shown_now = false, nil, false
@@ -7560,7 +8757,7 @@ function CFG.menu.update(now)
             M.open_pos = lp and { x = lp.x, y = lp.y, z = lp.z } or nil
         end
         M.open, M.which, M.clear_at = true, which, now + 0.5
-        -- (9.11) a game menu stops the game. If you have walked 3 m while one has been "open" for 6 s, it is not a menu
+        -- a game menu stops the game. If you have walked 3 m while one has been "open" for 6 s, it is not a menu
         -- (that was MapMaskGUI): it is ignored from now on.
         if lp and M.open_pos and now - M.open_since > 6 and not M.STAY[(which:lower():match("([^/]+)$") or "")] then
             local dx, dy, dz = lp.x - M.open_pos.x, lp.y - M.open_pos.y, lp.z - M.open_pos.z
@@ -7578,6 +8775,18 @@ function CFG.menu.update(now)
     if M.open then M.hidden_frames = M.hidden_frames + 1 end
 end
 
+-- Is MY open menu an inventory-like one (inventory, item box, combining, quick equip, notes)? Sent to the other player as POSE_MENU.
+CFG.menu.INV_WORDS = { "inventory", "itembox", "item_box", "combine", "quickequip", "document", "notes", "memo" }
+function CFG.menu.in_inventory()
+    local M = CFG.menu
+    if not M.open or type(M.which) ~= "string" then return false end
+    local low = M.which:lower()
+    for _, w in ipairs(M.INV_WORDS) do
+        if low:find(w, 1, true) then return true end
+    end
+    return false
+end
+
 function CFG.menu.report()
     local M = CFG.menu
     local rows = {}
@@ -7592,10 +8801,278 @@ function CFG.menu.report()
 end
 
 ----------------------------------------------------------------------------------------------
+-- Story sync (9.16, EXPERIMENTAL; both switches are OFF at the start and are not remembered).
+-- When a player's game starts a cutscene (app.GameManager.requestEvent("c03e03_00", Transform, ...)), the other player is told
+-- which one and where the first player stands (message kind 12; an older script has no handler for it and ignores it).
+-- Second switch, for the JOINER: move to the host's place when the host starts one, to share the room (and trip the triggers
+-- there: some story beats load or reload areas). The cutscene itself is NOT replayed on the other game (not enough is known:
+-- the journal of this build is how we find out). All of it is unverified in the real game.
+----------------------------------------------------------------------------------------------
+CFG.story = {
+    MSG = 12,
+    on = CFG.STORY_SYNC_DEFAULT, teleport = CFG.STORY_TELEPORT_DEFAULT,
+    hooked = false, hook_tried = false, hook_error = nil,
+    queue = {},                                  -- cutscene starts read in the hook, handled in the frame: { id, ex, ey, ez }
+    seen = 0, sent = 0, received = 0, ignored = 0, repeats = 0, rate_limited = 0, bad_id = 0,
+    static = false, slot_fallbacks = 0, last_unreadable = nil, rejected = {},  -- which argument slot the id is read from, and what was rejected
+    moved = 0, put_back = 0, skip_total = 0, skipped = {},
+    recent = {},                                 -- id -> when it was last handled (a repeat within 5 s is ignored)
+    send_times = {},                             -- when I sent (at most 8 a minute)
+    last_move_at = -1e9, cooldown = 15,          -- seconds between two moves
+    events = {},                                 -- the last 12 cutscene starts, mine and theirs
+    settle = nil, last_settle = nil,
+    lines = 0,
+    last = "No cutscene seen yet.",
+}
+
+function CFG.story.note(msg)
+    local S = CFG.story
+    S.last = msg
+    S.lines = S.lines + 1
+    if S.lines <= 60 then say("story: " .. msg) end -- (60 journal lines at most; the panel always shows the last one)
+    chat_add("Story", msg)
+end
+
+function CFG.story.crumb(what) pcall(tracer.crumb, "story", what) end
+function CFG.story.clean() pcall(tracer.crumb, "clean", "story call finished") end
+
+function CFG.story.event(who, id, x, y, z)
+    local S = CFG.story
+    S.events[#S.events + 1] = { who = who, id = id, at = os.clock(), x = x, y = y, z = z }
+    if #S.events > 12 then table.remove(S.events, 1) end
+end
+
+-- Runs inside the game's own call: it only READS the cutscene's name and place and queues them. Everything else happens in the frame.
+function CFG.story.on_request(args)
+    local S = CFG.story
+    S.seen = S.seen + 1
+    if #S.queue >= 8 then return end
+    local id, ex, ey, ez
+    -- A STATIC method has no "this": its first parameter is args[2], not args[3]. The 9.17 file showed all 10 cutscene starts
+    -- rejected as "bad id": the trace of app.GameManager.requestEvent has no "[on ...]" object, i.e. it is static, and the hook read
+    -- the Transform (the second parameter) as the cutscene's name. The slot comes from is_static() now; if the text found there is
+    -- not a plausible id, the other slot is tried as well.
+    local first = S.static and 2 or 3
+    local function read_at(slot)
+        local okn, name = pcall(function() return as_text(sdk.to_managed_object(args[slot])) end)
+        return okn and name or nil
+    end
+    id = read_at(first)
+    if not (type(id) == "string" and id:match("^[%w_]+$") and #id <= 40) then
+        local other = read_at(first == 2 and 3 or 2)
+        if type(other) == "string" and other:match("^[%w_]+$") and #other <= 40 then
+            id, first = other, (first == 2 and 3 or 2)
+            S.slot_fallbacks = S.slot_fallbacks + 1
+        else
+            S.last_unreadable = tostring(id):sub(1, 60)
+        end
+    end
+    pcall(function()
+        local xf = sdk.to_managed_object(args[first + 1])
+        if xf ~= nil then
+            local p = xf:call("get_Position")
+            if p then ex, ey, ez = p.x, p.y, p.z end
+        end
+    end)
+    S.queue[#S.queue + 1] = { id = id, ex = ex, ey = ey, ez = ez }
+end
+
+-- Hooks the game's requestEvent, once, the first time the switch is ticked (nothing is hooked while it is off).
+function CFG.story.install()
+    local S = CFG.story
+    if S.hook_tried then return S.hooked end
+    S.hook_tried = true
+    local td = sdk.find_type_definition("app.GameManager")
+    local m = td and td:get_method("requestEvent")
+    if not m then
+        S.hook_error = "app.GameManager.requestEvent not found"
+        say("story: " .. S.hook_error)
+        return false
+    end
+    pcall(function() S.static = m:is_static() == true end)
+    pcall(tracer.crumb, "hooking", "app.GameManager.requestEvent")
+    local call_original = sdk.PreHookResult and sdk.PreHookResult.CALL_ORIGINAL
+    local ok, err = pcall(sdk.hook, m, function(args)
+        pcall(CFG.story.on_request, args)
+        return call_original
+    end, function(retval) return retval end)
+    pcall(tracer.crumb, "clean", "hook installed: app.GameManager.requestEvent")
+    S.hooked = ok
+    if not ok then S.hook_error = tostring(err):sub(1, 80) end
+    say("story: " .. (ok and ("hooked app.GameManager.requestEvent (" .. (S.static and "static: the name is argument 2" or "an instance method: the name is argument 3") .. ")")
+        or ("could not hook requestEvent: " .. tostring(err))))
+    return ok
+end
+
+function CFG.story.set_on(v)
+    local S = CFG.story
+    S.on = v == true
+    say("story: sync switched " .. (S.on and "ON (experimental)" or "off"))
+    if S.on then S.install() end
+end
+
+function CFG.story.set_teleport(v)
+    local S = CFG.story
+    S.teleport = v == true
+    say("story: moving the joiner to the host switched " .. (S.teleport and "ON (experimental)" or "off"))
+end
+
+-- A cutscene started here: tell the other player.
+function CFG.story.handle_local(e, now)
+    local S = CFG.story
+    if not S.on then return end
+    if type(e.id) ~= "string" or not e.id:match("^[%w_]+$") or #e.id > 40 then
+        S.bad_id = S.bad_id + 1
+        if #S.rejected < 8 then -- what was rejected, so a wrong argument slot is visible in the next file
+            S.rejected[#S.rejected + 1] = { read = type(e.id) == "string" and e.id:sub(1, 60) or ("(" .. type(e.id) .. ")"), unreadable = S.last_unreadable }
+        end
+        return
+    end
+    local last = S.recent[e.id]
+    if last and now - last < 5 then
+        S.repeats = S.repeats + 1
+        return
+    end
+    S.recent[e.id] = now
+    for i = #S.send_times, 1, -1 do
+        if now - S.send_times[i] > 60 then table.remove(S.send_times, i) end
+    end
+    if #S.send_times >= 8 then
+        S.rate_limited = S.rate_limited + 1
+        return
+    end
+    S.send_times[#S.send_times + 1] = now
+    local player = player_object()
+    local px, py, pz
+    if player then px, py, pz = give.player_pose(player) end
+    if not px then
+        S.note(string.format("I started the cutscene %s but can't read where I stand: not sent", e.id))
+        return
+    end
+    S.event("me", e.id, px, py, pz)
+    local who = state.remote_name or CFG.DEFAULT_NAME
+    if peer_present(now) then
+        net_send(S.MSG, string.format("%s|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f", e.id, px, py, pz, e.ex or px, e.ey or py, e.ez or pz))
+        S.sent = S.sent + 1
+        S.note(string.format("I started the cutscene %s at (%.1f, %.1f, %.1f): %s was told", e.id, px, py, pz, who))
+    else
+        S.note(string.format("I started the cutscene %s at (%.1f, %.1f, %.1f) (nobody to tell)", e.id, px, py, pz))
+    end
+end
+
+-- The other player's cutscene start arrives. `test` = the panel's test button (which may also move the host, in the loopback test).
+function CFG.story.receive(payload, test)
+    local S = CFG.story
+    local id, a, b, c = tostring(payload):match("^([%w_]+)|(-?[%d%.]+)|(-?[%d%.]+)|(-?[%d%.]+)|")
+    local px, py, pz = tonumber(a), tonumber(b), tonumber(c)
+    if not (id and #id <= 40 and px and py and pz) then return end
+    if math.abs(px) > 1e5 or math.abs(py) > 1e5 or math.abs(pz) > 1e5 then return end
+    if not S.on then
+        S.ignored = S.ignored + 1
+        return
+    end
+    S.received = S.received + 1
+    local who = state.remote_name or CFG.DEFAULT_NAME
+    S.event("them", id, px, py, pz)
+    S.note(string.format("%s started the cutscene %s at (%.1f, %.1f, %.1f)", who, id, px, py, pz))
+    S.follow(id, px, py, pz, test, who)
+end
+
+function CFG.story.follow(id, px, py, pz, test, who)
+    local S = CFG.story
+    if not S.teleport then return end
+    local now = os.clock()
+    local function skip(why)
+        S.skip_total = S.skip_total + 1
+        local key = (why:gsub("[%d%.]+", "#"))
+        S.skipped[key] = (S.skipped[key] or 0) + 1
+        S.note("not moving to " .. who .. "'s place: " .. why)
+    end
+    if state.role == "host" and not test then return skip("I am the host: the joiner follows the host, not the other way round") end
+    if pstat.downed then return skip("I am down") end
+    if CFG.menu.open then return skip("a game menu is open (" .. tostring(CFG.menu.which) .. ")") end
+    if now - S.last_move_at < S.cooldown then return skip(string.format("I was moved %.0f s ago (%d s between moves)", now - S.last_move_at, S.cooldown)) end
+    local player = player_object()
+    if not player then return skip("player object not found") end
+    local fx, fy, fz = give.player_pose(player)
+    if not fx then return skip("I can't read my own position") end
+    local d = math.sqrt((px - fx) ^ 2 + (py - fy) ^ 2 + (pz - fz) ^ 2)
+    if d < 3 then return skip(string.format("I am already %.1f m from there", d)) end
+    if d > 2000 then return skip(string.format("%.0f m is too far to be a real place", d)) end
+    S.crumb(string.format("moving to %s's place (%.1f, %.1f, %.1f) for the cutscene %s", who, px, py, pz, id))
+    local ok = pcall(function() player:call("get_Transform"):call("set_Position", Vector3f.new(px, py + 0.05, pz)) end)
+    S.clean()
+    if not ok then return skip("the game would not take the new position") end
+    S.moved = S.moved + 1
+    S.last_move_at = now
+    S.settle = { at = now + 1.5, from = { x = fx, y = fy, z = fz }, target = { x = px, y = py + 0.05, z = pz }, id = id }
+    S.note(string.format("moved you %.0f m to %s's place for the cutscene %s (you were at (%.1f, %.1f, %.1f))", d, who, id, fx, fy, fz))
+end
+
+-- 1.5 s after a move: where am I? If I fell through the floor (the area was not loaded there) I am put back where I was.
+function CFG.story.check_settle(now)
+    local S = CFG.story
+    local st = S.settle
+    S.settle = nil
+    if not st then return end
+    local player = player_object()
+    local cx, cy, cz
+    if player then cx, cy, cz = give.player_pose(player) end
+    if not cx then
+        S.last_settle = { id = st.id, result = "could not read my position" }
+        return S.note("1.5 s after the move I can't read where you are")
+    end
+    local off = math.sqrt((cx - st.target.x) ^ 2 + (cz - st.target.z) ^ 2)
+    local dy = cy - st.target.y
+    S.last_settle = { id = st.id, off = off, dy = dy }
+    if dy < -4 then
+        S.crumb("putting you back after a fall")
+        pcall(function() player:call("get_Transform"):call("set_Position", Vector3f.new(st.from.x, st.from.y, st.from.z)) end)
+        S.clean()
+        S.put_back = S.put_back + 1
+        S.last_settle.result = "fell: put back"
+        S.note(string.format("1.5 s after the move you had fallen %.0f m below the place (the area was probably not loaded there): you are put back where you were", -dy))
+    elseif off > 2 then
+        S.last_settle.result = "moved again by the game"
+        S.note(string.format("1.5 s after the move you are %.1f m from the place: the game moved you again", off))
+    else
+        S.last_settle.result = "still there"
+        S.note(string.format("1.5 s after the move you are still at the place (%.1f m off, %.1f m height difference)", off, dy))
+    end
+end
+
+function CFG.story.update(now)
+    local S = CFG.story
+    if #S.queue > 0 then
+        local q = S.queue
+        S.queue = {}
+        for _, e in ipairs(q) do
+            local ok, err = pcall(S.handle_local, e, now)
+            if not ok then say("story: error handling a cutscene start: " .. tostring(err)) end
+        end
+    end
+    if S.settle and now >= S.settle.at then pcall(S.check_settle, now) end
+end
+
+net_on(CFG.story.MSG, function(payload) CFG.story.receive(payload, false) end)
+
+function CFG.story.report()
+    local S = CFG.story
+    local ev = {}
+    for _, e in ipairs(S.events) do ev[#ev + 1] = { who = e.who, id = e.id, x = e.x, y = e.y, z = e.z } end
+    return { on = S.on, teleport = S.teleport, hooked = S.hooked, hook_error = S.hook_error,
+        seen_in_game = S.seen, sent = S.sent, received = S.received, ignored_while_off = S.ignored, repeats = S.repeats,
+        rate_limited = S.rate_limited, bad_id = S.bad_id, moved = S.moved, put_back = S.put_back,
+        id_read_from_argument = S.static and 2 or 3, method_is_static = S.static, other_slot_used = S.slot_fallbacks, rejected_ids = S.rejected,
+        not_moved = S.skip_total, not_moved_because = S.skipped, last_settle = S.last_settle, recent_events = ev }
+end
+
+----------------------------------------------------------------------------------------------
 -- Main loop and UI
 ----------------------------------------------------------------------------------------------
 load_settings()
 pcall(tracer.report_previous)
+pcall(give.report_trail) -- 
 settings_saved_key = settings_key(settings_snapshot())
 prime_messages()
 items.hooked = select(2, pcall(install_item_hooks)) == true
@@ -7632,6 +9109,8 @@ re.on_frame(function()
         enemy_update(now, dt)
         give_update(now)
         enemy.hit.update(now)
+        CFG.story.update(now)
+        chat.update(now)
     end)
     if not oke and now - (state.enemy_err_at or 0) > 5 then
         state.enemy_err_at = now
@@ -7644,7 +9123,7 @@ re.on_frame(function()
         say("health update error: " .. tostring(errp))
     end
 
-    local okl, errl = pcall(pstat.lock_update, now) -- (9.8) the downed player's weapon lock; its own pcall for the same reason
+    local okl, errl = pcall(pstat.lock_update, now) -- the downed player's weapon lock; its own pcall for the same reason
     if not okl and now - (state.lock_err_at or 0) > 5 then
         state.lock_err_at = now
         say("weapon lock error: " .. tostring(errl))
@@ -7675,20 +9154,33 @@ re.on_draw_ui(function()
 
     local changed, v = imgui.checkbox("Show other player", state.show_figure)
     if changed then state.show_figure = v end
-    local cb, vb = imgui.checkbox("3D body", state.show_body)
-    if cb then state.show_body = vb end
+    if imgui.button("Ping my position  [F9]") then ping_here() end
     local cs, vs = imgui.checkbox("Debug skeleton (lines)", state.show_skeleton)
     if cs then state.show_skeleton = vs end
-    local ch, vh = imgui.checkbox("Hide them for a while after a new game (cutscenes)", state.auto_hide)
-    if ch then state.auto_hide = vh end
     local okh, chd, vhd = pcall(imgui.slider_float, "Hide them when closer than (m)", CFG.HIDE_NEAR_DISTANCE, 0.1, 1.5)
     if okh and chd and type(vhd) == "number" then CFG.HIDE_NEAR_DISTANCE = math.max(0.05, math.min(3.0, vhd)) end
     do
-        local cw, vw = imgui.checkbox("Hide them behind walls and doors", state.occlude)
+        local cw, vw = imgui.checkbox("Hide them behind walls (doors never hide them)", state.occlude)
         if cw then state.occlude = vw end
         local cm, vm = imgui.checkbox("Hide them while a game menu is open (EXPERIMENTAL)", state.menu_hide)
         if cm then state.menu_hide = vm end
         imgui.text("    walls: " .. tostring(state.occ.status))
+        do -- which collider hides them, and a way to say "that is not a wall" (remembered)
+            local O = state.occ
+            if O.last_blocker then
+                imgui.text("    last collider that hid them: " .. O.last_blocker .. (O.blocked and "  (hiding them now)" or ""))
+                if O.last_blocker ~= "(no readable name)" and not O.skip_names[O.last_blocker]
+                    and imgui.button("That is not a wall: stop hiding them behind '" .. O.last_blocker .. "'") then
+                    if not O.skip_add(O.last_blocker) then say("walls: could not add that name (40 names at most)") end
+                end
+            end
+            if O.skip_n > 0 then
+                imgui.text("    colliders you said are not walls: " .. table.concat(O.skip_list(), ", "))
+                if imgui.button("Forget those (" .. O.skip_n .. ")") then O.skip_clear() end
+            end
+        end
+        if imgui.button("Probe the walls here (stand next to a wall, a door or the car, then send the debug file)") then pcall(state.occ.probe) end
+        if state.occ.probe_note then imgui.text("    " .. state.occ.probe_note) end
     end
     local why = state.overlay_hidden(os.clock())
     if why then
@@ -7699,15 +9191,15 @@ re.on_draw_ui(function()
     end
 
     local okpv, cpv, vpv = pcall(imgui.combo, "Stand-in pose preview", state.pose_preview,
-        { "Off (what the other player is doing)", "Block", "Heal", "Block, heal, crouch, stand (cycle)", "Crouch" })
-    if okpv and cpv and type(vpv) == "number" then state.pose_preview = math.max(1, math.min(5, math.floor(vpv))) end
+        { "Off (what the other player is doing)", "Block", "Heal", "Block, heal, crouch, stand (cycle)", "Crouch", "Inventory" })
+    if okpv and cpv and type(vpv) == "number" then state.pose_preview = math.max(1, math.min(6, math.floor(vpv))) end
     if state.pose_preview ~= 1 then imgui.text("Preview is ON: the stand-in shows that pose whatever the other player does.") end
     do
         local lpz, P = state.local_pose, state.pose
-        local sending = (lpz.guard and "BLOCK " or "") .. (lpz.heal and "HEAL " or "") .. (lpz.crouch and "CROUCH " or "")
-        imgui.text(string.format("Poses: you are sending %s  | their stand-in: block %d%%, heal %d%%, crouch %d%%",
+        local sending = (lpz.guard and "BLOCK " or "") .. (lpz.heal and "HEAL " or "") .. (lpz.crouch and "CROUCH " or "") .. (lpz.menu and "INVENTORY " or "")
+        imgui.text(string.format("Poses: you are sending %s  | their stand-in: block %d%%, heal %d%%, crouch %d%%, inventory %d%%",
             sending ~= "" and sending or "nothing", math.floor(P.guard * 100 + 0.5), math.floor(P.heal * 100 + 0.5),
-            math.floor((P.crouch or 0) * 100 + 0.5)))
+            math.floor((P.crouch or 0) * 100 + 0.5), math.floor((P.menu or 0) * 100 + 0.5)))
         local PO = pstat.pose or {}
         imgui.text(string.format("    hands action %s, gun action %s, block flag %s, eyes %s m above your feet (standing %s)",
             tostring(PO.hands_id), tostring(PO.gun_id), tostring(PO.cancel),
@@ -7806,7 +9298,7 @@ re.on_draw_ui(function()
             if c then death.mode = idx end
             if death.mode == 3 then imgui.text("That option isn't built yet; it acts like Independent.") end
             if death.mode == 4 then
-                imgui.text("EXPERIMENTAL. While the other player is connected, a hit that would kill you leaves you at 1 health,")
+                imgui.text("While the other player is connected, a hit that would kill you leaves you at 1 health,")
                 imgui.text("down where you fell. They get you up with a Herb / Chem Fluid (or F8). Details: Health section.")
             end
             build_mode_map()
@@ -7815,6 +9307,17 @@ re.on_draw_ui(function()
                 or "No game-over-like GameMode found, so deaths can't be detected yet (see the debug file).")
             imgui.text(death.last)
             imgui.text(string.format("Death messages: sent %d, received %d", death.sent, death.received))
+            -- do finishers (grabs, executions) end the game by a different call than a death by damage?
+            imgui.text("Execution test (EXPERIMENTAL, off at every start): what does a finisher call, and can it become 'down'?")
+            local ce, ve = imgui.checkbox("    log the calls a grab / finisher / game over makes (hooks a few more methods; may crash the game)", RE7.exec.on)
+            if ce then RE7.exec.set_on(ve) end
+            local cb, vb = imgui.checkbox("    ...and block the game over and go down instead (needs Downed mode and the other player next to you; may leave the game stuck)", RE7.exec.block)
+            if cb then RE7.exec.set_block(vb) end
+            if RE7.exec.on or RE7.exec.block then
+                imgui.text(string.format("    watching %d methods; game overs seen %d; blocked %d", #RE7.exec.hooks, RE7.exec.overs, RE7.exec.blocked))
+                imgui.text("    " .. RE7.exec.verdict())
+                imgui.text("    " .. RE7.exec.note)
+            end
             if imgui.button("Test: send a death message to the other player") then
                 net_send(DEATH_MSG, "test")
                 death.sent = death.sent + 1
@@ -7827,7 +9330,7 @@ re.on_draw_ui(function()
         imgui.tree_pop()
     end
 
-    if imgui.tree_node("Health and downed (experimental)") then
+    if imgui.tree_node("Health and downed") then
         local ok, err = pcall(pstat.panel)
         if not ok then imgui.text("UI error: " .. tostring(err)) end
         imgui.tree_pop()
@@ -7846,7 +9349,7 @@ re.on_draw_ui(function()
                 if type(e) == "table" then
                     imgui.text(string.format("  slot %03d   %s   (%s)   %s", tonumber(e.slot) or 0,
                         tostring(e.tag or "[CO-OP]"), e.role == "sent" and "you saved it" or "received", tostring(e.label)))
-                    -- (9.12) where a received save came from, why it is in this slot, and whether the game itself lists the slot
+                    -- where a received save came from, why it is in this slot, and whether the game itself lists the slot
                     if e.role ~= "sent" then
                         if type(e.why) == "string" and e.why ~= "" then
                             imgui.text(string.format("        %s's slot %s -> your slot %d: %s", tostring(e.from or "?"),
@@ -7924,18 +9427,92 @@ re.on_draw_ui(function()
             if c1 then give.drop_on_discard = v1 end
             local c2, v2 = imgui.checkbox("Show the [F7] give hint while the inventory is open", give.hint)
             if c2 then give.hint = v2 end
+            -- creating items crashed the real game: off at the start, not remembered
+            local cn, vn = imgui.checkbox("EXPERIMENTAL: let the script CREATE items (a gift of a kind I don't hold, drops on the ground). May crash the game; not remembered", give.make_new)
+            if cn then
+                give.make_new = vn
+                say("give: item creation switched " .. (vn and "ON (experimental)" or "off (safe mode)"))
+            end
+            if give.make_new then
+                local cu, vu = imgui.checkbox("    ...and do it inside the game's update step instead of the render frame (try this if it crashes)", give.in_update)
+                if cu then
+                    give.in_update = vu
+                    if vu and not give.register_step() then
+                        give.in_update = false -- it would only make every gift wait for nothing
+                        say("give: the update step can't be used: " .. tostring(give.step_error))
+                    end
+                    say("give: creating in the " .. (vu and "game's update step" or "render frame"))
+                end
+                if give.step_error then imgui.text("    the update step is not available: " .. tostring(give.step_error)) end
+                -- the item lab: one step per press, each written to re7mp_trail.json at once
+                imgui.text("ITEM LAB: press one step, wait ~5 s (the trail shows 'alive' lines), press the next. If the game dies, start it again and send the debug file.")
+                imgui.text("    Order: Lab 1 (make), Lab 6 or 6b (stack of 1 or 2), Lab 5 (look), Lab 2 (add), then Lab 7 / Lab 8 (take it out; Lab 8 passes false, as crafting does). Lab 2 and 3 refuse a stack of 0.")
+                imgui.text("    Use a kind you hold none of (" .. give.lab.id .. "). The steps are written to reframework\\data\\re7mp_trail.json and the debug file.")
+                if imgui.button("Lab 1: create a " .. give.lab.id .. " object (nothing else)") then give.lab_create() end
+                if imgui.button("Lab 2: add it with addItem(item, player)") then give.lab_add("2") end
+                if imgui.button("Lab 3: add it with the 4-parameter addItem and a real list") then give.lab_add("3") end
+                if imgui.button("Lab 4: remove it again (Item.destroyItem)") then give.lab_destroy() end
+                if imgui.button("Lab 5: write down what it looks like now") then give.lab_look() end
+                if imgui.button("Lab 6: give the waiting object a stack of 1 (setStackNum, nothing else)") then give.lab_stack(1) end
+                if imgui.button("Lab 6b: give the waiting object a stack of 2 (so Lab 7 first takes one of two)") then give.lab_stack(2) end
+                if imgui.button("Lab 7: take it out of the inventory again (Inventory.reduceItem, what a give does). May crash") then give.lab_take_out(true) end
+                if imgui.button("Lab 8: take it out the way crafting does (Inventory.reduceItem(..., false)). May crash") then give.lab_take_out(false) end
+                local cm, vm = imgui.checkbox("Allow giving an item this script made (giving ChemicalS crashed the game in the 9.18 test). Not remembered", give.allow_made)
+                if cm then give.allow_made = vm say("give: giving script-made items " .. (vm and "ALLOWED (experimental)" or "refused")) end
+                local ck, vk = imgui.input_text("Lab kind (item id)", give.kind_text or give.lab.id)
+                if ck then give.kind_text = vk end
+                if imgui.button("Use this kind for the lab (Lab 5 and 7 also work on a kind the game put in your inventory)") then
+                    local okk, whyk = give.lab_set_kind(give.kind_text or give.lab.id)
+                    give.kind_note = (not okk) and whyk or nil
+                end
+                if give.kind_note then imgui.text("    kind not changed: " .. give.kind_note) end
+                imgui.text("    object waiting: " .. ((give.lab.item and not give.lab.added) and "yes" or "no") .. "     last trail line: " .. tostring((give.trail_list[#give.trail_list] or {}).w or "-"):sub(1, 90))
+            else
+                imgui.text("Safe mode: a gift can only make a stack you already hold bigger; anything else is refused and stays with the sender.")
+            end
+            -- in every mode: the crash with the last unit happened in safe mode (a FlameBulletS given away one by one)
+            local cl, vl = imgui.checkbox("Allow giving the LAST one of a kind (a whole entry), removed the crafting way. EXPERIMENTAL: the other way crashed 4 times. Not remembered", give.last_ok)
+            if cl then give.last_ok = vl say("give: giving a whole entry " .. (vl and "ALLOWED (experimental, third argument false)" or "refused")) end
             imgui.text(give.hooked and "Hooks: on (Item.isCanDiscard, Item.reduceNum)" or "Hooks: not all installed (see the console)")
-            imgui.text(string.format("Given %d   received %d   dropped %d   failed %d", give.sent, give.received, give.dropped, give.failed))
+            imgui.text(string.format("Given %d   received %d   dropped %d   failed %d   refused in safe mode %d", give.sent, give.received, give.dropped, give.failed, give.refused))
             imgui.text(give.last)
-            imgui.text("A given item goes into their inventory; if that fails it lies at their feet instead. Don't give away")
-            imgui.text("key items or your equipped weapon unless you mean to: this does not check.")
             if imgui.button("Write the item details to the debug file") then dump_focused_item() end
-            imgui.text("Receiving can't be tried with the loopback bot, so these run the real receive code on yourself:")
+            imgui.text("Receive tests (they run the real receive code on yourself, since the loopback bot can't give):")
             if imgui.button("Test: receive 1 Herb as if " .. who .. " gave it") then netmsg.handlers[GIVE_MSG]("Herb|1") end
             if imgui.button("Test: receive 5 HandgunBullet as if " .. who .. " gave them") then netmsg.handlers[GIVE_MSG]("HandgunBullet|5") end
+            if imgui.button("Test: receive 1 ChemicalS as if " .. who .. " gave it") then netmsg.handlers[GIVE_MSG]("ChemicalS|1") end
             if imgui.button("Test: a Herb that " .. who .. " dropped appears at my feet") then
                 local lp = state.local_pos or { x = 0, y = 0, z = 0 }
                 netmsg.handlers[DROP_MSG](string.format("Herb|1|%.2f|%.2f|%.2f", lp.x, lp.y - CFG.EYE_HEIGHT, lp.z))
+            end
+        end)
+        if not ok then imgui.text("UI error: " .. tostring(err)) end
+        imgui.tree_pop()
+    end
+
+    if imgui.tree_node("Story sync (EXPERIMENTAL)") then
+        local ok, err = pcall(function()
+            local S = CFG.story
+            local who = state.remote_name or CFG.DEFAULT_NAME
+            imgui.text("When a cutscene starts in one game, the other player is told which one and where. (The cutscene is not played for them.)")
+            local c1, v1 = imgui.checkbox("Story sync: tell the other player when I start a cutscene, and show theirs (hooks app.GameManager.requestEvent). Not remembered", S.on)
+            if c1 then S.set_on(v1) end
+            local c2, v2 = imgui.checkbox("JOINER: move me to the host's place when the host starts a cutscene (may drop you into rooms that are not loaded; you are put back if you fall). Not remembered", S.teleport)
+            if c2 then S.set_teleport(v2) end
+            if S.on then
+                imgui.text(S.hooked and "Hook: on (app.GameManager.requestEvent)" or ("Hook: NOT installed (" .. tostring(S.hook_error) .. ")"))
+            else
+                imgui.text("Off: nothing is hooked and nothing is sent or acted on.")
+            end
+            imgui.text(string.format("Cutscene starts seen here %d   told to %s %d   from %s %d   moved %d   not moved %d   put back %d",
+                S.seen, who, S.sent, who, S.received, S.moved, S.skip_total, S.put_back))
+            imgui.text(S.last)
+            imgui.text("Test (works with the loopback bot; needs the first box ticked, and the second to see the move):")
+            if imgui.button("Test: pretend " .. who .. " started the cutscene c03e03_00 where they stand") then
+                local r = state.remote
+                local ex = r and r.pos or state.local_pos or { x = 0, y = 0, z = 0 }
+                local fy = ex.y - (r and CFG.EYE_HEIGHT or 0)
+                S.receive(string.format("c03e03_00|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f", ex.x, fy, ex.z, ex.x, fy, ex.z), true)
             end
         end)
         if not ok then imgui.text("UI error: " .. tostring(err)) end
@@ -7984,7 +9561,7 @@ re.on_draw_ui(function()
             imgui.text(enemy.last)
             do
                 local H = enemy.hit
-                imgui.text("Damage to the host's enemies (9.10):")
+                imgui.text("Damage to the host's enemies:")
                 local ch1, v1 = imgui.checkbox("JOINER: my shots hurt the host's enemies (a shot that points at a red box)", H.on)
                 if ch1 then H.on = v1 end
                 local ch2, v2 = imgui.checkbox("HOST: apply the other player's hits to my enemies", H.accept)
@@ -8022,7 +9599,11 @@ re.on_draw_ui(function()
                 chat_send(chat.input)
                 chat.input = ""
             end
-            if imgui.button("Ping my position") then ping_here() end
+            if imgui.button("Ping my position  [F9]") then ping_here() end
+            for qi, q in ipairs(chat.quick) do
+                if imgui.button(q .. "##q" .. qi) then chat_send(q) end
+                if qi < #chat.quick then pcall(imgui.same_line) end
+            end
             imgui.text("The other player sees your message and a marker at your position for 12 seconds.")
             for i = math.max(1, #chat.lines - 8), #chat.lines do
                 imgui.text(chat.lines[i].who .. ": " .. chat.lines[i].text)
@@ -8048,6 +9629,25 @@ re.on_draw_ui(function()
             if imgui.button("Trace that type") then trace_type(tracer.type_name, tracer.filter, tracer.include_getters) end
             imgui.text("Hooked methods: " .. tostring(tracer.hook_count))
             for i = math.max(1, #tracer.lines - 20), #tracer.lines do imgui.text(tracer.lines[i]) end
+        end)
+        if not ok then imgui.text("UI error: " .. tostring(err)) end
+        imgui.tree_pop()
+    end
+
+    if imgui.tree_node("Model probe (Mia, Ethan, enemies)") then
+        local ok, err = pcall(function()
+            local MP = CFG.mprobe
+            imgui.text("Read-only. Stand near the character you want me to look at (Mia in her cutscene, the headless Mia on the")
+            imgui.text("shipwreck, Ethan if he is on screen, an enemy), press the button, then send me the debug file.")
+            local c, text = imgui.input_text("Look for names containing (separate with ;)", MP.filter)
+            if c then MP.filter = text end
+            if imgui.button("Scan the characters here (the three nearest get their full joint list)") then MP.scan() end
+            imgui.text(MP.status)
+            local r = MP.result
+            for i = 1, math.min(8, r and #r.found or 0) do
+                local e = r.found[i]
+                imgui.text(string.format("    %s  mesh %s  joints %s  %s m", e.name, tostring(e.mesh), tostring(e.joint_count or "?"), tostring(e.dist or "?")))
+            end
         end)
         if not ok then imgui.text("UI error: " .. tostring(err)) end
         imgui.tree_pop()

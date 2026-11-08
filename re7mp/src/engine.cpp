@@ -953,13 +953,10 @@ void Engine::run() {
                                     e.crc = f.crc;
                                     e.size = f.data.size();
                                     e.from_slot = f.slot;
-                                    if (f.slot >= 1 && slot == f.slot) {
-                                        e.why = replaced_ours ? "it replaced the earlier copy from " + from + " in that slot"
-                                                              : "the same slot number as on " + from + "'s PC (it was free here)";
-                                    } else if (f.slot >= 1) {
-                                        e.why = "slot " + std::to_string(f.slot) + " here holds a save of your own, so it went into the lowest free slot";
+                                    if (replaced_ours) {
+                                        e.why = "it replaced the earlier copy from " + from + " of the same save";
                                     } else {
-                                        e.why = "it went into the lowest free slot";
+                                        e.why = "it went into slot " + std::to_string(slot) + ", one past your highest save, so it cannot collide with a save of your own";
                                     }
                                     manifest.upsert(e);
                                     verify_seen[slot] = std::filesystem::last_write_time(file, sec_ec);

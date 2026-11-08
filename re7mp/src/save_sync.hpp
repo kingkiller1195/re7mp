@@ -72,8 +72,9 @@ private:
 // Manual slot numbers that currently hold a save file, ascending (the Autosave is not a slot).
 std::vector<int> list_occupied(const std::filesystem::path& save_dir);
 
-// Where to put a received save: the sender's slot if it is free (or already holds a co-op save from us),
-// otherwise the lowest free slot. Returns -1 if every slot 1..kMaxSlot holds a single-player save.
+// Where to put a received save: over the copy we installed earlier of the same save (same slot on the sender's PC), otherwise one
+// past the highest save in the folder, otherwise the lowest free slot. Never over a save of your own (and, since 9.22, never at the
+// sender's own slot number just because it is free). Returns -1 if every slot 1..kMaxSlot holds a single-player save.
 int pick_slot(const std::filesystem::path& save_dir, int preferred, const CoopManifest& manifest);
 
 // Notices when a save file has been written and left alone for a moment (so we don't send half a file).

@@ -235,15 +235,26 @@ void CoopManifest::upsert(const CoopEntry& e) {
 }
 
 int pick_slot(const fs::path& save_dir, int preferred, const CoopManifest& manifest) {
-    auto usable = [&](int slot) {
-        if (slot < 1 || slot > kMaxSlot) return false;  // slot 0 is not a slot: it is the Autosave
+    auto in_range = [&](int slot) { return slot >= 1 && slot <= kMaxSlot; };  // slot 0 is not a slot: it is the Autosave
+    auto exists = [&](int slot) {
         std::error_code ec;
-        const bool exists = fs::exists(save_dir / slot_filename(slot), ec);
-        return !exists || manifest.is_received_slot(slot);  // never a single-player save, nor one you made yourself
+        return fs::exists(save_dir / slot_filename(slot), ec);
     };
-    if (usable(preferred)) return preferred;
+    // 1. The same save arriving again (the sender saved again in the same slot): it replaces the copy we installed earlier, so
+    //    repeated sends do not pile up. Only a copy WE installed may be replaced, never a save of your own.
+    if (preferred >= 1) {
+        for (const auto& e : manifest.entries()) {
+            if (e.role == "received" && e.from_slot == preferred && in_range(e.slot) && manifest.is_received_slot(e.slot)) return e.slot;
+        }
+    }
+    // 2. A new co-op save goes one past the highest save in the folder (9.22). It used to take the sender's own slot number, which
+    //    could be a number your next save of your own would use. The Load screen lists the slots in order, so it appears last.
+    const std::vector<int> occ = list_occupied(save_dir);
+    const int top = occ.empty() ? 0 : occ.back();
+    if (in_range(top + 1) && !exists(top + 1)) return top + 1;
+    // 3. The folder is full up to the top: the lowest slot that is free, or a copy of ours.
     for (int s = 1; s <= kMaxSlot; ++s) {
-        if (usable(s)) return s;
+        if (!exists(s) || manifest.is_received_slot(s)) return s;
     }
     return -1;
 }

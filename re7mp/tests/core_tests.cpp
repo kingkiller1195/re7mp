@@ -1030,50 +1030,56 @@ static void test_save_sync_units(const fs::path& tmp) {
     const fs::path d = tmp / "slots";
     fs::create_directories(d);
     CoopManifest m(tmp / "slots_manifest.json");
-    CHECK(pick_slot(d, 5, m) == 5);                        // free: use the sender's slot
+    CHECK(pick_slot(d, 5, m) == 1);                        // 9.22: an empty folder: slot 1, not the sender's number
     write_text(d / "data005Slot.bin", "mine");
-    CHECK(pick_slot(d, 5, m) == 1);                        // occupied by a single-player save: first free slot (slots start at 1)
+    CHECK(pick_slot(d, 5, m) == 6);                        // one past the highest save, even though the sender's slot number is taken
     write_text(d / "data001Slot.bin", "mine too");
-    CHECK(pick_slot(d, 5, m) == 2);
+    CHECK(pick_slot(d, 5, m) == 6);
+    write_text(d / "data014Slot.bin", "mine, far up");
+    CHECK(pick_slot(d, 3, m) == 15);                       // the sender's slot 3 is free here, but the save goes after the highest one
+    fs::remove(d / "data014Slot.bin");
     write_text(d / "data000.bin", "the autosave");         // never a slot to put a co-op save in, never listed
-    CHECK(pick_slot(d, 0, m) == 2);                        // the sender's "slot 0" (an old exe sending its autosave) lands in a free manual slot
+    CHECK(pick_slot(d, 0, m) == 6);                        // the sender's "slot 0" (an old exe sending its autosave) goes after the highest too
     CoopEntry e;
-    e.slot = 5;
+    e.slot = 6;
+    e.from_slot = 5;
     e.label = "CO-OP Bob 2026-11-06 20:00";
     e.from = "Bob";
     e.crc = 1234;
     m.upsert(e);
-    CHECK(pick_slot(d, 5, m) == 5);                        // already a co-op slot: it may be replaced
-    CHECK(m.is_coop_slot(5) && !m.is_coop_slot(1) && m.has_crc(1234) && !m.has_crc(1));
-    CHECK(m.is_received_slot(5));
+    write_text(d / "data006Slot.bin", "the copy we installed");
+    CHECK(pick_slot(d, 5, m) == 6);                        // the same save again (sender slot 5): it replaces the copy we installed
+    CHECK(pick_slot(d, 4, m) == 7);                        // another save of theirs: a new slot, the old copy stays
+    CHECK(m.is_coop_slot(6) && !m.is_coop_slot(1) && m.has_crc(1234) && !m.has_crc(1));
+    CHECK(m.is_received_slot(6));
     // A save you made yourself and sent is co-op too, but an incoming save may not replace it.
     CoopEntry mine;
-    mine.slot = 6;
+    mine.slot = 7;
     mine.label = "CO-OP Me 2026-11-07 12:00";
     mine.role = "sent";
     mine.partner = "Bob";
     mine.crc = 777;
     mine.size = 4;
     m.upsert(mine);
-    write_text(d / "data006Slot.bin", "mine");
-    CHECK(m.is_coop_slot(6) && !m.is_received_slot(6) && pick_slot(d, 6, m) != 6);
-    CHECK(list_occupied(d) == (std::vector<int>{1, 5, 6}));  // the autosave (data000.bin) is not listed
+    write_text(d / "data007Slot.bin", "mine");
+    CHECK(m.is_coop_slot(7) && !m.is_received_slot(7) && pick_slot(d, 7, m) != 7);
+    CHECK(list_occupied(d) == (std::vector<int>{1, 5, 6, 7}));  // the autosave (data000.bin) is not listed
     CHECK(m.save("last \"event\"", true, list_occupied(d), "C:\\Steam\\userdata\\759758082\\418370\\remote\\win64_save"));
     {
         std::ifstream f(tmp / "slots_manifest.json", std::ios::binary);
         std::stringstream ss;
         ss << f.rdbuf();
         const std::string js = ss.str();
-        CHECK(js.find("\"tag\":\"[CO-OP: sent to Bob]\"") != std::string::npos);  // what the Load screen shows for slot 6: YOUR save, sent to Bob
-        CHECK(js.find("\"tag\":\"[CO-OP: Bob]\"") != std::string::npos);          // ...and for slot 5: the copy received from Bob
-        CHECK(js.find("\"occupied\":[1,5,6]") != std::string::npos);
+        CHECK(js.find("\"tag\":\"[CO-OP: sent to Bob]\"") != std::string::npos);  // what the Load screen shows for slot 7: YOUR save, sent to Bob
+        CHECK(js.find("\"tag\":\"[CO-OP: Bob]\"") != std::string::npos);          // ...and for slot 6: the copy received from Bob
+        CHECK(js.find("\"occupied\":[1,5,6,7]") != std::string::npos);
         CHECK(js.find("\"dir\":\"C:\\\\Steam\\\\userdata\\\\759758082") != std::string::npos);  // the watched folder, escaped
         CHECK(js.find("\"role\":\"sent\"") != std::string::npos && js.find("\"role\":\"received\"") != std::string::npos);
     }
     CoopManifest m2(tmp / "slots_manifest.json");
     m2.load();
     CHECK(m2.entries().size() == 2 && m2.entries()[0].label == "CO-OP Bob 2026-11-06 20:00" && m2.entries()[0].crc == 1234);
-    CHECK(m2.entries()[1].role == "sent" && m2.entries()[1].partner == "Bob" && m2.entries()[1].slot == 6);
+    CHECK(m2.entries()[1].role == "sent" && m2.entries()[1].partner == "Bob" && m2.entries()[1].slot == 7);
     CHECK(CoopManifest::tag_for(m2.entries()[0]) == "[CO-OP: Bob]" && CoopManifest::tag_for(m2.entries()[1]) == "[CO-OP: sent to Bob]");
     {   // where a received copy came from and why it is where it is survives a restart
         CoopEntry r;
@@ -1093,7 +1099,7 @@ static void test_save_sync_units(const fs::path& tmp) {
     for (int i = 1; i <= kMaxSlot; ++i) {
         if (!fs::exists(d / slot_filename(i))) write_text(d / slot_filename(i), "x");
     }
-    CHECK(pick_slot(d, 7, m2) == 5);                       // full, but a co-op slot can still be replaced
+    CHECK(pick_slot(d, 9, m2) == 6);                       // full, but a co-op slot (the copy we installed in 6) can still be replaced
     CoopManifest m3(tmp / "no_manifest.json");
     CHECK(pick_slot(d, 7, m3) == -1);                      // everything holds a single-player save
 
@@ -1224,28 +1230,28 @@ static void test_save_transfer(const fs::path& tmp) {
     write_bytes(sa / "data003Slot.bin", big);
     std::this_thread::sleep_for(milliseconds(2600));
     CHECK(read_bytes(sb / "data003Slot.bin") == b_single);   // Bob's own save untouched
-    CHECK(fs::exists(sb / "data001Slot.bin") && read_bytes(sb / "data001Slot.bin") == big);  // the co-op copy, first free slot
+    CHECK(fs::exists(sb / "data004Slot.bin") && read_bytes(sb / "data004Slot.bin") == big);  // the co-op copy, one past Bob's highest save (3)
     CHECK(!fs::exists(sb / "data000.bin"));                  // Alice's autosave was not sent and Bob has no autosave of it
     CoopManifest mb(cb.data_dir / "re7mp_coop_saves.json");
     mb.load();
-    CHECK(mb.entries().size() == 1 && mb.entries()[0].slot == 1 && mb.entries()[0].from == "Alice" &&
+    CHECK(mb.entries().size() == 1 && mb.entries()[0].slot == 4 && mb.entries()[0].from == "Alice" &&
           mb.entries()[0].label.rfind("CO-OP Alice ", 0) == 0);
     CHECK(mb.entries()[0].role == "received" && mb.entries()[0].partner == "Alice");
-    // ...and it says where the save came from and why it went there: Alice's slot 3 is a save of Bob's own here
-    CHECK(mb.entries()[0].from_slot == 3 && mb.entries()[0].why.find("holds a save of your own") != std::string::npos);
-    CHECK(b.status().last_save_event.find("installed in slot 1") != std::string::npos &&
-          b.status().last_save_event.find("holds a save of your own") != std::string::npos);
+    // ...and it says where the save came from and why it went there: one past the highest save Bob has
+    CHECK(mb.entries()[0].from_slot == 3 && mb.entries()[0].why.find("one past your highest save") != std::string::npos);
+    CHECK(b.status().last_save_event.find("installed in slot 4") != std::string::npos &&
+          b.status().last_save_event.find("one past your highest save") != std::string::npos);
     {   // The saver's own copy is marked too, with the name of the player it was shared with.
         CoopManifest ma(ca.data_dir / "re7mp_coop_saves.json");
         ma.load();
         CHECK(ma.entries().size() == 1 && ma.entries()[0].slot == 3 && ma.entries()[0].role == "sent" &&
               ma.entries()[0].partner == "Bob" && ma.is_coop_slot(3) && !ma.is_received_slot(3));
     }
-    CHECK(fs::exists(sa / "data003Slot.bin") && !fs::exists(sa / "data001Slot.bin"));  // nothing echoed back to Alice
+    CHECK(fs::exists(sa / "data003Slot.bin") && !fs::exists(sa / "data004Slot.bin"));  // nothing echoed back to Alice
     CHECK(b.status().saves_received == 1 && a.status().saves_sent == 1);
-    std::printf("  save sharing: Alice's slot 3 became Bob's slot 1 (%s)\n", mb.entries().empty() ? "?" : mb.entries()[0].label.c_str());
+    std::printf("  save sharing: Alice's slot 3 became Bob's slot 4 (%s)\n", mb.entries().empty() ? "?" : mb.entries()[0].label.c_str());
 
-    // A free slot on the other side keeps its number; rewriting it replaces the co-op copy.
+    // A second save goes one past the highest again (Bob has 3 and 4, so 5); sending the same save again replaces that copy.
     const auto s5 = random_bytes(50 * 1024, 5);
     write_bytes(sa / "data005Slot.bin", s5);
     std::this_thread::sleep_for(milliseconds(2000));
@@ -1259,8 +1265,8 @@ static void test_save_transfer(const fs::path& tmp) {
     const auto s7 = random_bytes(40 * 1024, 7);
     write_bytes(sb / "data007Slot.bin", s7);
     std::this_thread::sleep_for(milliseconds(2000));
-    CHECK(fs::exists(sa / "data007Slot.bin") && read_bytes(sa / "data007Slot.bin") == s7);
-    CHECK(!fs::exists(sa / "data001Slot.bin"));
+    CHECK(fs::exists(sa / "data006Slot.bin") && read_bytes(sa / "data006Slot.bin") == s7);  // one past Alice's highest (5)
+    CHECK(!fs::exists(sa / "data007Slot.bin") && !fs::exists(sa / "data001Slot.bin"));
 
     // A save made while the other player is not connected stays private.
     b.stop();
@@ -1282,7 +1288,7 @@ static void test_save_transfer(const fs::path& tmp) {
     const auto huge = random_bytes(3 * 1024 * 1024, 11);
     write_bytes(sa / "data011Slot.bin", huge);
     std::this_thread::sleep_for(milliseconds(4500));
-    CHECK(fs::exists(sb / "data011Slot.bin") && read_bytes(sb / "data011Slot.bin") == huge);
+    CHECK(fs::exists(sb / "data008Slot.bin") && read_bytes(sb / "data008Slot.bin") == huge);  // one past Bob's highest (7)
     std::this_thread::sleep_for(milliseconds(2500));
     {
         CoopManifest ma(ca.data_dir / "re7mp_coop_saves.json");
@@ -1319,16 +1325,16 @@ static void test_save_loopback_echo(const fs::path& tmp) {
     std::this_thread::sleep_for(milliseconds(500));
     const auto mine = random_bytes(100 * 1024, 3);
     write_bytes(saves / "data002Slot.bin", mine);
-    for (int i = 0; i < 100 && !(fs::exists(saves / "data001Slot.bin") && read_bytes(saves / "data001Slot.bin") == mine); ++i) {
+    for (int i = 0; i < 100 && !(fs::exists(saves / "data003Slot.bin") && read_bytes(saves / "data003Slot.bin") == mine); ++i) {
         std::this_thread::sleep_for(milliseconds(100));  // up to 10 s: a slow or busy machine is fine
     }
     std::this_thread::sleep_for(milliseconds(300));
-    CHECK(fs::exists(saves / "data001Slot.bin") && read_bytes(saves / "data001Slot.bin") == mine);
+    CHECK(fs::exists(saves / "data003Slot.bin") && read_bytes(saves / "data003Slot.bin") == mine);
     CoopManifest ml(cl.data_dir / "re7mp_coop_saves.json");
     ml.load();
-    CHECK(ml.entries().size() == 2);  // the copy in slot 1 from the bot, and your own slot 2, shared with the bot
+    CHECK(ml.entries().size() == 2);  // the copy in slot 3 from the bot (one past your highest), and your own slot 2, shared with the bot
     for (const auto& le : ml.entries()) {
-        if (le.slot == 1) CHECK(le.role == "received" && le.partner == "Loopback Bot" && le.label.rfind("CO-OP Loopback Bot ", 0) == 0);
+        if (le.slot == 3) CHECK(le.role == "received" && le.partner == "Loopback Bot" && le.label.rfind("CO-OP Loopback Bot ", 0) == 0);
         else CHECK(le.slot == 2 && le.role == "sent" && le.partner == "Loopback Bot");
     }
     l.stop();
