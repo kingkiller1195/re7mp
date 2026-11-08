@@ -2,7 +2,15 @@ This is the latest version available, I wish I could code this myself but unfort
 
 Installation:
 
-You need to have reframework installed into the re7 main folder and download and run the exe, you should be able to install the lua file by directing it to your re7 folder with reframework installed. Do a p2p connection from there, other features are being worked on which include the game models being loaded as character models and new game starting being synced. I suggest using tailscale to connect via a VPN and share IP's with one another.
+1. Have Tailscale or a similar VPN client that you can use to share IP's in a LAN.
+
+2. Install reframework into the game folder.
+
+3. Run the EXE file and press install Lua script
+
+4. Choose Network at the top of the window and choose whether to Host or join (only joiner has to put host ip:port).
+
+5. Press START and make sure the game is loaded and it should say the other players position and where they are, press new game and select whatever difficulty you wish
 
 Thank you to Setgent and my friend Andre for helping me test the early and unreleased versions of this mod!
 
