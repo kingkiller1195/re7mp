@@ -6,7 +6,7 @@ Installation:
 
 2. Install reframework into the game folder.
 
-3. Run the EXE file and press install Lua script
+3. Run the EXE file and press install Lua script (EXE might give blue prompt, just press more info and run anyway, this is because it is unsigned atm)
 
 4. Choose Network at the top of the window and choose whether to Host or join (only joiner has to put host ip:port).
 
