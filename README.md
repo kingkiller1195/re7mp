@@ -14,6 +14,8 @@ Installation:
 
 Thank you to Setgent and my friend Andre for helping me test the early and unreleased versions of this mod!
 
+The YT with the Devlogs: https://www.youtube.com/@expensiveswordvr8580
+
 Latest version of framework: https://github.com/praydog/REFramework
 
 Join the discord to report any bugs or suggest something! https://discord.gg/wFBxvrNeew
