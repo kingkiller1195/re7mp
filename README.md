@@ -2,6 +2,8 @@ This is the latest version available, I wish I could code this myself but unfort
 
 Installation:
 
+https://www.youtube.com/watch?v=3M1CG62zraA
+
 1. Have Tailscale or a similar VPN client like radmin that you can use to share IP's in a LAN.
 
 2. Install reframework into the game folder.
