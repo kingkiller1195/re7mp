@@ -32,4 +32,8 @@ struct InstallResult {
 // Writes <game>/reframework/autorun/re7mp.lua if it is missing or different.
 InstallResult install_lua(const std::filesystem::path& game_dir, const std::string& lua_text);
 
+// Writes <game>/reframework/data/re7mp/defaults.json if it is missing or different: the clips and settings a NEW install starts with
+// (the script reads it and never writes it; a player's own recordings and settings are other files and always win over it).
+InstallResult install_defaults(const std::filesystem::path& game_dir, const std::string& json_text);
+
 }  // namespace re7mp

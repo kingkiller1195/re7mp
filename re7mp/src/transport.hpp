@@ -30,7 +30,7 @@ public:
     }
 };
 
-// TCP: reliable and ordered (the only transport since 9.7). The host needs a reachable port (Tailscale, or a forwarded one).
+// TCP: reliable and ordered (the only transport since 9.7). The host needs a reachable port (a VPN such as Radmin VPN, or a forwarded one).
 // Messages are framed with a 2-byte length so datagram-style send/recv keep working. One side Hosts (listens),
 // the other Joins (connects, retrying every second and reconnecting if the link drops).
 class TcpTransport : public ITransport {

@@ -28,6 +28,8 @@
 #include <vector>
 
 #include "engine.hpp"
+#include "character.hpp"
+#include "story_sync.hpp"
 #include "game_locator.hpp"
 #include "http_win.hpp"
 #include "packet.hpp"
@@ -49,7 +51,8 @@ using namespace re7mp;
 
 namespace {
 
-constexpr int kLuaResourceId = 101;  // must match app.rc
+constexpr int kLuaResourceId = 101;       // must match app.rc
+constexpr int kDefaultsResourceId = 102;  // the built-in clips and settings (re7mp/defaults.json), see app.rc
 constexpr UINT_PTR kTimerId = 1;
 
 enum : int {
@@ -72,7 +75,7 @@ enum : int {
     IDC_NAME = 1017,
     IDC_TR_HOST = 1019,  // IDC_TR_HOST, IDC_TR_JOIN must stay consecutive (radio group); 1018 was the UDP radio, removed in 9.7
     IDC_TR_JOIN = 1020,
-    IDC_BOT_ORBIT = 1021,  // IDC_BOT_ORBIT and IDC_BOT_STAT must stay consecutive
+    IDC_BOT_ORBIT = 1021,  // the three bot radios (orbit, stat, follow) are one group because they are created one after the other
     IDC_BOT_STAT = 1022,
     IDC_BOT_TELE = 1023,
     IDC_OPEN_DATA = 1024,
@@ -85,6 +88,9 @@ enum : int {
     IDC_REFW_ST = 1031,
     IDC_REFW_BTN = 1032,
     IDC_UPD_AUTO = 1033,
+    IDC_PLAYAS = 1034,  // 9.31: the "Play as" drop-down
+    IDC_STORY = 1035,   // 9.33: the "Sync story cutscenes (experimental)" box
+    IDC_BOT_FOLLOW = 1036,  // 9.37: the loopback bot walks after you
 };
 
 struct App {
@@ -94,6 +100,7 @@ struct App {
     HWND savedir = nullptr, st_save = nullptr;
     HWND upd_st = nullptr, refw_st = nullptr;
     HWND lbl_peer = nullptr;
+    HWND playas = nullptr;  // 9.31: character drop-down
     HWND st_hook = nullptr, st_peer = nullptr, st_local = nullptr, st_remote = nullptr, st_pkts = nullptr;
     HFONT font = nullptr;
     int dpi = 96;
@@ -166,7 +173,23 @@ Transport selected_transport() {
 }
 
 BotMode selected_bot_mode() {
+    if (IsDlgButtonChecked(g.hwnd, IDC_BOT_FOLLOW) == BST_CHECKED) return BotMode::Follow;  // 9.37
     return IsDlgButtonChecked(g.hwnd, IDC_BOT_STAT) == BST_CHECKED ? BotMode::Stationary : BotMode::Orbit;
+}
+
+// 9.37: ticks exactly one of the three bot radios (CheckRadioButton wants consecutive ids, and the follow radio's id is not next to the others)
+void check_bot_radio(BotMode m) {
+    CheckDlgButton(g.hwnd, IDC_BOT_ORBIT, m == BotMode::Orbit ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g.hwnd, IDC_BOT_STAT, m == BotMode::Stationary ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g.hwnd, IDC_BOT_FOLLOW, m == BotMode::Follow ? BST_CHECKED : BST_UNCHECKED);
+}
+
+
+// 9.31: the character picked in the "Play as" drop-down ("auto", "ethan", "mia", "clancy").
+std::string selected_character() {
+    const LRESULT i = SendMessageW(g.playas, CB_GETCURSEL, 0, 0);
+    const auto& list = character_choices();
+    return (i >= 0 && static_cast<size_t>(i) < list.size()) ? list[static_cast<size_t>(i)].key : "auto";
 }
 
 void save_ini() {
@@ -183,8 +206,13 @@ void save_ini() {
                                IsDlgButtonChecked(g.hwnd, IDC_UPD_AUTO) == BST_CHECKED ? L"1" : L"0", p.c_str());
     const Transport tr = selected_transport();
     WritePrivateProfileStringW(L"re7mp", L"transport", tr == Transport::TcpJoin ? L"tcp-join" : L"tcp-host", p.c_str());
-    WritePrivateProfileStringW(L"re7mp", L"bot", selected_bot_mode() == BotMode::Stationary ? L"stationary" : L"orbit",
-                               p.c_str());
+    {
+        const BotMode bm = selected_bot_mode();
+        WritePrivateProfileStringW(L"re7mp", L"bot", bm == BotMode::Stationary ? L"stationary" : (bm == BotMode::Follow ? L"follow" : L"orbit"),
+                                   p.c_str());
+    }
+    WritePrivateProfileStringW(L"re7mp", L"play_as", widen(selected_character()).c_str(), p.c_str());
+    WritePrivateProfileStringW(L"re7mp", L"story_sync", IsDlgButtonChecked(g.hwnd, IDC_STORY) == BST_CHECKED ? L"1" : L"0", p.c_str());
 }
 
 void load_ini() {
@@ -212,7 +240,15 @@ void load_ini() {
     // an old re7mp.ini may still say "udp": that choice is gone, so it becomes "I host"
     CheckRadioButton(g.hwnd, IDC_TR_HOST, IDC_TR_JOIN, lstrcmpiW(buf, L"tcp-join") == 0 ? IDC_TR_JOIN : IDC_TR_HOST);
     GetPrivateProfileStringW(L"re7mp", L"bot", L"orbit", buf, 1024, p.c_str());
-    CheckRadioButton(g.hwnd, IDC_BOT_ORBIT, IDC_BOT_STAT, lstrcmpiW(buf, L"stationary") == 0 ? IDC_BOT_STAT : IDC_BOT_ORBIT);
+    check_bot_radio(lstrcmpiW(buf, L"stationary") == 0 ? BotMode::Stationary : (lstrcmpiW(buf, L"follow") == 0 ? BotMode::Follow : BotMode::Orbit));
+    GetPrivateProfileStringW(L"re7mp", L"play_as", L"auto", buf, 1024, p.c_str());
+    {
+        const int idx = character_index(narrow(buf));  // an unknown word in the ini means "auto"
+        SendMessageW(g.playas, CB_SETCURSEL, static_cast<WPARAM>(idx < 0 ? 0 : idx), 0);
+    }
+    // 9.33: experimental, so it starts OFF; only an ini that says "1" turns it on
+    GetPrivateProfileStringW(L"re7mp", L"story_sync", L"0", buf, 1024, p.c_str());
+    CheckDlgButton(g.hwnd, IDC_STORY, lstrcmpiW(buf, L"1") == 0 ? BST_CHECKED : BST_UNCHECKED);
 }
 
 // ---------------------------------------------------------------- finding the game
@@ -254,7 +290,20 @@ std::optional<fs::path> find_re7_via_steam() {
     return std::nullopt;
 }
 
-std::optional<fs::path> find_save_dir_via_steam() {
+// (9.42) The Steam account that is signed in right now: a registry value Steam keeps up to date (0 when Steam is not running or nobody is
+// signed in). A plain read; nothing is sent to Steam and nothing of Steam's is changed.
+uint32_t steam_active_user() {
+    DWORD v = 0;
+    DWORD size = sizeof(v);  // bytes
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam\\ActiveProcess", L"ActiveUser", RRF_RT_REG_DWORD, nullptr, &v,
+                     &size) == ERROR_SUCCESS) {
+        return static_cast<uint32_t>(v);
+    }
+    return 0;
+}
+
+// The RE7 save folder of the account Steam is signed in as (else the last one that signed in, else the one with the newest save).
+SaveDirChoice choose_save_dir_via_steam() {
     std::vector<fs::path> roots;
     wchar_t buf[MAX_PATH * 2];
     DWORD size = sizeof(buf);  // bytes
@@ -263,21 +312,40 @@ std::optional<fs::path> find_save_dir_via_steam() {
         roots.emplace_back(std::wstring(buf));
     }
     roots.emplace_back(L"C:\\Program Files (x86)\\Steam");
+    const uint32_t active = steam_active_user();
+    SaveDirChoice first_miss;
     for (const auto& r : roots) {
-        const auto dirs = find_save_dirs(r);
-        if (!dirs.empty()) return dirs.front();
+        SaveDirChoice c = choose_save_dir(r, active);
+        if (c.how != DirHow::None) return c;
+        if (first_miss.why.empty()) first_miss = c;
     }
-    return std::nullopt;
+    return first_miss;
 }
 
+std::string g_save_dir_why;  // why the last detection found nothing (shown when save sharing starts off)
+
 bool detect_save_dir(bool quiet) {
-    if (auto p = find_save_dir_via_steam()) {
-        SetWindowTextW(g.savedir, p->wstring().c_str());
-        log_line("Found your save folder: " + p->u8string());
+    const SaveDirChoice c = choose_save_dir_via_steam();
+    if (c.how != DirHow::None) {
+        g_save_dir_why.clear();
+        SetWindowTextW(g.savedir, c.dir.wstring().c_str());
+        log_line("Found your save folder: " + c.dir.u8string());
+        log_line("  Steam account " + std::to_string(c.account) + ": " + c.why + ".");
         return true;
     }
-    if (!quiet) log_line("Could not find the save folder (...\\userdata\\<id>\\418370\\remote\\win64_save). Type it in.");
+    g_save_dir_why = c.why;
+    if (!quiet) log_line("Could not find the save folder (...\\userdata\\<id>\\418370\\remote\\win64_save): " + c.why + ". You can type it in.");
     return false;
+}
+
+// RE7 loads saves from the Steam account that is signed in. If the folder in the box (kept from an earlier run in re7mp.ini, or found before
+// Steam switched accounts) is another account's userdata folder, replace it. A path that is not a userdata folder is never touched.
+void fix_save_dir_for_active_account() {
+    const SaveDirChoice c = choose_save_dir_via_steam();
+    const DirCorrection fix = correct_save_dir(fs::path(get_text(g.savedir)), c);
+    if (!fix.change) return;
+    SetWindowTextW(g.savedir, c.dir.wstring().c_str());
+    log_line("Save folder: " + fix.why + ": " + c.dir.u8string());
 }
 
 bool detect_game(bool quiet) {
@@ -309,8 +377,8 @@ void browse_game() {
 
 // ---------------------------------------------------------------- Lua script install
 
-std::string load_lua_resource() {
-    HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(kLuaResourceId), RT_RCDATA);
+std::string load_resource(int id) {
+    HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(id), RT_RCDATA);
     if (!res) return {};
     HGLOBAL mem = LoadResource(nullptr, res);
     if (!mem) return {};
@@ -319,6 +387,7 @@ std::string load_lua_resource() {
     if (!data) return {};
     return std::string(data, size);
 }
+std::string load_lua_resource() { return load_resource(kLuaResourceId); }
 
 bool game_dir_ok(fs::path& out) {
     const std::wstring t = get_text(g.gamedir);
@@ -326,6 +395,43 @@ bool game_dir_ok(fs::path& out) {
     if (t.empty() || !fs::is_directory(fs::path(t), ec)) return false;
     out = fs::path(t);
     return true;
+}
+
+// Writes the choice for the script (re7mp_char.json) when a game folder is picked; tells the log what happened. quiet: no line when nothing changed.
+void apply_character(bool quiet) {
+    fs::path game;
+    if (!game_dir_ok(game)) {
+        if (!quiet) log_line("Pick your RE7 folder first; the character is written when you press Start.");
+        return;
+    }
+    const std::string key = selected_character();
+    bool wrote = false;
+    if (!sync_character_choice(data_dir_for(game), key, &wrote)) {
+        log_line("Play as: could not write " + std::string("re7mp_char.json") + " into the game's data folder.");
+    } else if (wrote || !quiet) {
+        const int i = character_index(key);
+        log_line(std::string("Play as: ") + (i >= 0 ? character_choices()[static_cast<size_t>(i)].label : key.c_str()) +
+                 (wrote ? " (the script in the game picks it up within a couple of seconds)." : " (already set)."));
+    }
+}
+
+// 9.33: writes the "Sync story cutscenes" box for the script (re7mp_story.json) when a game folder is picked; tells the log what happened.
+// quiet: no line when nothing changed. (The window code can't be built where this was written; the file it writes (story_sync.hpp) is tested.)
+void apply_story_sync(bool quiet) {
+    fs::path game;
+    if (!game_dir_ok(game)) {
+        if (!quiet) log_line("Pick your RE7 folder first; the story sync box is written when you press Start.");
+        return;
+    }
+    const bool on = IsDlgButtonChecked(g.hwnd, IDC_STORY) == BST_CHECKED;
+    bool wrote = false;
+    if (!sync_story_sync(data_dir_for(game), on, &wrote)) {
+        log_line("Sync story cutscenes: could not write re7mp_story.json into the game's data folder.");
+    } else if (wrote || !quiet) {
+        log_line(std::string("Sync story cutscenes (experimental): ") + (on ? "ON" : "off") +
+                 (wrote ? " (the script in the game picks it up within a couple of seconds)." : " (already set).") +
+                 (on ? " Both players need it ticked: whoever starts a cutscene brings the other one there and plays it for them too." : ""));
+    }
 }
 
 void start_refw_install(bool replace);
@@ -350,6 +456,15 @@ bool install_script(const fs::path& game) {
     }
     const InstallResult r = install_lua(game, lua);
     log_line(r.message);
+    // The clips and settings a new install starts with (without them the other player's body stands in a T pose). Not an error when
+    // this exe was built without them: the script then simply has no built-in clips.
+    const std::string defaults = load_resource(kDefaultsResourceId);
+    if (!defaults.empty()) {
+        const InstallResult d = install_defaults(game, defaults);
+        log_line(d.message);
+    } else {
+        log_line("This exe has no built-in clips (defaults.json). Copy data\\re7mp\\defaults.json to reframework\\data\\re7mp manually, or the other player's body stays in a T pose.");
+    }
     return r.ok;
 }
 
@@ -377,6 +492,7 @@ void update_enabled() {
     // The loopback bot can be changed while it runs.
     EnableWindow(GetDlgItem(g.hwnd, IDC_BOT_ORBIT), !net);
     EnableWindow(GetDlgItem(g.hwnd, IDC_BOT_STAT), !net);
+    EnableWindow(GetDlgItem(g.hwnd, IDC_BOT_FOLLOW), !net);
     EnableWindow(GetDlgItem(g.hwnd, IDC_BOT_TELE), !net && g.ui_running);
     SetWindowTextW(g.start, g.ui_running ? L"Stop" : L"Start");
 }
@@ -408,6 +524,7 @@ void do_start() {
         MessageBoxW(g.hwnd, L"The port must be between 1 and 65534.", L"RE7 Multiplayer", MB_ICONINFORMATION);
         return;
     }
+    fix_save_dir_for_active_account();  // Steam may have switched accounts since this window opened
     Config cfg;
     cfg.data_dir = data_dir_for(game);
     cfg.listen_port = static_cast<uint16_t>(port);
@@ -428,6 +545,8 @@ void do_start() {
     }
 
     install_script(game);
+    apply_character(true);  // 9.31: the file the script reads says what "Play as" shows
+    apply_story_sync(true); // 9.33: ...and whether story sync is on
 
     std::string err;
     if (!g.engine.start(cfg, err)) {
@@ -807,7 +926,7 @@ void create_controls() {
     make(L"STATIC", L"Connection:", 0, 0, 12, 84, 80, 20, -1);
     make(L"BUTTON", L"TCP: I host", BS_AUTORADIOBUTTON | WS_GROUP | tab, 0, 96, 82, 100, 22, IDC_TR_HOST);
     make(L"BUTTON", L"TCP: I join", BS_AUTORADIOBUTTON, 0, 202, 82, 100, 22, IDC_TR_JOIN);
-    make(L"STATIC", L"(e.g. a Tailscale address)", 0, 0, 310, 86, 258, 20, -1);
+    make(L"STATIC", L"(e.g. a Radmin VPN address)", 0, 0, 310, 86, 258, 20, -1);
 
     make(L"STATIC", L"Port:", 0, 0, 12, 118, 84, 20, -1);
     g.port = make(L"EDIT", L"27015", ES_AUTOHSCROLL | ES_NUMBER | tab, WS_EX_CLIENTEDGE, 96, 114, 70, 24, IDC_PORT);
@@ -824,37 +943,49 @@ void create_controls() {
     make(L"BUTTON", L"Detect", BS_PUSHBUTTON | tab, 0, 346, 185, 70, 26, IDC_SAVE_DETECT);
     make(L"BUTTON", L"Share saves", BS_AUTOCHECKBOX | tab, 0, 424, 188, 144, 22, IDC_SAVE_SHARE);
 
-    make(L"STATIC", L"Loopback bot:", 0, 0, 12, 226, 84, 20, -1);
-    make(L"BUTTON", L"Orbits you", BS_AUTORADIOBUTTON | WS_GROUP | tab, 0, 96, 224, 100, 22, IDC_BOT_ORBIT);
-    make(L"BUTTON", L"Stays put", BS_AUTORADIOBUTTON, 0, 206, 224, 100, 22, IDC_BOT_STAT);
-    make(L"BUTTON", L"Move bot to me", BS_PUSHBUTTON | tab, 0, 316, 222, 140, 26, IDC_BOT_TELE);
+    // 9.33: story sync (EXPERIMENTAL): one box for story sync, FORCE and both moves; written to re7mp_story.json for the script. Starts off.
+    make(L"BUTTON", L"Sync story cutscenes (experimental): a cutscene plays for both of you", BS_AUTOCHECKBOX | tab, 0, 96, 212, 472, 22, IDC_STORY);
 
-    g.start = make(L"BUTTON", L"Start", BS_DEFPUSHBUTTON | tab, 0, 12, 262, 120, 32, IDC_START);
-    make(L"BUTTON", L"Install Lua script", BS_PUSHBUTTON | tab, 0, 140, 262, 150, 32, IDC_INSTALL);
-    make(L"BUTTON", L"Open data folder", BS_PUSHBUTTON | tab, 0, 298, 262, 150, 32, IDC_OPEN_DATA);
+    make(L"STATIC", L"Loopback bot:", 0, 0, 12, 252, 84, 20, -1);
+    make(L"BUTTON", L"Orbits you", BS_AUTORADIOBUTTON | WS_GROUP | tab, 0, 96, 250, 86, 22, IDC_BOT_ORBIT);
+    make(L"BUTTON", L"Stays put", BS_AUTORADIOBUTTON, 0, 184, 250, 84, 22, IDC_BOT_STAT);
+    make(L"BUTTON", L"Follows you", BS_AUTORADIOBUTTON, 0, 270, 250, 98, 22, IDC_BOT_FOLLOW);  // 9.37
+    make(L"BUTTON", L"Move bot to me", BS_PUSHBUTTON | tab, 0, 376, 248, 140, 26, IDC_BOT_TELE);
 
-    make(L"STATIC", L"Game hook:", 0, 0, 12, 310, 90, 20, -1);
-    g.st_hook = make(L"STATIC", L"Not running", 0, 0, 110, 310, 458, 20, IDC_ST_HOOK);
-    make(L"STATIC", L"Other player:", 0, 0, 12, 334, 90, 20, -1);
-    g.st_peer = make(L"STATIC", L"-", 0, 0, 110, 334, 458, 20, IDC_ST_PEER);
-    make(L"STATIC", L"Your position:", 0, 0, 12, 358, 90, 20, -1);
-    g.st_local = make(L"STATIC", L"-", 0, 0, 110, 358, 458, 20, IDC_ST_LOCAL);
-    make(L"STATIC", L"Their position:", 0, 0, 12, 382, 90, 20, -1);
-    g.st_remote = make(L"STATIC", L"-", 0, 0, 110, 382, 458, 20, IDC_ST_REMOTE);
-    make(L"STATIC", L"Packets:", 0, 0, 12, 406, 90, 20, -1);
-    g.st_pkts = make(L"STATIC", L"-", 0, 0, 110, 406, 458, 20, IDC_ST_PKTS);
-    make(L"STATIC", L"Co-op saves:", 0, 0, 12, 430, 90, 20, -1);
-    g.st_save = make(L"STATIC", L"-", 0, 0, 110, 430, 458, 20, IDC_ST_SAVE);
+    // 9.31: which character this player is shown as to the other player (re7mp_char.json, read by the script). Unbuilt/untested in the real
+    // game: the window code cannot be compiled where this was written; the file writing it uses (character.hpp) is tested.
+    make(L"STATIC", L"Play as:", 0, 0, 12, 290, 80, 20, -1);
+    g.playas = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | tab, 0, 96, 286, 250, 160, IDC_PLAYAS);
+    for (const auto& c : character_choices()) SendMessageW(g.playas, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(widen(c.label).c_str()));
+    SendMessageW(g.playas, CB_SETCURSEL, 0, 0);
+    make(L"STATIC", L"(the other player sees you as this)", 0, 0, 354, 290, 214, 20, -1);
 
-    make(L"STATIC", L"Updates:", 0, 0, 12, 458, 90, 20, -1);
-    g.upd_st = make(L"STATIC", L"Not checked yet.", 0, 0, 110, 458, 340, 20, IDC_UPD_ST);
-    make(L"BUTTON", L"Check now", BS_PUSHBUTTON | tab, 0, 456, 454, 112, 26, IDC_UPD_BTN);
-    make(L"STATIC", L"REFramework:", 0, 0, 12, 486, 94, 20, -1);
-    g.refw_st = make(L"STATIC", L"-", 0, 0, 110, 486, 340, 20, IDC_REFW_ST);
-    make(L"BUTTON", L"Install", BS_PUSHBUTTON | tab, 0, 456, 482, 112, 26, IDC_REFW_BTN);
-    make(L"BUTTON", L"Check for updates when this opens", BS_AUTOCHECKBOX | tab, 0, 110, 512, 300, 22, IDC_UPD_AUTO);
+    g.start = make(L"BUTTON", L"Start", BS_DEFPUSHBUTTON | tab, 0, 12, 322, 120, 32, IDC_START);
+    make(L"BUTTON", L"Install Lua script", BS_PUSHBUTTON | tab, 0, 140, 322, 150, 32, IDC_INSTALL);
+    make(L"BUTTON", L"Open data folder", BS_PUSHBUTTON | tab, 0, 298, 322, 150, 32, IDC_OPEN_DATA);
 
-    g.log = make(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, WS_EX_CLIENTEDGE, 12, 542, 556,
+    make(L"STATIC", L"Game hook:", 0, 0, 12, 370, 90, 20, -1);
+    g.st_hook = make(L"STATIC", L"Not running", 0, 0, 110, 370, 458, 20, IDC_ST_HOOK);
+    make(L"STATIC", L"Other player:", 0, 0, 12, 394, 90, 20, -1);
+    g.st_peer = make(L"STATIC", L"-", 0, 0, 110, 394, 458, 20, IDC_ST_PEER);
+    make(L"STATIC", L"Your position:", 0, 0, 12, 418, 90, 20, -1);
+    g.st_local = make(L"STATIC", L"-", 0, 0, 110, 418, 458, 20, IDC_ST_LOCAL);
+    make(L"STATIC", L"Their position:", 0, 0, 12, 442, 90, 20, -1);
+    g.st_remote = make(L"STATIC", L"-", 0, 0, 110, 442, 458, 20, IDC_ST_REMOTE);
+    make(L"STATIC", L"Packets:", 0, 0, 12, 466, 90, 20, -1);
+    g.st_pkts = make(L"STATIC", L"-", 0, 0, 110, 466, 458, 20, IDC_ST_PKTS);
+    make(L"STATIC", L"Co-op saves:", 0, 0, 12, 490, 90, 20, -1);
+    g.st_save = make(L"STATIC", L"-", 0, 0, 110, 490, 458, 20, IDC_ST_SAVE);
+
+    make(L"STATIC", L"Updates:", 0, 0, 12, 518, 90, 20, -1);
+    g.upd_st = make(L"STATIC", L"Not checked yet.", 0, 0, 110, 518, 340, 20, IDC_UPD_ST);
+    make(L"BUTTON", L"Check now", BS_PUSHBUTTON | tab, 0, 456, 514, 112, 26, IDC_UPD_BTN);
+    make(L"STATIC", L"REFramework:", 0, 0, 12, 546, 94, 20, -1);
+    g.refw_st = make(L"STATIC", L"-", 0, 0, 110, 546, 340, 20, IDC_REFW_ST);
+    make(L"BUTTON", L"Install", BS_PUSHBUTTON | tab, 0, 456, 542, 112, 26, IDC_REFW_BTN);
+    make(L"BUTTON", L"Check for updates when this opens", BS_AUTOCHECKBOX | tab, 0, 110, 572, 300, 22, IDC_UPD_AUTO);
+
+    g.log = make(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, WS_EX_CLIENTEDGE, 12, 602, 556,
                  150, IDC_LOG);
     SendMessageW(g.log, EM_SETLIMITTEXT, 200000, 0);
 
@@ -869,10 +1000,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             load_ini();
             fs::path existing;
             if (!game_dir_ok(existing)) detect_game(true);
+            fix_save_dir_for_active_account();
             if (get_text(g.savedir).empty()) detect_save_dir(true);
             if (get_text(g.savedir).empty()) {  // no Steam save folder found: nothing to share, so it starts off
                 CheckDlgButton(g.hwnd, IDC_SAVE_SHARE, BST_UNCHECKED);
-                log_line("Save sharing is off: no Steam save folder was found (tick it after typing or detecting the folder).");
+                log_line("Save sharing is off: no Steam save folder was found" + (g_save_dir_why.empty() ? std::string() : " (" + g_save_dir_why + ")") +
+                         " (tick it after typing or detecting the folder).");
             }
             fs::path game;
             if (game_dir_ok(game)) {
@@ -912,10 +1045,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_TR_JOIN: update_enabled(); break;
                 case IDC_BOT_ORBIT:
                 case IDC_BOT_STAT:
+                case IDC_BOT_FOLLOW:
                     if (g.ui_running) g.engine.set_bot_mode(selected_bot_mode());
                     break;
                 case IDC_BOT_TELE:
                     if (g.ui_running) g.engine.teleport_bot_here();
+                    break;
+                case IDC_PLAYAS:
+                    if (HIWORD(wp) == CBN_SELCHANGE) {
+                        apply_character(false);
+                        save_ini();
+                    }
+                    break;
+                case IDC_STORY:
+                    apply_story_sync(false);
+                    save_ini();
                     break;
                 case IDC_NAME:
                     if (HIWORD(wp) == EN_CHANGE && g.ui_running) g.engine.set_name(narrow(get_text(g.name)));
@@ -923,13 +1067,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_SAVE_DETECT: detect_save_dir(false); break;
                 case IDC_UPD_BTN: on_update_button(); break;
                 case IDC_REFW_BTN: on_refw_button(); break;
-                case IDC_OPEN_DATA: {  // where re7mp_debug.json (the file to send to the developer) lives
+                case IDC_OPEN_DATA: {  // where debug.json (the file to send to the developer) lives
                     fs::path game;
                     if (game_dir_ok(game)) {
                         const fs::path data = data_dir_for(game);
                         std::error_code ec;
                         fs::create_directories(data, ec);
-                        ShellExecuteW(g.hwnd, L"open", data.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                        // 9.30: the script's own files (debug.json, settings.json ...) are in the re7mp folder inside it, once the game has made it
+                        fs::path show = data / "re7mp";
+                        if (!fs::is_directory(show, ec)) show = data;
+                        ShellExecuteW(g.hwnd, L"open", show.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                     } else {
                         log_line("Pick your RE7 folder first.");
                     }
@@ -1005,7 +1152,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int show) {
     RegisterClassExW(&wc);
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT r{0, 0, S(580), S(704)};
+    RECT r{0, 0, S(580), S(764)};
     AdjustWindowRectEx(&r, style, FALSE, 0);
     const std::wstring title = L"RE7 Multiplayer v" + widen(kReleaseVersion);
     HWND hwnd = CreateWindowExW(0, L"RE7MPWindow", title.c_str(), style, CW_USEDEFAULT, CW_USEDEFAULT,

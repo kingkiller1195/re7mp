@@ -14,11 +14,14 @@
 
 #include "bot_logic.hpp"
 #include "bridge.hpp"
+#include "character.hpp"
 #include "engine.hpp"
 #include "game_locator.hpp"
 #include "json_mini.hpp"
 #include "packet.hpp"
+#include "save_resign.hpp"
 #include "save_sync.hpp"
+#include "story_sync.hpp"
 #include "updater.hpp"
 #include "version.hpp"
 #include "zip_extract.hpp"
@@ -156,6 +159,24 @@ static void test_install(const fs::path& tmp) {
     auto r3 = install_lua(game, "-- v2\n");
     CHECK(r3.ok && r3.changed);
     CHECK(read_text(game / "reframework" / "autorun" / "re7mp.lua") == "-- v2\n");
+    // The built-in clips and settings: written to reframework/data/re7mp/defaults.json, replaced when the release has a newer one, left alone when equal.
+    auto d1 = install_defaults(game, "{\"format\":1,\"clips\":{}}");
+    CHECK(d1.ok && d1.changed);
+    CHECK(read_text(game / "reframework" / "data" / "re7mp" / "defaults.json") == "{\"format\":1,\"clips\":{}}");
+    auto d2 = install_defaults(game, "{\"format\":1,\"clips\":{}}");
+    CHECK(d2.ok && !d2.changed);
+    auto d3 = install_defaults(game, "{\"format\":1,\"clips\":{\"idle\":{}}}");
+    CHECK(d3.ok && d3.changed && d3.message.find("Updated") == 0);
+    CHECK(read_text(game / "reframework" / "data" / "re7mp" / "defaults.json") == "{\"format\":1,\"clips\":{\"idle\":{}}}");
+    // the player's own files next to it are never touched
+    write_text(game / "reframework" / "data" / "re7mp" / "clips" / "idle.json", "mine");
+    write_text(game / "reframework" / "data" / "re7mp_settings.json", "mine too");
+    install_defaults(game, "{\"format\":1}");
+    CHECK(read_text(game / "reframework" / "data" / "re7mp" / "clips" / "idle.json") == "mine");
+    CHECK(read_text(game / "reframework" / "data" / "re7mp_settings.json") == "mine too");
+    // and the script install still works after the refactor, with the folder missing
+    const fs::path game2 = tmp / "game2";
+    CHECK(install_lua(game2 / "nope" / "x", "a").ok);
 }
 
 static void test_bridge(const fs::path& tmp) {
@@ -444,8 +465,38 @@ static void test_bot_logic_units() {
     CHECK(bot_health_text(true) == "h|1|1000|1" && bot_health_text(false) == "h|1000|1000|0");
     CHECK(bot_command("down") == 1 && bot_command("up") == 0 && bot_command("sideways") == -1 && bot_command("") == -1);
     CHECK(std::fabs(bot_distance(0, 0, 0, 3, 4, 0) - 5.0) < 1e-9);
+    // (9.33) the bot can say which character it is: "char:ethan|mia|clancy" sets it, "char:none" takes it back, nothing else counts
+    {
+        std::string ck = "stale";
+        CHECK(bot_character_command("char:clancy", ck) == 1 && ck == "clancy");
+        CHECK(bot_character_command("char:pete", ck) == 1 && ck == "pete" && bot_character_command("char:andre", ck) == 1 && ck == "andre");  // 9.37
+        CHECK(bot_character_command("char:mia", ck) == 1 && ck == "mia");
+        CHECK(bot_character_command("char:ethan", ck) == 1 && ck == "ethan");
+        CHECK(bot_character_command("char:none", ck) == 2 && ck.empty());
+        CHECK(bot_character_command("char:", ck) == 0 && ck.empty());
+        CHECK(bot_character_command("char:jack", ck) == 0 && ck.empty());
+        CHECK(bot_character_command("char:Clancy", ck) == 0);
+        CHECK(bot_character_command("down", ck) == 0 && bot_character_command("up", ck) == 0 && bot_character_command("", ck) == 0);
+        CHECK(bot_character_command("char:clancy|x", ck) == 0 && bot_character_command("xchar:clancy", ck) == 0);
+        CHECK(bot_command("char:clancy") == -1 && bot_command("char:none") == -1);  // a character command is not a down / up command
+        CHECK(bot_character_text("clancy", 1.0, 2.5, -3.0) == "e|char|clancy|1.00|2.50|-3.00");
+        BotEvent ce;
+        CHECK(bot_parse_event(bot_character_text("mia", 0.0, 0.0, 0.0), ce) && ce.kind == "char" && ce.arg == "mia" && !bot_is_healing(ce) && bot_ff_damage(ce) == 0);
+    }
     // the script's revive radius is 3 m since 9.14; the bot allows the same slack (x1.25) the script does
     CHECK(kBotReviveRadius == 3.75 && bot_heal_reaches(3.0) && bot_heal_reaches(3.75) && !bot_heal_reaches(3.76) && !bot_heal_reaches(5.0));
+    // (9.33) friendly fire on the bot: the damage of an "ff" event (1..600), what is left, and the health report
+    CHECK(bot_parse_event("e|ff|100|1.00|2.00|3.00", e) && e.kind == "ff" && bot_ff_damage(e) == 100 && !bot_is_healing(e));
+    CHECK(bot_parse_event("e|ff|1|0|0|0", e) && bot_ff_damage(e) == 1);
+    CHECK(bot_parse_event("e|ff|600|0|0|0", e) && bot_ff_damage(e) == 600);
+    CHECK(bot_parse_event("e|ff|601|0|0|0", e) && bot_ff_damage(e) == 0);
+    CHECK(bot_parse_event("e|ff|0|0|0|0", e) && bot_ff_damage(e) == 0);
+    CHECK(bot_parse_event("e|ff|abc|0|0|0", e) && bot_ff_damage(e) == 0);
+    CHECK(bot_parse_event("e|ff||0|0|0", e) && bot_ff_damage(e) == 0);
+    CHECK(bot_parse_event("e|heal|100|0|0|0", e) && bot_ff_damage(e) == 0);  // only an "ff" event is a hit
+    CHECK(bot_apply_damage(1000, 100) == 900 && bot_apply_damage(900, 899) == 1 && bot_apply_damage(900, 900) == 1 &&
+          bot_apply_damage(5, 600) == 1 && bot_apply_damage(1, 1) == 1);
+    CHECK(bot_health_text_hp(900) == "h|900|1000|0" && bot_health_text_hp(1000) == bot_health_text(false));
 }
 
 static bool any_with_prefix(const std::vector<std::string>& v, const std::string& prefix) {
@@ -521,6 +572,260 @@ static void test_bot_gifts_and_down(const fs::path& tmp) {
     write_msgs(dir, sent);
     std::this_thread::sleep_for(milliseconds(500));
     CHECK(count_with_prefix(inbox_payloads(dir, 7), "e|up||") == 2);
+    g.join();
+    e.stop();
+}
+
+// (9.33) the loopback bot takes friendly fire: each hit takes health off and is reported at once; at 1 it goes down; a heal next to it gets it up
+static void test_bot_friendly_fire(const fs::path& tmp) {
+    const fs::path dir = tmp / "bot933ff";
+    Engine e;
+    Config cfg;
+    cfg.data_dir = dir;
+    cfg.mode = Mode::Loopback;
+    cfg.transport = Transport::TcpHost;
+    cfg.listen_port = 28985;
+    cfg.name = "Tester";
+    std::string err;
+    CHECK(e.start(cfg, err));
+    fs::create_directories(dir);
+    std::thread g([&] { fake_game(dir, 100.0, 200.0, 9000); });
+    std::this_thread::sleep_for(milliseconds(900));
+    auto bot_at = [&](double& x, double& y, double& z) {
+        const std::string t = read_text(dir / "re7mp_in.json");
+        return json_num(t, "x", x) && json_num(t, "y", y) && json_num(t, "z", z);
+    };
+    MsgList sent = {{1, 7, "e|ff|100|0.00|0.00|0.00"}};
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(600));
+    auto health = inbox_payloads(dir, 7);
+    CHECK(any_with_prefix(health, "h|900|1000|0"));
+    // damaged or out-of-range numbers do nothing
+    sent.push_back({2, 7, "e|ff|0|0.00|0.00|0.00"});
+    sent.push_back({3, 7, "e|ff|601|0.00|0.00|0.00"});
+    sent.push_back({4, 7, "e|ff|abc|0.00|0.00|0.00"});
+    sent.push_back({5, 7, "e|ff|250|0.00|0.00|0.00"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(600));
+    health = inbox_payloads(dir, 7);
+    CHECK(any_with_prefix(health, "h|650|1000|0") && !any_with_prefix(health, "h|900|1000|0|x"));
+    CHECK(count_with_prefix(health, "h|650|1000|0") == 1);
+    CHECK(!any_with_prefix(health, "e|down||"));
+    // "up" heals a bot that was shot but is standing
+    sent.push_back({6, 11, "up"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(500));
+    health = inbox_payloads(dir, 7);
+    CHECK(any_with_prefix(health, "h|1000|1000|0") && !any_with_prefix(health, "e|up||"));
+    // a hit that would take everything leaves 1 and puts it down, where it stands
+    sent.push_back({7, 7, "e|ff|600|0.00|0.00|0.00"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(300));
+    sent.push_back({8, 7, "e|ff|600|0.00|0.00|0.00"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(700));
+    health = inbox_payloads(dir, 7);
+    CHECK(count_with_prefix(health, "e|down||") == 1 && any_with_prefix(health, "h|1|1000|1"));
+    double x1 = 0, y1 = 0, z1 = 0, x2 = 0, y2 = 0, z2 = 0;
+    CHECK(bot_at(x1, y1, z1));
+    // a hit while down changes nothing: no second "down", no new health number (the earlier ones are still in the ring,
+    // each once), and the last report is still "1 of 1000, down"
+    sent.push_back({9, 7, "e|ff|100|0.00|0.00|0.00"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(600));
+    health = inbox_payloads(dir, 7);
+    CHECK(count_with_prefix(health, "e|down||") == 1);
+    CHECK(count_with_prefix(health, "h|900|1000|0") == 1 && count_with_prefix(health, "h|400|1000|0") == 1);
+    std::string last_h;
+    for (const auto& m : health) {
+        if (m.compare(0, 2, "h|") == 0) last_h = m;
+    }
+    CHECK(last_h == "h|1|1000|1");
+    CHECK(bot_at(x2, y2, z2) && x1 == x2 && y1 == y2 && z1 == z2);
+    // a heal next to it gets it up at full health
+    char heal[120];
+    std::snprintf(heal, sizeof(heal), "e|heal|Herb|%.2f|%.2f|%.2f", x2 + 1.0, y2, z2);
+    sent.push_back({10, 7, heal});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(700));
+    health = inbox_payloads(dir, 7);
+    CHECK(count_with_prefix(health, "e|up||") == 1 && any_with_prefix(health, "h|1000|1000|0"));
+    g.join();
+    e.stop();
+}
+
+// (9.33) The loopback bot says which character it is, when it is told to (so the body made from Mia's or Clancy's files can be tried alone).
+static void test_bot_character(const fs::path& tmp) {
+    const fs::path dir = tmp / "bot933char";
+    Engine e;
+    Config cfg;
+    cfg.data_dir = dir;
+    cfg.mode = Mode::Loopback;
+    cfg.transport = Transport::TcpHost;
+    cfg.listen_port = 28989;
+    cfg.name = "Tester";
+    std::string err;
+    CHECK(e.start(cfg, err));
+    fs::create_directories(dir);
+    std::thread g([&] { fake_game(dir, 100.0, 200.0, 9000); });
+    std::this_thread::sleep_for(milliseconds(900));
+    // it said nothing about a character before it was told to
+    auto health = inbox_payloads(dir, 7);
+    CHECK(!any_with_prefix(health, "e|char|"));
+    MsgList sent = {{1, 11, "char:clancy"}};
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(700));
+    health = inbox_payloads(dir, 7);
+    CHECK(count_with_prefix(health, "e|char|clancy|") == 1);
+    // the same command again changes nothing (the script repeats it now and then): no second report this soon
+    sent.push_back({2, 11, "char:clancy"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(600));
+    health = inbox_payloads(dir, 7);
+    CHECK(count_with_prefix(health, "e|char|clancy|") == 1);
+    // another character goes out at once
+    sent.push_back({3, 11, "char:mia"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(700));
+    health = inbox_payloads(dir, 7);
+    CHECK(count_with_prefix(health, "e|char|mia|") == 1 && count_with_prefix(health, "e|char|clancy|") == 1);
+    // a key that is none of the three is ignored: the bot is still Mia
+    sent.push_back({4, 11, "char:jack"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(500));
+    health = inbox_payloads(dir, 7);
+    CHECK(!any_with_prefix(health, "e|char|jack|") && count_with_prefix(health, "e|char|mia|") == 1);
+    // a character command does not make it go down (it is not a down / up command)
+    CHECK(!any_with_prefix(health, "e|down||") && !any_with_prefix(health, "h|1|1000|1"));
+    g.join();
+    e.stop();
+}
+
+// (9.38) The loopback bot does what the script's drop-down says: copy me, or one state at a time.
+static void test_bot_act(const fs::path& tmp) {
+    // the commands and what each state shows
+    BotAct a = BotAct::Timer;
+    CHECK(bot_act_command("state:copy", a) && a == BotAct::Copy);
+    CHECK(bot_act_command("state:crouchwalk", a) && a == BotAct::CrouchWalk);
+    CHECK(bot_act_command("state:timer", a) && a == BotAct::Timer);
+    CHECK(!bot_act_command("state:dance", a) && a == BotAct::Timer);  // unknown: nothing changes
+    CHECK(!bot_act_command("down", a) && !bot_act_command("char:mia", a) && !bot_act_command("state:", a) && a == BotAct::Timer);
+    for (int i = 0; i <= static_cast<int>(BotAct::Shoot); ++i) {  // every key reads back as itself
+        BotAct b = BotAct::Timer;
+        CHECK(bot_act_command(std::string("state:") + bot_act_key(static_cast<BotAct>(i)), b) && b == static_cast<BotAct>(i));
+    }
+    std::string ck;
+    CHECK(bot_command("state:copy") == -1 && bot_character_command("state:copy", ck) == 0);  // not a down / up or character command
+    CHECK(bot_act_flags(BotAct::Idle, 1.0f) == 0 && bot_act_flags(BotAct::Walk, 1.0f) == 0 && bot_act_flags(BotAct::Copy, 1.0f) == 0);
+    CHECK(bot_act_flags(BotAct::Crouch, 1.0f) == kFlagPoseCrouch && bot_act_flags(BotAct::CrouchWalk, 1.0f) == kFlagPoseCrouch);
+    CHECK(bot_act_flags(BotAct::Guard, 1.0f) == kFlagPoseGuard && bot_act_flags(BotAct::Heal, 1.0f) == kFlagPoseHeal);
+    CHECK(bot_act_flags(BotAct::Gun, 1.0f) == kFlagGun && bot_act_flags(BotAct::GunRun, 1.0f) == kFlagGun);
+    CHECK(bot_act_flags(BotAct::Aim, 1.0f) == (kFlagGun | kFlagAim));
+    CHECK(bot_act_flags(BotAct::Shoot, 0.1f) == (kFlagGun | kFlagAim | kFlagShoot) && bot_act_flags(BotAct::Shoot, 0.6f) == (kFlagGun | kFlagAim) &&
+          bot_act_flags(BotAct::Shoot, 1.6f) == (kFlagGun | kFlagAim | kFlagShoot));  // a shot every 1.5 s, the bit up for 0.4 s of it
+    CHECK(bot_act_speed(BotAct::Idle) == 0.0f && bot_act_speed(BotAct::Walk) < 2.4f && bot_act_speed(BotAct::Walk) > 0.3f && bot_act_speed(BotAct::Run) > 2.4f);
+    CHECK(bot_act_speed(BotAct::Crouch) == 0.0f && bot_act_speed(BotAct::CrouchWalk) > 0.3f && bot_act_speed(BotAct::GunRun) == bot_act_speed(BotAct::Run));
+    CHECK(kFlagGun == 1024 && kFlagAim == 2048 && kFlagShoot == 4096 && (kFlagGunMask & kFlagPoseMask) == 0);  // (the script uses the same numbers)
+
+    // in the engine
+    const fs::path dir = tmp / "botact";
+    Engine e;
+    Config cfg;
+    cfg.data_dir = dir;
+    cfg.mode = Mode::Loopback;
+    cfg.transport = Transport::TcpHost;
+    cfg.listen_port = 28991;
+    cfg.name = "Tester";
+    std::string err;
+    CHECK(e.start(cfg, err));
+    fs::create_directories(dir);
+    std::atomic<int> gflags{0};
+    std::thread g([&] { fake_game(dir, 100.0, 200.0, 9500, &gflags); });
+    auto bot = [&](double& x, double& z, int& f) {
+        double vx = 0, vz = 0, vf = -1;
+        const auto t = read_text(dir / "re7mp_in.json");
+        json_num(t, "x", vx);
+        json_num(t, "z", vz);
+        json_num(t, "flags", vf);
+        x = vx;
+        z = vz;
+        f = static_cast<int>(vf);
+    };
+    double bx = 0, bz = 0;
+    int bf = 0;
+    std::this_thread::sleep_for(milliseconds(700));
+    // copy: it stands kCopyOffsetX from you (you are at x ~ 100.x, z 200) and shows what you show, nothing else
+    MsgList sent = {{1, 11, "state:copy"}};
+    write_msgs(dir, sent);
+    gflags = kFlagPoseGuard | kFlagGun | kFlagAim;
+    std::this_thread::sleep_for(milliseconds(700));
+    bot(bx, bz, bf);
+    auto s = e.status();
+    CHECK(std::fabs(bx - (s.lx + kCopyOffsetX)) < 0.6 && std::fabs(bz - 200.0) < 0.05);
+    CHECK((bf & (kFlagPoseMask | kFlagGunMask)) == (kFlagPoseGuard | kFlagGun | kFlagAim));
+    gflags = kFlagPoseCrouch;
+    std::this_thread::sleep_for(milliseconds(400));
+    bot(bx, bz, bf);
+    CHECK((bf & (kFlagPoseMask | kFlagGunMask)) == kFlagPoseCrouch);  // it follows what you do, as you do it
+    gflags = 0;
+    std::this_thread::sleep_for(milliseconds(400));
+    bot(bx, bz, bf);
+    CHECK((bf & (kFlagPoseMask | kFlagGunMask)) == 0);
+    // a state: block, standing still (the flags are its own, whatever you do)
+    gflags = kFlagPoseHeal;
+    sent.push_back({2, 11, "state:guard"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(500));
+    bot(bx, bz, bf);
+    const double gx = bx, gz = bz;
+    CHECK((bf & (kFlagPoseMask | kFlagGunMask)) == kFlagPoseGuard);
+    std::this_thread::sleep_for(milliseconds(500));
+    bot(bx, bz, bf);
+    CHECK(std::fabs(bx - gx) < 1e-3 && std::fabs(bz - gz) < 1e-3);  // it stands
+    // aim, then shoot: the shot bit comes and goes
+    sent.push_back({3, 11, "state:aim"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(400));
+    bot(bx, bz, bf);
+    CHECK((bf & kFlagGunMask) == (kFlagGun | kFlagAim));
+    sent.push_back({4, 11, "state:shoot"});
+    write_msgs(dir, sent);
+    bool saw_shot = false, saw_no_shot = false;
+    const auto until = std::chrono::steady_clock::now() + milliseconds(3200);
+    while (std::chrono::steady_clock::now() < until) {
+        bot(bx, bz, bf);
+        if (bf & kFlagShoot) saw_shot = true; else saw_no_shot = true;
+        CHECK((bf & (kFlagGun | kFlagAim)) == (kFlagGun | kFlagAim));
+        std::this_thread::sleep_for(milliseconds(40));
+    }
+    CHECK(saw_shot && saw_no_shot);
+    // walk: it circles at about the walking pace (3 m round a fixed spot), run: faster
+    auto pace = [&](double ms) {
+        double x0, z0, x1, z1;
+        int f0, f1;
+        bot(x0, z0, f0);
+        std::this_thread::sleep_for(milliseconds(static_cast<int>(ms)));
+        bot(x1, z1, f1);
+        return std::hypot(x1 - x0, z1 - z0) / (ms / 1000.0);
+    };
+    sent.push_back({5, 11, "state:walk"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(400));
+    const double vw = pace(400);
+    CHECK(vw > 0.8 && vw < 2.0);
+    sent.push_back({6, 11, "state:run"});
+    write_msgs(dir, sent);
+    std::this_thread::sleep_for(milliseconds(400));
+    const double vr = pace(400);
+    CHECK(vr > 3.0 && vr < 6.0);
+    std::printf("  bot states: walk %.2f m/s, run %.2f m/s\n", vw, vr);
+    // back to the timer: the old behaviour (with the exe's default start of 4 s the loop has begun by now or not: only the 'no copy' is checked)
+    sent.push_back({7, 11, "state:timer"});
+    write_msgs(dir, sent);
+    gflags = kFlagGun;
+    std::this_thread::sleep_for(milliseconds(500));
+    bot(bx, bz, bf);
+    CHECK((bf & kFlagGun) == 0);  // your gun bit is not copied any more
     g.join();
     e.stop();
 }
@@ -633,6 +938,71 @@ static void test_stationary_bot(const fs::path& tmp) {
     std::this_thread::sleep_for(milliseconds(400));
     auto p5 = in_xz();
     CHECK(std::fabs(p4.first - p5.first) + std::fabs(p4.second - p5.second) > 0.1);
+    g.join();
+    e.stop();
+}
+
+static void test_follow_bot(const fs::path& tmp) {
+    // (9.37) the pure step: put next to you at first, a walk when close, a run (never faster than 5 m/s) when far, stops 2 m away, never walks through you
+    BotFollow f;
+    CHECK(bot_follow_step(f, 100.0f, 200.0f, 0.1f) == 0.0f && f.valid && std::fabs(f.x - 102.5f) < 1e-4 && std::fabs(f.z - 200.0f) < 1e-4);
+    const float w = bot_follow_step(f, 100.0f, 200.0f, 0.1f);  // 2.5 m away: over the stop distance by 0.5 m -> 1.3 + 0.45 = 1.75 m/s
+    CHECK(std::fabs(w - 0.175f) < 1e-4 && std::fabs(f.x - 102.325f) < 1e-3);
+    BotFollow g2;
+    g2.valid = true; g2.x = 110.0f; g2.z = 200.0f;
+    float min_d = 99.0f;
+    for (int i = 0; i < 200; ++i) {
+        bot_follow_step(g2, 100.0f, 200.0f, 0.1f);
+        const float d = std::sqrt((g2.x - 100.0f) * (g2.x - 100.0f) + (g2.z - 200.0f) * (g2.z - 200.0f));
+        if (d < min_d) min_d = d;
+    }
+    CHECK(min_d >= kFollowStop - 1e-3f && std::fabs(g2.x - (100.0f + kFollowStop)) < 1e-2);  // it arrived and stands there
+    CHECK(bot_follow_step(g2, 100.0f, 200.0f, 0.1f) == 0.0f);
+    BotFollow far_;
+    far_.valid = true; far_.x = 130.0f; far_.z = 200.0f;  // 30 m away: capped at 5 m/s
+    CHECK(std::fabs(bot_follow_step(far_, 100.0f, 200.0f, 0.1f) - 0.5f) < 1e-4);
+    CHECK(std::fabs(bot_follow_step(far_, 100.0f, 200.0f, 5.0f) - 1.25f) < 1e-4);  // a long frame counts as 0.25 s
+    CHECK(bot_follow_step(far_, 100.0f, 200.0f, -1.0f) == 0.0f);
+    BotFollow gone;
+    gone.valid = true; gone.x = 300.0f; gone.z = 200.0f;  // 200 m away (you went through a door into another area): put next to you
+    CHECK(bot_follow_step(gone, 100.0f, 200.0f, 0.1f) == 0.0f && std::fabs(gone.x - 102.5f) < 1e-4);
+    // in the engine: it ends up about 2 m from you and stays there; "Move bot to me" puts it next to you again
+    const fs::path dir = tmp / "follow";
+    Engine e;
+    Config cfg;
+    cfg.data_dir = dir;
+    cfg.mode = Mode::Loopback;
+    cfg.listen_port = 28953;
+    cfg.bot_mode = BotMode::Follow;
+    std::string err;
+    CHECK(e.start(cfg, err));
+    fs::create_directories(dir);
+    std::atomic<int> flags{0};
+    std::thread g([&] { fake_game(dir, 100.0, 200.0, 2600, &flags); });
+    auto bot_xz = [&] {
+        double x = 0, z = 0;
+        auto t = read_text(dir / "re7mp_in.json");
+        json_num(t, "x", x);
+        json_num(t, "z", z);
+        return std::make_pair(x, z);
+    };
+    std::this_thread::sleep_for(milliseconds(1100));
+    auto p1 = bot_xz();
+    auto s = e.status();
+    const double d1 = std::hypot(p1.first - s.lx, p1.second - 200.0);
+    std::printf("  follow: bot at (%.2f, %.2f), you at x=%.2f: %.2f m apart\n", p1.first, p1.second, s.lx, d1);
+    CHECK(d1 > 1.8 && d1 < 2.7 && std::fabs(p1.second - 200.0) < 0.05);
+    e.teleport_bot_here();
+    std::this_thread::sleep_for(milliseconds(300));
+    auto p2 = bot_xz();
+    s = e.status();
+    CHECK(std::hypot(p2.first - s.lx, p2.second - 200.0) < 3.0 && p2.first > p1.first - 0.5);
+    e.set_bot_mode(BotMode::Orbit);  // back to circling: it moves around you again
+    std::this_thread::sleep_for(milliseconds(300));
+    auto p3 = bot_xz();
+    std::this_thread::sleep_for(milliseconds(400));
+    auto p4 = bot_xz();
+    CHECK(std::fabs(p3.first - p4.first) + std::fabs(p3.second - p4.second) > 0.1);
     g.join();
     e.stop();
 }
@@ -1103,6 +1473,110 @@ static void test_save_sync_units(const fs::path& tmp) {
     CoopManifest m3(tmp / "no_manifest.json");
     CHECK(pick_slot(d, 7, m3) == -1);                      // everything holds a single-player save
 
+    // (9.32) The game lists 15 saves: nothing is ever put past slot 15, and a full folder replaces the OLDEST copy we installed.
+    CHECK(kMaxSlot == 15);
+    {
+        const fs::path d15 = tmp / "slots15";
+        fs::create_directories(d15);
+        CoopManifest mm(tmp / "slots15_manifest.json");
+        write_text(d15 / "data015Slot.bin", "mine, the last slot");
+        write_text(d15 / "data016Slot.bin", "a file past 15 that an older build made");
+        // the highest save is past 15: nothing is free "past the highest"; the lowest free slot is used, never 17
+        SlotPick pk = pick_slot_ex(d15, 3, mm);
+        CHECK(pk.slot == 1 && pk.how == SlotChoice::LowestFree);
+        // a highest save of 14: slot 15 is one past it
+        fs::remove(d15 / "data015Slot.bin");
+        fs::remove(d15 / "data016Slot.bin");
+        write_text(d15 / "data014Slot.bin", "mine");
+        pk = pick_slot_ex(d15, 3, mm);
+        CHECK(pk.slot == 15 && pk.how == SlotChoice::OnePastHighest);
+        // slot 15 taken too: the lowest free slot (the Autosave is not one)
+        write_text(d15 / "data015Slot.bin", "mine");
+        write_text(d15 / "data000.bin", "autosave");
+        pk = pick_slot_ex(d15, 3, mm);
+        CHECK(pk.slot == 1 && pk.how == SlotChoice::LowestFree);
+        // every slot taken and none of them a copy of ours: no slot, and never one past 15
+        for (int i = 1; i <= kMaxSlot; ++i) {
+            if (!fs::exists(d15 / slot_filename(i))) write_text(d15 / slot_filename(i), "mine");
+        }
+        pk = pick_slot_ex(d15, 3, mm);
+        CHECK(pk.slot == -1 && pk.how == SlotChoice::None && pick_slot(d15, 3, mm) == -1);
+        // three copies we installed (slots 9, 4, 11), received at different times: the oldest goes first, whatever its number
+        auto copy = [&](int slot, const char* when, const char* from, int from_slot) {
+            CoopEntry c;
+            c.slot = slot;
+            c.when = when;
+            c.from = c.partner = from;
+            c.from_slot = from_slot;
+            c.role = "received";
+            c.crc = static_cast<uint32_t>(100 + slot);
+            mm.upsert(c);
+        };
+        copy(9, "2026-11-01 10:00", "Bob", 2);
+        copy(4, "2026-11-05 10:00", "Bob", 3);
+        copy(11, "2026-11-03 10:00", "Bob", 4);
+        pk = pick_slot_ex(d15, 7, mm);
+        CHECK(pk.slot == 9 && pk.how == SlotChoice::ReplacedOldestCopy && pk.replaced_when == "2026-11-01 10:00" && pk.replaced_from == "Bob");
+        // the same save again still replaces ITS copy, not the oldest
+        pk = pick_slot_ex(d15, 3, mm);
+        CHECK(pk.slot == 4 && pk.how == SlotChoice::SameSave);
+        // two copies of the same age: the lower slot goes first
+        copy(11, "2026-11-01 10:00", "Bob", 4);
+        pk = pick_slot_ex(d15, 7, mm);
+        CHECK(pk.slot == 9 && pk.how == SlotChoice::ReplacedOldestCopy);
+        copy(11, "2026-10-30 10:00", "Bob", 4);
+        pk = pick_slot_ex(d15, 7, mm);
+        CHECK(pk.slot == 11 && pk.how == SlotChoice::ReplacedOldestCopy && pk.replaced_when == "2026-10-30 10:00");
+        copy(11, "2026-11-03 10:00", "Bob", 4);
+        // a save of your own that was sent (role "sent") is never replaced, however old
+        CoopEntry mine;
+        mine.slot = 2;
+        mine.when = "2026-01-01 00:00";
+        mine.role = "sent";
+        mine.partner = "Bob";
+        mine.crc = 5;
+        mm.upsert(mine);
+        pk = pick_slot_ex(d15, 7, mm);
+        CHECK(pk.slot == 9);
+        // an entry whose file is gone is not a copy to replace: its slot is simply free
+        fs::remove(d15 / slot_filename(9));
+        pk = pick_slot_ex(d15, 7, mm);
+        CHECK(pk.slot == 9 && pk.how == SlotChoice::LowestFree);
+        write_text(d15 / slot_filename(9), "x");
+        // free slots are used before any copy is replaced (before 9.32 the lowest copy was replaced even then)
+        fs::remove(d15 / slot_filename(13));
+        pk = pick_slot_ex(d15, 7, mm);
+        CHECK(pk.slot == 13 && pk.how == SlotChoice::LowestFree);
+        write_text(d15 / slot_filename(13), "x");
+        // an entry past slot 15 (an older build) is not a candidate, however old
+        CoopEntry past15;
+        past15.slot = 40;
+        past15.when = "2020-01-01 00:00";
+        past15.role = "received";
+        past15.from_slot = 7;  // (the sender's slot 7 as well: without the range check it would be taken as "the same save again")
+        past15.crc = 9;
+        mm.upsert(past15);
+        write_text(d15 / slot_filename(40), "x");
+        pk = pick_slot_ex(d15, 7, mm);
+        CHECK(pk.slot == 9 && pk.how == SlotChoice::ReplacedOldestCopy);
+        // an old manifest that has no date: its copy counts as the oldest
+        copy(11, "", "Bob", 4);
+        pk = pick_slot_ex(d15, 7, mm);
+        CHECK(pk.slot == 11 && pk.how == SlotChoice::ReplacedOldestCopy && pk.replaced_when.empty());
+        // a sender slot of 0 (an old exe sending its autosave) never matches a copy whose origin is not known (from_slot 0 in an old manifest)
+        copy(6, "2026-11-09 10:00", "Bob", 0);
+        pk = pick_slot_ex(d15, 0, mm);
+        CHECK(pk.slot == 11 && pk.how == SlotChoice::ReplacedOldestCopy);
+        // slot 15 can be the free one: 1..14 hold saves of your own and an older build left a file past 15, so "one past the highest" is out
+        const fs::path d15b = tmp / "slots15b";
+        fs::create_directories(d15b);
+        CoopManifest m15b(tmp / "slots15b_manifest.json");
+        for (int i = 1; i <= 14; ++i) write_text(d15b / slot_filename(i), "mine");
+        write_text(d15b / "data016Slot.bin", "a file past 15 that an older build made");
+        pk = pick_slot_ex(d15b, 3, m15b);
+        CHECK(pk.slot == 15 && pk.how == SlotChoice::LowestFree);
+    }
+
     // A manifest from an older version (no partner, no role) still loads: it is a received copy, from the sender.
     write_text(tmp / "old_manifest.json",
                "{\"enabled\":true,\"last\":\"\",\"entries\":[{\"slot\":4,\"label\":\"CO-OP Zed 2026-11-01 10:00\",\"from\":\"Zed\","
@@ -1301,6 +1775,601 @@ static void test_save_transfer(const fs::path& tmp) {
     b.stop();
 }
 
+// ---- re-signing a save for another Steam account (since the exe after 9.24) ------------------------------------------------
+
+// A stand-in for an RE7 save: the real container header, a data header whose blocks are what the real ones look like (block 0 is the
+// real RE7 one from a real save), a random body, and a correct signature at the end.
+static const uint8_t kReal_RE7_Block0[8] = {0x68, 0x59, 0xbc, 0xd6, 0x73, 0xdd, 0x94, 0x74};  // the first data-header block of a real RE7 save
+static std::vector<uint8_t> make_fake_save(const AccountMark& m, size_t body, uint32_t seed) {
+    std::vector<uint8_t> v = {'D', 'S', 'S', 'S', 2, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0};
+    v.insert(v.end(), m.format.begin(), m.format.end());
+    v.insert(v.end(), m.account.begin(), m.account.end());
+    const auto rest = random_bytes(16 + body, seed);  // blocks 2 and 3, then the body
+    v.insert(v.end(), rest.begin(), rest.end());
+    v.insert(v.end(), 4, 0);  // the signature
+    autostrong_sign(v);
+    return v;
+}
+static AccountMark mark_of(const std::vector<uint8_t>& v) {
+    AccountMark m;
+    CHECK(read_account_mark(v.data(), v.size(), m));
+    return m;
+}
+
+static void test_save_resign(const fs::path& tmp) {
+    const fs::path data = fs::path(RE7MP_TEST_DATA);
+    const auto enc = read_bytes(data / "autostrong_test_encrypted.bin");
+    const auto dec = read_bytes(data / "autostrong_test_decrypted.bin");
+    CHECK(enc.size() == 212 && dec.size() == 212);
+
+    // The signature code reproduces the signatures the original tool wrote (two real files, plus - checked by hand when this was
+    // written - two real RE7 saves of 4-5 MB).
+    CHECK(autostrong_signature_ok(enc) && autostrong_signature_ok(dec));
+    {
+        auto bad = enc;
+        bad[100] ^= 1;
+        CHECK(!autostrong_signature_ok(bad));
+        autostrong_sign(bad);
+        CHECK(autostrong_signature_ok(bad) && bad != enc);
+        bad[100] ^= 1;
+        autostrong_sign(bad);
+        CHECK(bad == enc);  // sign(original) gives back the original bytes, signature included
+    }
+    CHECK(classify_container(enc.data(), enc.size()) == ContainerKind::Encrypted);
+    CHECK(classify_container(dec.data(), dec.size()) == ContainerKind::Plain);
+    CHECK(classify_container(random_bytes(500, 1).data(), 500) == ContainerKind::Other && classify_container(enc.data(), 20) == ContainerKind::Other);
+    AccountMark none;
+    CHECK(!read_account_mark(dec.data(), dec.size(), none));
+
+    // Re-signing with the file's own mark changes nothing; with another account's mark it changes exactly the account block and the
+    // signature, and going back gives the original file byte for byte.
+    const AccountMark mine = mark_of(enc);
+    {
+        auto same = enc;
+        const auto r = resign_save(same, mine);
+        CHECK(r.kind == ResignKind::AlreadyYours && same == enc && r.install());
+        AccountMark other = mine;
+        for (auto& b : other.account) b ^= 0x5a;
+        auto moved = enc;
+        const auto r2 = resign_save(moved, other);
+        CHECK(r2.kind == ResignKind::Resigned && r2.install() && autostrong_signature_ok(moved) && mark_of(moved) == other);
+        size_t diff = 0;
+        for (size_t i = 0; i < enc.size(); ++i) diff += enc[i] != moved[i];
+        CHECK(diff > 0 && diff <= 12);  // 8 account bytes + 4 signature bytes at most
+        CHECK(std::equal(enc.begin(), enc.begin() + 24, moved.begin()) && std::equal(enc.begin() + 32, enc.end() - 4, moved.begin() + 32));
+        auto back = moved;
+        CHECK(resign_save(back, mine).kind == ResignKind::Resigned && back == enc);
+        // a different key (another game): not installed
+        AccountMark alien = mine;
+        alien.format[0] ^= 1;
+        auto x = enc;
+        CHECK(resign_save(x, alien).kind == ResignKind::OtherKey && !resign_save(x, alien).install() && x == enc);
+        // damaged: not installed, not changed
+        auto d = enc;
+        d[150] ^= 0x40;
+        const auto dd = d;
+        CHECK(resign_save(d, other).kind == ResignKind::Damaged && d == dd);
+        // things that are not RE7 saves pass through
+        auto rnd = random_bytes(3000, 4);
+        const auto rnd0 = rnd;
+        CHECK(resign_save(rnd, other).kind == ResignKind::NotApplicable && rnd == rnd0 && resign_save(rnd, other).install());
+        auto pl = dec;
+        CHECK(resign_save(pl, other).kind == ResignKind::NotApplicable && pl == dec);
+        std::vector<uint8_t> tiny = {'D', 'S', 'S', 'S'};
+        CHECK(resign_save(tiny, other).kind == ResignKind::NotApplicable);
+    }
+
+    // Learning this PC's account from the save folder.
+    AccountMark A, B;
+    std::memcpy(A.format.data(), kReal_RE7_Block0, 8);
+    B.format = A.format;
+    const uint8_t acc_a[8] = {0x8f, 0xfd, 0xa0, 0xbc, 0x2b, 0x0e, 0x21, 0xa2}, acc_b[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    std::memcpy(A.account.data(), acc_a, 8);
+    std::memcpy(B.account.data(), acc_b, 8);
+    const fs::path d1 = tmp / "mark_dir";
+    fs::create_directories(d1);
+    CoopManifest empty(tmp / "mark_manifest.json");
+    AccountMark got;
+    int files = 0, total = 0;
+    CHECK(find_own_mark(d1, empty, got, files, total) == MarkSearch::None);                    // nothing there
+    CHECK(find_own_mark(d1 / "nonexistent", empty, got, files, total) == MarkSearch::None);   // no such folder
+    write_bytes(d1 / "data003Slot.bin", random_bytes(5000, 8));                               // not a container
+    write_bytes(d1 / "notes.txt", make_fake_save(B, 100, 1));                                 // not a .bin
+    write_bytes(d1 / "data005Slot.bin", dec);                                                 // plain: no account to learn from
+    CHECK(find_own_mark(d1, empty, got, files, total) == MarkSearch::None && total == 0);
+    write_bytes(d1 / "data00-1.bin", make_fake_save(A, 200, 2));
+    CHECK(find_own_mark(d1, empty, got, files, total) == MarkSearch::Found && got == A && files == 1 && total == 1);
+    write_bytes(d1 / "data000.bin", make_fake_save(A, 5000, 3));
+    write_bytes(d1 / "data001Slot.bin", make_fake_save(B, 300, 4));  // e.g. a save copied in by hand
+    CHECK(find_own_mark(d1, empty, got, files, total) == MarkSearch::Found && got == A && files == 2 && total == 3);  // the majority wins
+    fs::remove(d1 / "data000.bin");
+    CHECK(find_own_mark(d1, empty, got, files, total) == MarkSearch::Disagree);  // 1 against 1: not guessed
+    {   // a copy this tool installed is not evidence: with slot 1 marked as received, only A remains
+        CoopManifest m(tmp / "mark_manifest2.json");
+        CoopEntry e;
+        e.slot = 1;
+        e.role = "received";
+        m.upsert(e);
+        CHECK(find_own_mark(d1, m, got, files, total) == MarkSearch::Found && got == A && files == 1 && total == 1);
+        // the whole job, from the folder
+        auto theirs = make_fake_save(B, 4000, 9);
+        const auto body_before = std::vector<uint8_t>(theirs.begin() + 48, theirs.end() - 4);
+        const auto r = resign_for_this_pc(theirs, d1, m);
+        CHECK(r.kind == ResignKind::Resigned && mark_of(theirs) == A && autostrong_signature_ok(theirs) &&
+              std::vector<uint8_t>(theirs.begin() + 48, theirs.end() - 4) == body_before &&
+              r.detail.find("learned from 1 of your 1") != std::string::npos);
+        auto mine_already = make_fake_save(A, 400, 10);
+        CHECK(resign_for_this_pc(mine_already, d1, m).kind == ResignKind::AlreadyYours);
+        auto rnd = random_bytes(2000, 11);
+        CHECK(resign_for_this_pc(rnd, d1, m).kind == ResignKind::NotApplicable);
+    }
+    {   // nothing to learn from: a file that needs re-signing is refused, anything else passes
+        const fs::path d2 = tmp / "mark_dir_empty";
+        fs::create_directories(d2);
+        auto theirs = make_fake_save(B, 400, 12);
+        const auto before = theirs;
+        const auto r = resign_for_this_pc(theirs, d2, empty);
+        CHECK(r.kind == ResignKind::NoOwnSave && !r.install() && theirs == before && r.detail.find("main menu") != std::string::npos);
+        auto rnd = random_bytes(2000, 13);
+        CHECK(resign_for_this_pc(rnd, d2, empty).kind == ResignKind::NotApplicable);
+        const auto amb = resign_for_this_pc(theirs, d1, empty);  // d1 has A and B once each
+        CHECK(amb.kind == ResignKind::Ambiguous && !amb.install() && theirs == before);
+    }
+}
+
+// End to end over TCP: Alice's save names Alice's Steam account; Bob's game must be handed one that names Bob's.
+static void test_save_transfer_resign(const fs::path& tmp) {
+    AccountMark A, B;
+    std::memcpy(A.format.data(), kReal_RE7_Block0, 8);
+    B.format = A.format;
+    for (int i = 0; i < 8; ++i) {
+        A.account[static_cast<size_t>(i)] = static_cast<uint8_t>(0x10 + i);
+        B.account[static_cast<size_t>(i)] = static_cast<uint8_t>(0xB0 + i);
+    }
+    const fs::path sa = tmp / "rs_a", sb = tmp / "rs_b";
+    fs::create_directories(sa);
+    fs::create_directories(sb);
+    write_bytes(sa / "data00-1.bin", make_fake_save(A, 500, 21));  // Alice's own files: her account
+    write_bytes(sa / "data001Slot.bin", make_fake_save(A, 20000, 22));
+    write_bytes(sb / "data00-1.bin", make_fake_save(B, 500, 23));  // Bob's: his
+    write_bytes(sb / "data001Slot.bin", make_fake_save(B, 30000, 24));
+
+    Config ca, cb;
+    ca.data_dir = tmp / "rs_st_a";
+    cb.data_dir = tmp / "rs_st_b";
+    ca.mode = cb.mode = Mode::Network;
+    ca.transport = Transport::TcpHost;
+    cb.transport = Transport::TcpJoin;
+    ca.listen_port = 28979;
+    cb.peer_host = "127.0.0.1";
+    cb.peer_port = 28979;
+    ca.name = "Alice";
+    cb.name = "Bob";
+    ca.save_sync = cb.save_sync = true;
+    ca.save_dir = sa;
+    cb.save_dir = sb;
+    ca.save_stable_ms = cb.save_stable_ms = 300;
+    Engine a, b;
+    std::string err;
+    CHECK(a.start(ca, err) && b.start(cb, err));
+    std::this_thread::sleep_for(milliseconds(1800));
+
+    // Alice saves into slot 2 (an 800 KB "save"): Bob gets it in slot 2 (one past his highest, 1) naming BOB, body byte for byte hers.
+    const auto alice_save = make_fake_save(A, 800 * 1024, 31);
+    write_bytes(sa / "data002Slot.bin", alice_save);
+    std::this_thread::sleep_for(milliseconds(3200));
+    const fs::path got = sb / "data002Slot.bin";
+    CHECK(fs::exists(got));
+    const auto installed = read_bytes(got);
+    CHECK(installed.size() == alice_save.size() && autostrong_signature_ok(installed) && mark_of(installed) == B);
+    CHECK(installed != alice_save);
+    CHECK(std::equal(alice_save.begin() + 32, alice_save.end() - 4, installed.begin() + 32));  // everything but the account block and the signature
+    CHECK(mark_of(read_bytes(sb / "data001Slot.bin")) == B);  // Bob's own saves were not touched
+    CoopManifest mb(cb.data_dir / "re7mp_coop_saves.json");
+    mb.load();
+    CHECK(mb.entries().size() == 1 && mb.entries()[0].slot == 2 && mb.entries()[0].crc == crc32(installed.data(), installed.size()) &&
+          mb.entries()[0].size == installed.size());  // the manifest describes what is on disk, not what was sent
+    CHECK(!mb.entries().empty() && mb.entries()[0].why.find("re-signed for your Steam account") != std::string::npos);
+    CHECK(b.status().last_save_event.find("re-signed for your Steam account") != std::string::npos && b.status().saves_received == 1);
+    CHECK(fs::exists(sa / "data002Slot.bin") && read_bytes(sa / "data002Slot.bin") == alice_save);  // Alice's own file is untouched
+    std::this_thread::sleep_for(milliseconds(6500));  // the 5-second re-check must still accept the re-signed copy
+    mb.load();
+    CHECK(mb.entries().size() == 1 && b.status().last_save_event.find("no longer holds") == std::string::npos);
+
+    // A file that is not an RE7 container still goes through unchanged (the plain-bytes behaviour of the older tests).
+    const auto plain = random_bytes(40 * 1024, 41);
+    write_bytes(sa / "data003Slot.bin", plain);
+    std::this_thread::sleep_for(milliseconds(2600));
+    CHECK(fs::exists(sb / "data003Slot.bin") && read_bytes(sb / "data003Slot.bin") == plain);
+    a.stop();
+    b.stop();
+
+    // Bob with no save of his own: the incoming save is refused, with the way out in the message, and nothing is written.
+    const fs::path sc = tmp / "rs_c";
+    fs::create_directories(sc);
+    Config cc = cb;
+    cc.data_dir = tmp / "rs_st_c";
+    cc.save_dir = sc;
+    Engine a2, c;
+    ca.data_dir = tmp / "rs_st_a2";
+    CHECK(a2.start(ca, err) && c.start(cc, err));
+    std::this_thread::sleep_for(milliseconds(1800));
+    write_bytes(sa / "data004Slot.bin", make_fake_save(A, 60 * 1024, 51));
+    std::this_thread::sleep_for(milliseconds(2800));
+    CHECK(c.status().saves_received == 0 && c.status().last_save_event.find("NOT installed") != std::string::npos &&
+          c.status().last_save_event.find("main menu") != std::string::npos);
+    int n_files = 0;
+    for (const auto& e : fs::directory_iterator(sc)) { (void)e; ++n_files; }
+    CHECK(n_files == 0);
+    a2.stop();
+    c.stop();
+    std::printf("  save re-signing: Alice's save arrived naming Bob's account, body untouched\n");
+}
+
+// (9.42) Which Steam account's folder, and the exe-to-exe account message.
+static void test_save_accounts(const fs::path& tmp) {
+    // --- the account message text ---
+    {
+        uint32_t a = 0;
+        CHECK(account_text(759758082u) == "acct|1|759758082");
+        CHECK(parse_account_text("acct|1|759758082", a) && a == 759758082u);
+        CHECK(parse_account_text("acct|1|4294967295", a) && a == 4294967295u);
+        CHECK(parse_account_text("acct|1|1", a) && a == 1u);
+        const char* bad[] = {"", "acct|1|", "acct|1|0", "acct|1|4294967296", "acct|1|-5", "acct|1|12 34", "acct|1|12a", "acct|2|5", "acct|1|00000000001",
+                             "ACCT|1|5", "acct|1|+5", "acct||5", "x|acct|1|5"};
+        for (const char* b : bad) {
+            uint32_t out = 77;
+            CHECK(!parse_account_text(b, out) && out == 77);  // a refused text leaves the output alone
+        }
+    }
+    // --- the account id out of a folder path ---
+    {
+        const fs::path root = "C:/Program Files (x86)/Steam";
+        CHECK(account_of_save_dir(root / "userdata" / "759758082" / "418370" / "remote" / "win64_save") == 759758082u);
+        CHECK(account_of_save_dir(fs::path("/a/userdata/1055164497/418370/remote/win64_save/")) == 1055164497u);  // trailing separator
+        CHECK(account_of_save_dir(fs::path("/a/userdata/5/418370/remote/WIN64_SAVE")) == 5u);                  // Windows is not case sensitive
+        CHECK(account_of_save_dir(fs::path("/a/userdata/759758082/418370/remote")) == 0);                      // not the save folder itself
+        CHECK(account_of_save_dir(fs::path("/a/userdata/759758082/883710/remote/win64_save")) == 0);            // another game
+        CHECK(account_of_save_dir(fs::path("/a/userdata/abc/418370/remote/win64_save")) == 0);                  // not a number
+        CHECK(account_of_save_dir(fs::path("/a/userdata/0/418370/remote/win64_save")) == 0);                    // 0 is "nobody"
+        CHECK(account_of_save_dir(fs::path("/a/userdata/99999999999/418370/remote/win64_save")) == 0);          // does not fit 32 bits
+        CHECK(account_of_save_dir(fs::path("D:/my saves")) == 0 && account_of_save_dir(fs::path()) == 0);
+    }
+    // --- loginusers.vdf ---
+    {
+        constexpr uint64_t kBase = 76561197960265728ull;
+        const std::string id_a = std::to_string(kBase + 759758082ull), id_b = std::to_string(kBase + 1055164497ull);
+        const std::string vdf = "\"users\"\r\n{\r\n\t\"" + id_b + "\"\r\n\t{\r\n\t\t\"AccountName\"\t\t\"old\"\r\n\t\t\"PersonaName\"\t\t\"Old \\\"one\\\"\"\r\n"
+                                "\t\t\"MostRecent\"\t\t\"0\"\r\n\t\t\"Timestamp\"\t\t\"1600000000\"\r\n\t}\r\n\t\"" + id_a +
+                                "\"\r\n\t{\r\n\t\t\"AccountName\"\t\t\"new\"\r\n\t\t\"MostRecent\"\t\t\"1\"\r\n\t}\r\n}\r\n";
+        CHECK(last_login_from_vdf(vdf) == 759758082u);
+        std::string flipped = vdf;  // the other way round: B most recent
+        flipped.replace(flipped.find("\"MostRecent\"\t\t\"0\""), 17, "\"MostRecent\"\t\t\"1\"");
+        flipped.replace(flipped.rfind("\"MostRecent\"\t\t\"1\""), 17, "\"MostRecent\"\t\t\"0\"");
+        CHECK(last_login_from_vdf(flipped) == 1055164497u);
+        CHECK(last_login_from_vdf("") == 0 && last_login_from_vdf("garbage { \"x\" ") == 0 && last_login_from_vdf("\"users\" { }") == 0);
+        CHECK(last_login_from_vdf("\"users\" { \"" + id_a + "\" { \"MostRecent\" \"0\" } }") == 0);   // nobody marked
+        CHECK(last_login_from_vdf("\"users\" { \"12345\" { \"MostRecent\" \"1\" } }") == 0);           // not a 64-bit Steam id
+        CHECK(last_login_from_vdf("\"MostRecent\" \"1\"") == 0);                                       // not inside a user block
+        CHECK(last_login_from_vdf("// a comment\n\"users\" { \"" + id_a + "\" { \"MostRecent\" \"1\" } }") == 759758082u);
+    }
+    // --- choosing the folder with two accounts on the PC ---
+    const fs::path steam = tmp / "acct_steam";
+    const fs::path dir_new = steam / "userdata" / "759758082" / "418370" / "remote" / "win64_save";  // the account in use
+    const fs::path dir_old = steam / "userdata" / "1055164497" / "418370" / "remote" / "win64_save"; // the old account, with the NEWER file
+    fs::create_directories(dir_new);
+    fs::create_directories(dir_old);
+    write_bytes(dir_new / "data001Slot.bin", random_bytes(100, 1));
+    std::this_thread::sleep_for(milliseconds(50));
+    write_bytes(dir_old / "data001Slot.bin", random_bytes(100, 2));  // written last: the old rule ("newest file wins") picks THIS one
+    {
+        const auto old_rule = find_save_dirs(steam);
+        CHECK(!old_rule.empty() && old_rule.front() == dir_old);
+        auto c = choose_save_dir(steam, 759758082u);
+        CHECK(c.how == DirHow::SteamRunning && c.dir == dir_new && c.account == 759758082u && c.why.find("759758082") != std::string::npos);
+        c = choose_save_dir(steam, 1055164497u);
+        CHECK(c.how == DirHow::SteamRunning && c.dir == dir_old && c.account == 1055164497u);
+        c = choose_save_dir(steam, 424242u);  // signed in, but never ran RE7: no guessing at another account's folder
+        CHECK(c.how == DirHow::None && c.dir.empty() && c.why.find("424242") != std::string::npos && c.why.find("main menu") != std::string::npos);
+        c = choose_save_dir(steam, 0);  // Steam not running, nothing says who was last: the old rule, and it says so
+        CHECK(c.how == DirHow::NewestFiles && c.dir == dir_old && c.account == 1055164497u && c.why.find("newest") != std::string::npos);
+        constexpr uint64_t kBase = 76561197960265728ull;
+        write_text(steam / "config" / "loginusers.vdf",
+                   "\"users\"\n{\n\t\"" + std::to_string(kBase + 759758082ull) + "\"\n\t{\n\t\t\"MostRecent\"\t\t\"1\"\n\t}\n\t\"" +
+                       std::to_string(kBase + 1055164497ull) + "\"\n\t{\n\t\t\"MostRecent\"\t\t\"0\"\n\t}\n}\n");
+        CHECK(steam_last_login(steam) == 759758082u);
+        c = choose_save_dir(steam, 0);  // Steam not running, but the last sign-in is known
+        CHECK(c.how == DirHow::LastLogin && c.dir == dir_new && c.account == 759758082u);
+        c = choose_save_dir(steam, 1055164497u);  // running wins over the file
+        CHECK(c.how == DirHow::SteamRunning && c.dir == dir_old);
+        CHECK(choose_save_dir(tmp / "acct_no_steam", 759758082u).how == DirHow::None);
+        CHECK(choose_save_dir(tmp / "acct_no_steam", 0).how == DirHow::None);
+        CHECK(steam_last_login(tmp / "acct_no_steam") == 0);
+    }
+    // --- replacing the folder kept in the box ---
+    {
+        const auto right = choose_save_dir(steam, 759758082u);
+        auto fix = correct_save_dir(dir_old, right);  // the old path kept in re7mp.ini
+        CHECK(fix.change && fix.why.find("1055164497") != std::string::npos && fix.why.find("759758082") != std::string::npos);
+        CHECK(correct_save_dir(fs::path(), right).change);                 // an empty box
+        CHECK(!correct_save_dir(dir_new, right).change);                   // already the right one
+        CHECK(!correct_save_dir(fs::path("D:/my saves"), right).change);   // typed on purpose: never touched
+        SaveDirChoice guess;
+        guess.how = DirHow::NewestFiles;
+        guess.dir = dir_old;
+        guess.account = 1055164497u;
+        CHECK(!correct_save_dir(dir_new, guess).change);                   // a guess never overrides what is in the box
+        CHECK(!correct_save_dir(dir_old, SaveDirChoice{}).change);         // nothing chosen: nothing changed
+        SaveDirChoice last = right;
+        last.how = DirHow::LastLogin;
+        CHECK(correct_save_dir(dir_old, last).change);                     // the last sign-in counts too
+    }
+    // --- the manifest names both accounts and keeps the one in each entry ---
+    {
+        const fs::path mp = tmp / "acct_manifest.json";
+        CoopManifest m(mp);
+        CoopEntry e;
+        e.slot = 4;
+        e.label = "CO-OP Bob 2026-11-14 10:00";
+        e.from = "Bob";
+        e.partner = "Bob";
+        e.role = "received";
+        e.crc = 1234;
+        e.size = 99;
+        e.partner_account = 1055164497u;
+        m.upsert(e);
+        m.set_accounts(759758082u, 1055164497u);
+        CHECK(m.save("ok", true, {1, 4}, "x"));
+        const std::string txt = read_text(mp);
+        double v = 0;
+        CHECK(json_num(txt, "account", v) && v == 759758082.0);
+        CHECK(txt.find("\"partner_account\":1055164497,\"why\"") != std::string::npos);  // the entry's own
+        CHECK(txt.find("\"dir\":\"x\",\"account\":759758082,\"partner_account\":1055164497}") != std::string::npos);  // the manifest's
+        CoopManifest back(mp);
+        back.load();
+        CHECK(back.entries().size() == 1 && back.entries()[0].partner_account == 1055164497u);
+        CoopManifest fresh(tmp / "acct_manifest2.json");  // nobody told yet: 0, which the panel reads as "not known"
+        fresh.save("ok", true);
+        CHECK(json_num(read_text(tmp / "acct_manifest2.json"), "account", v) && v == 0.0);
+        write_text(mp, "{\"enabled\":true,\"last\":\"\",\"entries\":[{\"slot\":2,\"label\":\"x\",\"crc\":5}],\"occupied\":[],\"dir\":\"\"}");  // a 9.41 file
+        CoopManifest old(mp);
+        old.load();
+        CHECK(old.entries().size() == 1 && old.entries()[0].partner_account == 0);
+    }
+    // --- two re7mp.exe tell each other their account; the script never sees the message ---
+    {
+        AccountMark A, B;
+        std::memcpy(A.format.data(), kReal_RE7_Block0, 8);
+        B.format = A.format;
+        for (int i = 0; i < 8; ++i) {
+            A.account[static_cast<size_t>(i)] = static_cast<uint8_t>(0x10 + i);
+            B.account[static_cast<size_t>(i)] = static_cast<uint8_t>(0xB0 + i);
+        }
+        const fs::path sa = tmp / "acct_a" / "userdata" / "111111" / "418370" / "remote" / "win64_save";
+        const fs::path sb = tmp / "acct_b" / "userdata" / "222222" / "418370" / "remote" / "win64_save";
+        fs::create_directories(sa);
+        fs::create_directories(sb);
+        write_bytes(sa / "data00-1.bin", make_fake_save(A, 500, 61));
+        write_bytes(sb / "data00-1.bin", make_fake_save(B, 500, 62));
+        Config ca, cb;
+        ca.data_dir = tmp / "acct_st_a";
+        cb.data_dir = tmp / "acct_st_b";
+        ca.mode = cb.mode = Mode::Network;
+        ca.transport = Transport::TcpHost;
+        cb.transport = Transport::TcpJoin;
+        ca.listen_port = 28961;
+        cb.peer_host = "127.0.0.1";
+        cb.peer_port = 28961;
+        ca.name = "Alice";
+        cb.name = "Bob";
+        ca.save_sync = cb.save_sync = true;
+        ca.save_dir = sa;
+        cb.save_dir = sb;
+        ca.save_stable_ms = cb.save_stable_ms = 300;
+        Engine a, b;
+        std::string err;
+        CHECK(a.start(ca, err) && b.start(cb, err));
+        for (int i = 0; i < 100 && !(a.status().peer_account != 0 && b.status().peer_account != 0); ++i) std::this_thread::sleep_for(milliseconds(100));
+        CHECK(a.status().my_account == 111111u && b.status().my_account == 222222u);
+        CHECK(a.status().peer_account == 222222u && b.status().peer_account == 111111u);
+        std::this_thread::sleep_for(milliseconds(300));
+        double v = 0;
+        CHECK(json_num(read_text(ca.data_dir / "re7mp_coop_saves.json"), "account", v) && v == 111111.0);
+        CHECK(json_num(read_text(ca.data_dir / "re7mp_coop_saves.json"), "partner_account", v) && v == 222222.0);
+        CHECK(inbox_size(ca.data_dir) == 0 && inbox_size(cb.data_dir) == 0);  // exe to exe: nothing reached either script
+        CHECK(a.status().messages_received == 0 && b.status().messages_received == 0);
+        // A save made now carries the accounts into the manifests: Bob's received copy names Alice's account, Alice's sent one Bob's.
+        write_bytes(sa / "data001Slot.bin", make_fake_save(A, 30000, 63));
+        for (int i = 0; i < 80 && b.status().saves_received == 0; ++i) std::this_thread::sleep_for(milliseconds(100));
+        std::this_thread::sleep_for(milliseconds(400));
+        CoopManifest ma(ca.data_dir / "re7mp_coop_saves.json"), mb(cb.data_dir / "re7mp_coop_saves.json");
+        ma.load();
+        mb.load();
+        CHECK(mb.entries().size() == 1 && mb.entries()[0].role == "received" && mb.entries()[0].partner_account == 111111u);
+        CHECK(ma.entries().size() == 1 && ma.entries()[0].role == "sent" && ma.entries()[0].partner_account == 222222u);
+        auto log = a.drain_log();
+        CHECK(count_lines(log, "Steam account 111111") >= 1 && count_lines(log, "other player's PC uses Steam account 222222") == 1);
+        CHECK(count_lines(log, "never confirmed") == 0);
+        a.stop();
+        b.stop();
+    }
+    // --- a folder that is not a userdata path: nothing is sent, and what arrives is still taken ---
+    {
+        const fs::path sa = tmp / "acct_c" / "userdata" / "333333" / "418370" / "remote" / "win64_save";
+        const fs::path sb = tmp / "acct_d_plain";
+        fs::create_directories(sa);
+        fs::create_directories(sb);
+        Config ca, cb;
+        ca.data_dir = tmp / "acct_st_c";
+        cb.data_dir = tmp / "acct_st_d";
+        ca.mode = cb.mode = Mode::Network;
+        ca.transport = Transport::TcpHost;
+        cb.transport = Transport::TcpJoin;
+        ca.listen_port = 28962;
+        cb.peer_host = "127.0.0.1";
+        cb.peer_port = 28962;
+        ca.name = "Carol";
+        cb.name = "Dan";
+        ca.save_sync = cb.save_sync = true;
+        ca.save_dir = sa;
+        cb.save_dir = sb;
+        Engine a, b;
+        std::string err;
+        CHECK(a.start(ca, err) && b.start(cb, err));
+        for (int i = 0; i < 100 && b.status().peer_account == 0; ++i) std::this_thread::sleep_for(milliseconds(100));
+        std::this_thread::sleep_for(milliseconds(500));
+        CHECK(a.status().my_account == 333333u && b.status().my_account == 0);
+        CHECK(b.status().peer_account == 333333u);  // Dan hears Carol's account
+        CHECK(a.status().peer_account == 0);        // Dan's folder has no account in its path, so he says nothing
+        const auto log = b.drain_log();
+        CHECK(count_lines(log, "not a standard userdata") == 1);
+        a.stop();
+        b.stop();
+    }
+    // --- the loopback bot answers like a real player's exe: same PC, same account ---
+    {
+        const fs::path sl = tmp / "acct_l" / "userdata" / "444444" / "418370" / "remote" / "win64_save";
+        fs::create_directories(sl);
+        Config cl;
+        cl.data_dir = tmp / "acct_st_l";
+        cl.mode = Mode::Loopback;
+        cl.transport = Transport::TcpHost;
+        cl.listen_port = 28963;
+        cl.save_sync = true;
+        cl.save_dir = sl;
+        cl.name = "Me";
+        Engine l;
+        std::string err;
+        CHECK(l.start(cl, err));
+        for (int i = 0; i < 100 && l.status().peer_account == 0; ++i) std::this_thread::sleep_for(milliseconds(100));
+        CHECK(l.status().my_account == 444444u && l.status().peer_account == 444444u);
+        CHECK(count_lines(l.drain_log(), "the same as this PC's") == 1);
+        l.stop();
+    }
+    std::printf("  steam accounts: folder by account, both ids swapped between two exes, manifest names them\n");
+}
+
+// (9.32) The game lists only 15 saves. A co-op save that arrives while all 15 slots hold a file replaces the OLDEST co-op copy that was
+// installed here (and says so); when all 15 hold saves of your own it is not installed, and the message says why. Nothing is put past slot 15.
+static void test_save_slots_full(const fs::path& tmp) {
+    const fs::path sa = tmp / "full_a", sb = tmp / "full_b", sc = tmp / "full_c";
+    fs::create_directories(sa);
+    fs::create_directories(sb);
+    fs::create_directories(sc);
+    Config ca, cb;
+    ca.data_dir = tmp / "full_st_a";
+    cb.data_dir = tmp / "full_st_b";
+    ca.mode = cb.mode = Mode::Network;
+    ca.transport = Transport::TcpHost;
+    cb.transport = Transport::TcpJoin;
+    ca.listen_port = 28977;
+    cb.peer_host = "127.0.0.1";
+    cb.peer_port = 28977;
+    ca.name = "Alice";
+    cb.name = "Bob";
+    ca.save_sync = cb.save_sync = true;
+    ca.save_dir = sa;
+    cb.save_dir = sb;
+    ca.save_stable_ms = cb.save_stable_ms = 300;
+
+    // Bob has all 15 slots taken. 2 and 9 are copies of saves of Zed's that were installed here (2 the older); 14 is a save of his own that he
+    // sent to Zed long ago (never replaced, however old); the rest are saves of his own.
+    std::vector<std::vector<uint8_t>> bob(static_cast<size_t>(kMaxSlot) + 1);
+    for (int i = 1; i <= kMaxSlot; ++i) {
+        bob[static_cast<size_t>(i)] = random_bytes(2000 + static_cast<size_t>(i), 700 + static_cast<uint32_t>(i));
+        write_bytes(sb / slot_filename(i), bob[static_cast<size_t>(i)]);
+    }
+    fs::create_directories(cb.data_dir);
+    {
+        CoopManifest pre(cb.data_dir / "re7mp_coop_saves.json");
+        auto add = [&](int slot, const char* when, const char* role, int from_slot) {
+            CoopEntry c;
+            c.slot = slot;
+            c.when = when;
+            c.label = std::string("CO-OP Zed ") + when;
+            c.from = c.partner = "Zed";
+            c.role = role;
+            c.from_slot = from_slot;
+            c.crc = crc32(bob[static_cast<size_t>(slot)].data(), bob[static_cast<size_t>(slot)].size());
+            c.size = bob[static_cast<size_t>(slot)].size();
+            pre.upsert(c);
+        };
+        add(9, "2020-03-01 10:00", "received", 1);
+        add(2, "2019-10-15 08:00", "received", 3);
+        add(14, "2018-01-01 00:00", "sent", 0);
+        CHECK(pre.save("", true));
+    }
+    Engine a, b;
+    std::string err;
+    CHECK(a.start(ca, err) && b.start(cb, err));
+    std::this_thread::sleep_for(milliseconds(1800));
+
+    const auto first = random_bytes(50 * 1024, 71);
+    write_bytes(sa / "data005Slot.bin", first);
+    std::this_thread::sleep_for(milliseconds(3000));
+    CHECK(read_bytes(sb / "data002Slot.bin") == first);  // the oldest co-op copy (2) was replaced
+    bool untouched = true;
+    for (int i = 1; i <= kMaxSlot; ++i) {
+        if (i != 2 && read_bytes(sb / slot_filename(i)) != bob[static_cast<size_t>(i)]) untouched = false;
+    }
+    CHECK(untouched);                                        // ...and nothing else was touched: not the newer copy (9), not the one he sent (14), none of his own
+    CHECK(!fs::exists(sb / "data016Slot.bin"));              // nothing past the 15th
+    {
+        CoopManifest mb(cb.data_dir / "re7mp_coop_saves.json");
+        mb.load();
+        const CoopEntry* got = nullptr;
+        for (const auto& e : mb.entries()) {
+            if (e.slot == 2) got = &e;
+        }
+        CHECK(mb.entries().size() == 3 && got != nullptr && got->from == "Alice" && got->role == "received" && got->from_slot == 5);
+        CHECK(got != nullptr && got->why.find("all 15 save slots were taken, so it replaced your oldest co-op copy (from Zed, received 2019-10-15 08:00)") != std::string::npos);
+        CHECK(mb.is_coop_slot(14) && !mb.is_received_slot(14) && mb.is_received_slot(9));
+    }
+    CHECK(b.status().last_save_event.find("installed in slot 2") != std::string::npos &&
+          b.status().last_save_event.find("replaced your oldest co-op copy") != std::string::npos && b.status().saves_received == 1);
+
+    // The next save goes the same way: the oldest copy now is slot 9 (the one in slot 2 is new).
+    const auto second = random_bytes(40 * 1024, 72);
+    write_bytes(sa / "data006Slot.bin", second);
+    std::this_thread::sleep_for(milliseconds(3000));
+    CHECK(read_bytes(sb / "data009Slot.bin") == second && read_bytes(sb / "data002Slot.bin") == first);
+    CHECK(!fs::exists(sb / "data016Slot.bin") && read_bytes(sb / "data014Slot.bin") == bob[14]);
+    a.stop();
+    b.stop();
+
+    // All 15 slots hold saves of Bob's own: no co-op copy that could be replaced, so the save is not installed and the message says what to do.
+    std::vector<std::vector<uint8_t>> own(static_cast<size_t>(kMaxSlot) + 1);
+    for (int i = 1; i <= kMaxSlot; ++i) {
+        own[static_cast<size_t>(i)] = random_bytes(1500 + static_cast<size_t>(i), 900 + static_cast<uint32_t>(i));
+        write_bytes(sc / slot_filename(i), own[static_cast<size_t>(i)]);
+    }
+    Config cc = cb;
+    cc.data_dir = tmp / "full_st_c";
+    cc.save_dir = sc;
+    Config ca2 = ca;
+    ca2.data_dir = tmp / "full_st_a2";
+    Engine a2, c;
+    std::this_thread::sleep_for(milliseconds(500));
+    CHECK(a2.start(ca2, err) && c.start(cc, err));
+    std::this_thread::sleep_for(milliseconds(1800));
+    write_bytes(sa / "data007Slot.bin", random_bytes(30 * 1024, 73));
+    std::this_thread::sleep_for(milliseconds(3000));
+    CHECK(c.status().saves_received == 0);
+    CHECK(c.status().last_save_event.find("No save slot for the co-op save from Alice") != std::string::npos &&
+          c.status().last_save_event.find("all of them hold saves of your own") != std::string::npos &&
+          c.status().last_save_event.find("Delete one in the game") != std::string::npos);
+    bool own_untouched = true;
+    int n_files = 0;
+    for (int i = 1; i <= kMaxSlot; ++i) {
+        if (read_bytes(sc / slot_filename(i)) != own[static_cast<size_t>(i)]) own_untouched = false;
+    }
+    for (const auto& e : fs::directory_iterator(sc)) { (void)e; ++n_files; }
+    CHECK(own_untouched && n_files == kMaxSlot);             // his own saves are never overwritten, and nothing was added
+    a2.stop();
+    c.stop();
+    std::printf("  full save folder: the oldest co-op copy is replaced; with 15 saves of his own nothing is installed\n");
+}
+
 static void test_save_loopback_echo(const fs::path& tmp) {
     std::string err;
     // Loopback over TCP: the bot sends your save back as its own co-op save.
@@ -1361,7 +2430,7 @@ static void test_loopback_enemies(const fs::path& tmp) {
     CHECK(read_state(dir, second, &n2));
     g.join();
     CHECK(n2 > n1 && n1 >= 1);  // snapshots keep arriving
-    // two entries, "Em9999" (circling the bot) and "Em9998" (8 m from where you first were, standing still), 13 fields each
+    // two entries, "Em3000" (Jack's id, circling the bot; 9.35) and "Em9998" (8 m from where you first were, standing still), 13 fields each
     auto fields = [](const std::string& blob) {
         std::vector<std::vector<std::string>> rows;
         std::stringstream ss(blob);
@@ -1376,7 +2445,7 @@ static void test_loopback_enemies(const fs::path& tmp) {
         return rows;
     };
     const auto r1 = fields(first), r2 = fields(second);
-    CHECK(r1.size() == 2 && r2.size() == 2 && r1[0].size() == 13 && r1[0][0] == "Em9999" && r1[1][0] == "Em9998");
+    CHECK(r1.size() == 2 && r2.size() == 2 && r1[0].size() == 13 && r1[0][0] == "Em3000" && r1[1][0] == "Em9998");
     if (r1.size() == 2 && r2.size() == 2) {
         CHECK(r1[1][1] == r2[1][1] && r1[1][3] == r2[1][3]);   // the standing one has not moved
         CHECK(r1[0][1] != r2[0][1] || r1[0][3] != r2[0][3]);   // the orbiting one has
@@ -1755,11 +2824,168 @@ static void test_reframework_install(const fs::path& tmp) {
     CHECK(!install_reframework(http, tmp / "no_such_folder", kReframeworkTag, false, false, msg, nullptr));
 }
 
+
+// 9.31: "Play as" (re7mp_char.json: the character chosen in the window, read by the Lua script)
+static void test_character(const fs::path& tmp) {
+    const fs::path dir = tmp / "char";
+    fs::remove_all(dir);
+    // the list: the keys the script knows (lua/re7mp.lua CFG.who.LIST + "auto"), in the order of the window's drop-down
+    const auto& list = character_choices();
+    CHECK(list.size() == 6);
+    CHECK(std::string(list[0].key) == "auto" && std::string(list[1].key) == "ethan" && std::string(list[2].key) == "mia" &&
+          std::string(list[3].key) == "clancy" && std::string(list[4].key) == "pete" && std::string(list[5].key) == "andre");  // 9.37: Pete, Andre
+    CHECK(character_index("clancy") == 3 && character_index("andre") == 5 && character_valid("pete") && character_index("auto") == 0 && character_index("batman") == -1 && character_index("") == -1);
+    CHECK(character_valid("mia") && !character_valid("Mia") && !character_valid("mia ") && !character_valid("../mia"));
+    // nothing there yet
+    std::string key;
+    uint64_t seq = 99;
+    CHECK(!read_character_choice(dir, key, seq));
+    // a write creates the folder and the file, and reads back
+    CHECK(write_character_choice(dir, "mia", 1234567));
+    CHECK(fs::exists(dir / "re7mp_char.json") && !fs::exists(dir / "re7mp_char.tmp"));
+    CHECK(read_character_choice(dir, key, seq) && key == "mia" && seq == 1234567);
+    std::ifstream in(dir / "re7mp_char.json");
+    std::stringstream ss;
+    ss << in.rdbuf();
+    CHECK(ss.str() == "{\"character\":\"mia\",\"seq\":1234567}\n");  // exactly what the script's json.load_file reads
+    // a bad key is refused and the file is left as it was
+    CHECK(!write_character_choice(dir, "batman", 5));
+    CHECK(read_character_choice(dir, key, seq) && key == "mia" && seq == 1234567);
+    // sync: nothing is written when it already says so (the script would be told again for nothing), a different key is
+    bool wrote = true;
+    CHECK(sync_character_choice(dir, "mia", &wrote) && !wrote);
+    CHECK(read_character_choice(dir, key, seq) && seq == 1234567);
+    CHECK(sync_character_choice(dir, "clancy", &wrote) && wrote);
+    uint64_t seq2 = 0;
+    CHECK(read_character_choice(dir, key, seq2) && key == "clancy" && seq2 != 1234567 && seq2 > 1700000000000ULL);
+    CHECK(!sync_character_choice(dir, "batman", &wrote) && !wrote);
+    // two writes in a row get different counters (the script applies a choice when the counter changes)
+    CHECK(write_character_choice(dir, "ethan", character_seq_now()));
+    uint64_t a = 0, b = 0;
+    CHECK(read_character_choice(dir, key, a));
+    std::this_thread::sleep_for(milliseconds(5));
+    CHECK(write_character_choice(dir, "ethan", character_seq_now()));
+    CHECK(read_character_choice(dir, key, b) && b > a);
+    // damaged files are refused, not guessed at
+    write_text(dir / "re7mp_char.json", "{\"character\":\"batman\",\"seq\":1}");
+    CHECK(!read_character_choice(dir, key, seq));
+    write_text(dir / "re7mp_char.json", "not json");
+    CHECK(!read_character_choice(dir, key, seq));
+    write_text(dir / "re7mp_char.json", "{\"character\":\"mia\"}");
+    CHECK(read_character_choice(dir, key, seq) && key == "mia" && seq == 0);  // no counter: read as 0
+    write_text(dir / "re7mp_char.json", "{\"character\":\"mia\",\"seq\":-5}");
+    seq = 77;
+    CHECK(read_character_choice(dir, key, seq) && key == "mia" && seq == 0);  // a negative counter is read as 0, not as a huge number
+    // the rename fails (here the target is a folder, standing in for "the script has the file open"): the write says so and sync does not claim it
+    {
+        const fs::path blocked = tmp / "char_blocked";
+        fs::remove_all(blocked);
+        fs::create_directories(blocked / "re7mp_char.json" / "inside");
+        CHECK(!write_character_choice(blocked, "mia", 1));
+        bool w = true;
+        CHECK(!sync_character_choice(blocked, "mia", &w) && !w);
+        fs::remove_all(blocked);
+    }
+    // the engine's clean-up at start leaves the choice alone (it is the player's own standing choice)
+    CHECK(write_character_choice(dir, "mia", 7));
+    FileBridge(dir).clear_stale();
+    CHECK(read_character_choice(dir, key, seq) && key == "mia" && seq == 7);
+}
+
+// 9.33: "Sync story cutscenes" (re7mp_story.json: the box in the window, read by the Lua script)
+static void test_story_sync(const fs::path& tmp) {
+    const fs::path dir = tmp / "story";
+    fs::remove_all(dir);
+    bool on = true;
+    uint64_t seq = 99;
+    CHECK(!read_story_sync(dir, on, seq));  // nothing there yet
+    // a write creates the folder and the file, in the exact form the script's json.load_file reads
+    CHECK(write_story_sync(dir, true, 1234567));
+    CHECK(fs::exists(dir / "re7mp_story.json") && !fs::exists(dir / "re7mp_story.tmp"));
+    CHECK(read_story_sync(dir, on, seq) && on && seq == 1234567);
+    {
+        std::ifstream in(dir / "re7mp_story.json");
+        std::stringstream ss;
+        ss << in.rdbuf();
+        CHECK(ss.str() == "{\"story_sync\":true,\"seq\":1234567}\n");
+    }
+    CHECK(write_story_sync(dir, false, 1234568));
+    CHECK(read_story_sync(dir, on, seq) && !on && seq == 1234568);
+    {
+        std::ifstream in(dir / "re7mp_story.json");
+        std::stringstream ss;
+        ss << in.rdbuf();
+        CHECK(ss.str() == "{\"story_sync\":false,\"seq\":1234568}\n");
+    }
+    // sync: nothing is written when the file already says so (the script would be told again for nothing); a change gets a new number
+    bool wrote = true;
+    CHECK(sync_story_sync(dir, false, &wrote) && !wrote);
+    CHECK(read_story_sync(dir, on, seq) && !on && seq == 1234568);
+    CHECK(sync_story_sync(dir, true, &wrote) && wrote);
+    uint64_t seq2 = 0;
+    CHECK(read_story_sync(dir, on, seq2) && on && seq2 != 1234568 && seq2 > 1700000000000ULL);
+    // a number that is not ahead of the old one (a clock that went back) is moved past it, so the script always sees something new
+    CHECK(write_story_sync(dir, true, 99999999999999ULL));
+    CHECK(sync_story_sync(dir, false, &wrote) && wrote);
+    CHECK(read_story_sync(dir, on, seq) && !on && seq == 100000000000000ULL);
+    // damaged files are refused, not guessed at
+    write_text(dir / "re7mp_story.json", "{\"story_sync\":\"yes\",\"seq\":1}");
+    CHECK(!read_story_sync(dir, on, seq));
+    write_text(dir / "re7mp_story.json", "{\"story_sync\":1,\"seq\":1}");
+    CHECK(!read_story_sync(dir, on, seq));
+    write_text(dir / "re7mp_story.json", "not json");
+    CHECK(!read_story_sync(dir, on, seq));
+    write_text(dir / "re7mp_story.json", "{\"story_sync\":true}");
+    CHECK(read_story_sync(dir, on, seq) && on && seq == 0);  // no counter: read as 0
+    write_text(dir / "re7mp_story.json", "{\"story_sync\":true,\"seq\":-5}");
+    seq = 77;
+    CHECK(read_story_sync(dir, on, seq) && on && seq == 0);  // a negative counter is read as 0, not as a huge number
+    // a file that can't be read does not stop sync from writing a good one
+    write_text(dir / "re7mp_story.json", "not json");
+    CHECK(sync_story_sync(dir, true, &wrote) && wrote);
+    CHECK(read_story_sync(dir, on, seq) && on && seq > 1700000000000ULL);
+    // the rename fails (the target is a folder, standing in for "the script has the file open"): the write says so and sync does not claim it
+    {
+        const fs::path blocked = tmp / "story_blocked";
+        fs::remove_all(blocked);
+        fs::create_directories(blocked / "re7mp_story.json" / "inside");
+        CHECK(!write_story_sync(blocked, true, 1));
+        bool w = true;
+        CHECK(!sync_story_sync(blocked, true, &w) && !w);
+        fs::remove_all(blocked);
+    }
+    // the engine's clean-up at start leaves the choice alone (it is the player's own standing choice)
+    CHECK(write_story_sync(dir, true, 7));
+    FileBridge(dir).clear_stale();
+    CHECK(read_story_sync(dir, on, seq) && on && seq == 7);
+}
+
 int main() {
     const fs::path tmp = fs::temp_directory_path() / "re7mp_test_data";
     fs::remove_all(tmp);
     fs::create_directories(tmp);
+    if (std::getenv("RE7MP_ONLY_RESIGN")) {  // quick run of the re-signing unit checks only (used for mutation testing)
+        test_save_resign(tmp);
+        fs::remove_all(tmp);
+        std::printf(g_failed ? "%d check(s) FAILED\n" : "resign checks passed\n", g_failed);
+        return g_failed ? 1 : 0;
+    }
+    if (std::getenv("RE7MP_ONLY_ACCOUNTS")) {  // quick run of the Steam-account checks only
+        test_save_accounts(tmp);
+        fs::remove_all(tmp);
+        std::printf(g_failed ? "%d check(s) FAILED\n" : "account checks passed\n", g_failed);
+        return g_failed ? 1 : 0;
+    }
+    if (std::getenv("RE7MP_ONLY_SLOTS")) {  // quick run of the save-slot checks only (used for mutation testing)
+        test_save_sync_units(tmp);
+        test_save_slots_full(tmp);
+        fs::remove_all(tmp);
+        std::printf(g_failed ? "%d check(s) FAILED\n" : "slot checks passed\n", g_failed);
+        return g_failed ? 1 : 0;
+    }
     test_packets();
+    test_character(tmp);
+    test_story_sync(tmp);
     test_json_mini();
     test_message_packets();
     test_locator(tmp);
@@ -1770,15 +2996,23 @@ int main() {
     test_network(tmp);
     test_stationary_bot(tmp);
     test_bot_pose_schedule();
+    test_follow_bot(tmp);
     test_bot_poses(tmp);
     test_loopback_messages_and_tcp(tmp, Transport::TcpHost, 28975, "tcp");
     test_bot_logic_units();
     test_bot_gifts_and_down(tmp);
+    test_bot_friendly_fire(tmp);
+    test_bot_character(tmp);
+    test_bot_act(tmp);
     test_tcp_network(tmp);
     test_message_retransmission(tmp);
     test_file_packets();
     test_save_sync_units(tmp);
     test_save_transfer(tmp);
+    test_save_resign(tmp);
+    test_save_transfer_resign(tmp);
+    test_save_accounts(tmp);
+    test_save_slots_full(tmp);
     test_save_loopback_echo(tmp);
     test_state_packets(tmp);
     test_state_over_tcp(tmp);

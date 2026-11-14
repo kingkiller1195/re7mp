@@ -15,6 +15,7 @@
 #include "bot_logic.hpp"
 #include "bridge.hpp"
 #include "packet.hpp"
+#include "save_resign.hpp"
 #include "save_sync.hpp"
 
 namespace re7mp {
@@ -216,6 +217,9 @@ void Engine::run() {
     const uint32_t session = rd();
     const uint32_t fake_session = rd();
     uint32_t send_seq = 0, fake_seq = 0, event_seq = 0, msg_seq = 0, fake_msg_id = 0;
+    uint32_t my_account = 0, peer_account = 0;  // (9.42) Steam32 ids: of the watched save folder, and of the other player (told by their re7mp.exe)
+    bool account_told = false;                  // our account was sent since the other player became reachable
+    Clock::time_point account_told_at{};
     uint32_t state_seq = 0, fake_state_seq = 0, remote_state_seq = 0, remote_state_session = 0;
     bool have_state_pkt = false;
     Clock::time_point fake_last_state{};
@@ -244,12 +248,26 @@ void Engine::run() {
     bool bot_seen_ready = false, bot_ready = false, bot_go = false;
     bool bot_anchor_valid = false;
     float bot_ax = 0, bot_ay = 0, bot_az = 0;
+    BotFollow bot_follow;                       // (9.37) where the following bot walks
+    bool bot_follow_spawn = false;              // "Move bot to me" in follow mode: put it next to the player, not where it was
+    float bot_lx = 0, bot_lz = 0;               // where the bot was last sent (so switching to "follows you" starts from there)
+    bool bot_l_valid = false;
+    Clock::time_point bot_follow_at{};
     Clock::time_point bot_ready_since{};
     // (9.13) the bot can be told to go down: it stays where it fell, says so every second, and a heal within reach gets it up
     bool bot_down = false, bot_fall_valid = false;
     int bot_say = 0;  // 1 = tell the player it went down, 2 = tell it it got up
+    int bot_hp = kBotHealthMax;       // (9.33) the bot's own health: friendly fire takes it down (never below 1), getting up restores it
+    bool bot_hp_report = false;       // a hit changed it: tell the script at once
     float bot_fx = 0, bot_fy = 0, bot_fz = 0;
     Clock::time_point bot_health_at{};
+    std::string bot_char;               // (9.33) the character the bot says it is ("" = it says nothing); the script is told every 10 s
+    Clock::time_point bot_char_at{};
+    // (9.38) what the bot does with its body (the script's drop-down): Timer = as before, Copy = what you do, the rest one state each
+    BotAct bot_act = BotAct::Timer;
+    bool bot_act_spot = false, bot_act_centre = false;  // a spot to stand on / a centre to circle, set when the state changes
+    float bot_act_x = 0, bot_act_z = 0, bot_act_cx = 0, bot_act_cz = 0, bot_act_phase = 0;
+    Clock::time_point bot_act_at{};
     Clock::time_point last_local{}, last_remote{}, last_name_sent{}, fake_last_name{};
     const auto t0 = Clock::now();
     std::vector<uint8_t> bufv(20480);  // big enough for a file chunk
@@ -277,15 +295,24 @@ void Engine::run() {
             watcher = std::make_unique<SaveWatcher>(cfg_.save_dir, cfg_.save_stable_ms);
             watcher->baseline();
             last_save_event = "Save sharing is on. Saves you make while connected are sent to the other player.";
+            my_account = account_of_save_dir(cfg_.save_dir);
+            st.my_account = my_account;
             {   // which folder, and what is in it: with two Steam accounts the wrong one is easy to pick
                 const auto slots = list_occupied(cfg_.save_dir);
                 log("Watching " + cfg_.save_dir.u8string() + ": " + std::to_string(slots.size()) +
                     " manual save(s) (the Load screen's rows 1, 2, 3 ...). The Autosave is never shared.");
+                if (my_account != 0) {
+                    log("That folder belongs to Steam account " + std::to_string(my_account) +
+                        "; the other player's re7mp.exe will be told, and tells this one theirs.");
+                } else {
+                    log("That folder is not a standard userdata\\<id>\\418370\\remote\\win64_save path, so the Steam account is not known and is not sent.");
+                }
             }
         }
         log(last_save_event);
     }
     auto publish_saves = [&]() {
+        manifest.set_accounts(my_account, peer_account);
         manifest.save(last_save_event, save_sync_on,
                       save_sync_on ? list_occupied(cfg_.save_dir) : std::vector<int>{},
                       save_sync_on ? cfg_.save_dir.u8string() : std::string());
@@ -399,6 +426,25 @@ void Engine::run() {
 
         // 1e. Co-op saves: notice a finished save, send it in pieces, and pump a transfer already under way.
         const bool reachable = last_any != Clock::time_point{} && now - last_any < seconds(6);
+        // 1d. (9.42) Tell the other player's re7mp.exe which Steam account this PC's saves belong to: once it is reachable, again after a
+        // break in the connection, and every minute (it may have been restarted without us noticing). It is a reliable message of its
+        // own kind, never shown to the script; the other exe consumes it.
+        if (my_account != 0 && save_sync_on) {
+            if (!reachable) {
+                account_told = false;
+            } else if (!account_told || now - account_told_at >= seconds(60)) {
+                if (!account_told) log("Told the other player's re7mp.exe that this PC uses Steam account " + std::to_string(my_account) + ".");
+                account_told = true;
+                account_told_at = now;
+                PendingMessage pm;
+                pm.id = ++msg_seq;
+                pm.kind = kMsgAccount;
+                pm.payload = account_text(my_account);
+                pm.first = pm.last = now;
+                send_message_packet(*net_, session, pm.id, pm.kind, pm.payload);
+                pending_msgs.push_back(std::move(pm));
+            }
+        }
         if (save_sync_on) {
             if (now - last_save_poll >= milliseconds(500)) {
                 last_save_poll = now;
@@ -481,6 +527,7 @@ void Engine::run() {
                                 se.slot = o.slot;
                                 se.label = o.label;
                                 se.role = "sent";
+                                se.partner_account = peer_account;
                                 se.partner = st.remote_name.empty() ? std::string("Player") : st.remote_name;
                                 {
                                     std::lock_guard<std::mutex> g(mu_);
@@ -544,17 +591,65 @@ void Engine::run() {
                 std::string m_payload;
                 if (decode_position(buf, static_cast<size_t>(n), in)) {
                     // Where the bot stands: circling you, or parked where you were when it was told to teleport.
-                    if (bot_teleport_.exchange(false) || (mode == BotMode::Stationary && !bot_anchor_valid)) {
+                    const bool tele = bot_teleport_.exchange(false);
+                    if (tele || (mode == BotMode::Stationary && !bot_anchor_valid)) {
                         bot_ax = in.x;
                         bot_ay = in.y;
                         bot_az = in.z;
                         bot_anchor_valid = true;
                     }
+                    if (tele) {  // (9.37) "Move bot to me" also puts a following bot next to you
+                        bot_follow.valid = false;
+                        bot_follow_spawn = true;
+                    }
                     float bx, by, bz;
-                    if (mode == BotMode::Stationary) {
+                    if (bot_act == BotAct::Copy) {  // (9.38) beside you, moving as you move
+                        bx = in.x + kCopyOffsetX;
+                        by = in.y;
+                        bz = in.z;
+                    } else if (bot_act != BotAct::Timer) {  // (9.38) one state: circle a fixed spot at that state's speed, or stand
+                        float dt = std::chrono::duration<float>(now - bot_act_at).count();
+                        bot_act_at = now;
+                        if (!(dt > 0.0f) || dt > 0.25f) dt = 0.0f;
+                        const float v = bot_act_speed(bot_act);
+                        if (v > 0.0f) {
+                            if (!bot_act_centre || std::hypot(in.x - bot_act_cx, in.z - bot_act_cz) > 20.0f) {  // (you went far: circle you again)
+                                bot_act_cx = in.x;
+                                bot_act_cz = in.z;
+                                bot_act_phase = (bot_act_centre || !bot_l_valid) ? 0.0f : std::atan2(bot_lz - in.z, bot_lx - in.x);
+                                bot_act_centre = true;
+                            }
+                            bot_act_phase += v / kOrbitRadius * dt;
+                            bx = bot_act_cx + kOrbitRadius * std::cos(bot_act_phase);
+                            bz = bot_act_cz + kOrbitRadius * std::sin(bot_act_phase);
+                        } else {
+                            if (!bot_act_spot) {
+                                bot_act_x = bot_l_valid ? bot_lx : in.x + 2.5f;
+                                bot_act_z = bot_l_valid ? bot_lz : in.z;
+                                bot_act_spot = true;
+                            }
+                            bx = bot_act_x;
+                            bz = bot_act_z;
+                        }
+                        by = in.y;
+                    } else if (mode == BotMode::Stationary) {
                         bx = bot_ax;
                         by = bot_ay;
                         bz = bot_az;
+                    } else if (mode == BotMode::Follow) {
+                        float dt = std::chrono::duration<float>(now - bot_follow_at).count();
+                        bot_follow_at = now;
+                        if (!bot_follow.valid && !bot_follow_spawn && bot_l_valid) {  // switched over from another mode: walk from where it stood
+                            bot_follow.x = bot_lx;
+                            bot_follow.z = bot_lz;
+                            bot_follow.valid = true;
+                        }
+                        bot_follow_spawn = false;
+                        if (!bot_down) bot_follow_step(bot_follow, in.x, in.z, dt);  // (down: it stays where it fell)
+                        else if (!bot_follow.valid) bot_follow_step(bot_follow, in.x, in.z, 0.0f);
+                        bx = bot_follow.x;
+                        by = in.y;
+                        bz = bot_follow.z;
                     } else {
                         bx = in.x + kOrbitRadius * std::cos(kOrbitSpeed * t);
                         by = in.y;
@@ -584,8 +679,14 @@ void Engine::run() {
                     if (bot_ready) bflags |= static_cast<uint16_t>(kFlagReady | (in.flags & kFlagDiffMask));
                     if (you_ready) bflags |= kFlagSeesReady;
                     if (bot_go) bflags |= kFlagGo;
-                    bflags |= bot_pose_flags(t, cfg_.bot_pose_first_s);  // blocks, crouches and heals on a timer (see packet.hpp)
-                    if (bot_down) bflags = static_cast<uint16_t>(bflags & ~kFlagPoseMask);  // nobody blocks or heals while down
+                    if (bot_act == BotAct::Copy) bflags |= static_cast<uint16_t>(in.flags & (kFlagPoseMask | kFlagGunMask));  // (9.38) what you do
+                    else if (bot_act == BotAct::Timer) bflags |= bot_pose_flags(t, cfg_.bot_pose_first_s);  // blocks, crouches and heals on a timer (see packet.hpp)
+                    else bflags |= bot_act_flags(bot_act, t);  // (9.38) one state
+                    if (bot_down) bflags = static_cast<uint16_t>(bflags & ~(kFlagPoseMask | kFlagGunMask));  // nobody blocks, heals or aims while down
+
+                    bot_lx = bx;
+                    bot_lz = bz;
+                    bot_l_valid = true;
 
                     // It copies YOUR rotation, so it doesn't depend on any axis guess: its look-line
                     // should point the same way you are looking.
@@ -607,10 +708,21 @@ void Engine::run() {
                         bot_health_at = now;
                         send_message_packet(*fake_, fake_session, ++fake_msg_id, kMsgHealth, bot_health_text(true));
                     }
+                    if (!bot_char.empty() && now - bot_char_at >= seconds(10)) {  // (9.33) which character it is, like a real player's script
+                        bot_char_at = now;
+                        send_message_packet(*fake_, fake_session, ++fake_msg_id, kMsgHealth, bot_character_text(bot_char, bx, by, bz));
+                    }
+                    if (bot_hp_report && !bot_down) {  // (9.33) a friendly-fire hit: the new health goes out at once
+                        bot_hp_report = false;
+                        send_message_packet(*fake_, fake_session, ++fake_msg_id, kMsgHealth, bot_health_text_hp(bot_hp));
+                    }
 
                     // Two pretend enemies, so the enemy ghosts can be tried without a second player: one circles
                     // the bot, one stands still 8 m from where you first were. Same text format the Lua script
                     // writes (see bridge.hpp).
+                    // (9.35) The circling one is called "Em3000", which is Jack Baker's id: the script draws a known id as the
+                    // enemy's real model (the scene's own Jack, else his files) instead of a red box, so the model can be
+                    // seen loading. The standing one stays a red box ("Em9998" is no known id).
                     if (!bot_enemy_anchored) {
                         bot_enemy_anchored = true;
                         bot_enx = in.x + 8.0f;
@@ -622,7 +734,7 @@ void Engine::run() {
                         const float ex = bx + 6.0f * std::cos(0.5f * t), ez = bz + 6.0f * std::sin(0.5f * t);
                         char eb[256];
                         std::snprintf(eb, sizeof(eb),
-                                      "Em9999,%.2f,%.2f,%.2f,0,0,0,1,100,1,0,0,0;Em9998,%.2f,%.2f,%.2f,0,0,0,1,40,1,0,0,0",
+                                      "Em3000,%.2f,%.2f,%.2f,0,0,0,1,100,1,0,0,0;Em9998,%.2f,%.2f,%.2f,0,0,0,1,40,1,0,0,0",
                                       ex, by, ez, bot_enx, bot_eny, bot_enz);
                         const auto sp = encode_state(fake_session, ++fake_state_seq, eb);
                         if (!sp.empty()) fake_->send(sp.data(), sp.size());
@@ -686,32 +798,79 @@ void Engine::run() {
                             send_message_packet(*fake_, fake_session, ++fake_msg_id, kMsgGiveAnswer, answer);
                             log(std::string("Loopback bot answered ") + (m_kind == kMsgGive ? "a gift" : "a drop") + ": " + answer);
                         }
+                    } else if (m_kind == kMsgAccount) {
+                        // (9.42) answer like a real player's re7mp.exe: the bot "uses" the same Steam account (it is this PC)
+                        if (my_account != 0) send_message_packet(*fake_, fake_session, ++fake_msg_id, kMsgAccount, account_text(my_account));
                     } else if (m_kind == kMsgBotCommand) {
+                        std::string ckey;
+                        const int cc = bot_character_command(m_payload, ckey);
+                        if (cc == 1) {
+                            if (ckey != bot_char) {  // a new answer goes out at once; the script repeats the command now and then, and a repeat changes nothing
+                                log("Loopback bot: now says it is " + ckey + ".");
+                                bot_char = ckey;
+                                bot_char_at = Clock::time_point{};
+                            }
+                        } else if (cc == 2) {
+                            if (!bot_char.empty()) log("Loopback bot: says nothing about its character again.");
+                            bot_char.clear();
+                        }
+                        BotAct want = bot_act;
+                        if (bot_act_command(m_payload, want) && want != bot_act) {  // (9.38) the script repeats it now and then: a repeat changes nothing
+                            bot_act = want;
+                            bot_act_spot = false;
+                            bot_act_centre = false;
+                            bot_act_at = now;
+                            log(std::string("Loopback bot: now does '") + bot_act_key(want) + "'.");
+                        }
                         const int cmd = bot_command(m_payload);
                         if (cmd == 1 && !bot_down) {
                             bot_down = true;
                             bot_fall_valid = false;
                             bot_say = 1;
+                            bot_hp_report = false;
                             log("Loopback bot: told to go down.");
                         } else if (cmd == 0 && bot_down) {
                             bot_down = false;
+                            bot_hp = kBotHealthMax;
                             bot_say = 2;
                             log("Loopback bot: told to get up.");
+                        } else if (cmd == 0 && bot_hp < kBotHealthMax) {  // (9.33) "up" also heals a bot that was shot but is still standing
+                            bot_hp = kBotHealthMax;
+                            bot_hp_report = true;
+                            log("Loopback bot: told to get up (healed to full health).");
                         }
-                    } else if (m_kind == kMsgHealth && bot_down) {
+                    } else if (m_kind == kMsgHealth) {
                         BotEvent be;
-                        if (bot_parse_event(m_payload, be) && bot_is_healing(be) && bot_fall_valid) {
-                            const double d = bot_distance(be.x, be.y, be.z, bot_fx, bot_fy, bot_fz);
+                        if (bot_parse_event(m_payload, be)) {
+                            const int ff = bot_ff_damage(be);
                             char note[160];
-                            if (bot_heal_reaches(d)) {
-                                bot_down = false;
-                                bot_say = 2;
-                                std::snprintf(note, sizeof(note), "Loopback bot: got up (a %s %.1f m away).", be.kind.c_str(), d);
-                            } else {
-                                std::snprintf(note, sizeof(note), "Loopback bot: still down (a %s %.1f m away, it takes %.0f m).",
-                                              be.kind.c_str(), d, kBotReviveRadius);
+                            if (ff > 0) {
+                                if (!bot_down) {  // (9.33) friendly fire: a hit takes health off, never below 1; at 1 it goes down
+                                    bot_hp = bot_apply_damage(bot_hp, ff);
+                                    bot_hp_report = true;
+                                    std::snprintf(note, sizeof(note), "Loopback bot: shot for %d, health now %d / %d.", ff, bot_hp, kBotHealthMax);
+                                    log(note);
+                                    if (bot_hp <= 1) {
+                                        bot_down = true;
+                                        bot_fall_valid = false;
+                                        bot_say = 1;
+                                        bot_hp_report = false;  // the "down" report says it
+                                        log("Loopback bot: its health ran out, it goes down.");
+                                    }
+                                }
+                            } else if (bot_down && bot_is_healing(be) && bot_fall_valid) {
+                                const double d = bot_distance(be.x, be.y, be.z, bot_fx, bot_fy, bot_fz);
+                                if (bot_heal_reaches(d)) {
+                                    bot_down = false;
+                                    bot_hp = kBotHealthMax;
+                                    bot_say = 2;
+                                    std::snprintf(note, sizeof(note), "Loopback bot: got up (a %s %.1f m away).", be.kind.c_str(), d);
+                                } else {
+                                    std::snprintf(note, sizeof(note), "Loopback bot: still down (a %s %.1f m away, it takes %.0f m).",
+                                                  be.kind.c_str(), d, kBotReviveRadius);
+                                }
+                                log(note);
                             }
-                            log(note);
                         }
                     }
                 }
@@ -841,6 +1000,18 @@ void Engine::run() {
                                 seen_msg_ids.erase(seen_msg_order.front());
                                 seen_msg_order.pop_front();
                             }
+                            if (m_kind == kMsgAccount) {  // (9.42) exe to exe: never handed to the script
+                                uint32_t acct = 0;
+                                if (!parse_account_text(m_payload, acct)) {
+                                    log("Ignored a malformed account message from the other player.");
+                                } else if (acct != peer_account) {
+                                    peer_account = acct;
+                                    st.peer_account = acct;
+                                    log("The other player's PC uses Steam account " + std::to_string(acct) +
+                                        (acct == my_account ? " (the same as this PC's: loopback, or one Steam account on both)" : "") + ".");
+                                    publish_saves();
+                                }
+                            } else {
                             InMessage im;
                             im.n = ++inbox_n;
                             im.id = m_id;
@@ -850,6 +1021,7 @@ void Engine::run() {
                             if (inbox.size() > kInboxSize) inbox.pop_front();
                             inbox_dirty = true;
                             ++st.messages_received;
+                            }
                         }
                     }
                     break;
@@ -922,47 +1094,73 @@ void Engine::run() {
                             log(last_save_event);
                         } else {
                             const std::string from = st.remote_name.empty() ? "the other player" : st.remote_name;
-                            const int slot = pick_slot(cfg_.save_dir, f.slot, manifest);
-                            const bool was_received_slot = slot >= 1 && manifest.is_received_slot(slot);
+                            // A save is bound to the Steam account that wrote it; the game calls another account's save "corrupted".
+                            // Make it name THIS account before it goes into the folder (see save_resign.hpp). Nothing here changes
+                            // the network protocol: the sender's file is sent exactly as it was.
+                            std::vector<uint8_t> install = f.data;
+                            const ResignResult rr = resign_for_this_pc(install, cfg_.save_dir, manifest);
+                            const SlotPick pick = pick_slot_ex(cfg_.save_dir, f.slot, manifest);
+                            const int slot = pick.slot;
                             std::error_code sec_ec;
-                            if (slot < 0) {
-                                last_save_event = "No free save slot for the co-op save from " + from + ".";
+                            if (!rr.install()) {
+                                last_save_event = "The co-op save from " + from + " was NOT installed: " + rr.detail + ".";
                                 log(last_save_event);
-                            } else if (!write_save_file(cfg_.save_dir, slot, f.data)) {
+                            } else if (slot < 0) {
+                                // (9.32) the game lists only kMaxSlot saves: with all of them taken, a co-op copy would be replaced, but there is none
+                                last_save_event = "No save slot for the co-op save from " + from + ": the game lists only " + std::to_string(kMaxSlot) +
+                                                  " saves and all of them hold saves of your own (no co-op copy that could be replaced). Delete one in the game, then ask " +
+                                                  from + " to save again.";
+                                log(last_save_event);
+                            } else if (!write_save_file(cfg_.save_dir, slot, install)) {
                                 last_save_event = "Could not write the co-op save from " + from + " to the save folder.";
                                 log(last_save_event);
                             } else {
                                 const std::filesystem::path file = cfg_.save_dir / slot_filename(slot);
                                 watcher->ignore_current(file);
-                                // Read it back: what is on disk must be what arrived (nothing else may hold or rewrite the file).
+                                // Read it back: what is on disk must be what we wrote (nothing else may hold or rewrite the file).
+                                const uint32_t install_crc = crc32(install.data(), install.size());
                                 std::vector<uint8_t> back;
-                                if (!read_whole_file(file, back) || back.size() != f.data.size() ||
-                                    crc32(back.data(), back.size()) != f.crc) {
+                                if (!read_whole_file(file, back) || back.size() != install.size() ||
+                                    crc32(back.data(), back.size()) != install_crc) {
                                     last_save_event = "The co-op save from " + from + " was written to " + slot_filename(slot) +
                                                       " but reading it back gave other data: it is NOT marked CO-OP. (Is something else using that file?)";
                                     log(last_save_event);
                                 } else {
-                                    const bool replaced_ours = was_received_slot;
                                     CoopEntry e;
                                     e.slot = slot;
                                     e.label = f.label;
                                     e.from = from;
                                     e.partner = from;
                                     e.role = "received";
+                                    e.partner_account = peer_account;
                                     e.when = timestamp_now();
-                                    e.crc = f.crc;
-                                    e.size = f.data.size();
+                                    e.crc = install_crc;  // of what is on disk (re-signing changes it), so the 5-second check keeps working
+                                    e.size = install.size();
                                     e.from_slot = f.slot;
-                                    if (replaced_ours) {
-                                        e.why = "it replaced the earlier copy from " + from + " of the same save";
-                                    } else {
-                                        e.why = "it went into slot " + std::to_string(slot) + ", one past your highest save, so it cannot collide with a save of your own";
+                                    switch (pick.how) {
+                                        case SlotChoice::SameSave:
+                                            e.why = "it replaced the earlier copy from " + from + " of the same save";
+                                            break;
+                                        case SlotChoice::LowestFree:
+                                            e.why = "it went into slot " + std::to_string(slot) + ", the lowest free one (the game lists only " + std::to_string(kMaxSlot) +
+                                                    " saves, so there was no free slot past your highest save)";
+                                            break;
+                                        case SlotChoice::ReplacedOldestCopy:
+                                            e.why = "all " + std::to_string(kMaxSlot) + " save slots were taken, so it replaced your oldest co-op copy (from " +
+                                                    (pick.replaced_from.empty() ? std::string("the other player") : pick.replaced_from) +
+                                                    (pick.replaced_when.empty() ? std::string() : ", received " + pick.replaced_when) +
+                                                    "): the game lists only " + std::to_string(kMaxSlot) + " saves";
+                                            break;
+                                        default:
+                                            e.why = "it went into slot " + std::to_string(slot) + ", one past your highest save, so it cannot collide with a save of your own";
+                                            break;
                                     }
+                                    if (rr.kind == ResignKind::Resigned) e.why += "; " + rr.detail;
                                     manifest.upsert(e);
                                     verify_seen[slot] = std::filesystem::last_write_time(file, sec_ec);
                                     ++st.saves_received;
                                     last_save_event = "Co-op save from " + from + " installed in slot " + std::to_string(slot) + " (" +
-                                                      slot_filename(slot) + ", checked: the file holds what arrived; " + e.why + "): " + f.label;
+                                                      slot_filename(slot) + ", checked: the file holds what was written; " + e.why + "): " + f.label;
                                     log(last_save_event);
                                 }
                             }

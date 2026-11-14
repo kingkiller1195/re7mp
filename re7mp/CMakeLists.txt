@@ -13,6 +13,7 @@ add_library(re7mp_core STATIC
   src/tcp_transport.cpp
   src/game_locator.cpp
   src/save_sync.cpp
+  src/save_resign.cpp
   src/zip_extract.cpp
   src/updater.cpp)
 target_include_directories(re7mp_core PUBLIC src)
@@ -35,7 +36,7 @@ target_compile_definitions(re7mp_tests PRIVATE RE7MP_LUA_PATH="${CMAKE_CURRENT_S
 if(WIN32)
   add_executable(re7mp WIN32 src/gui_win.cpp src/http_win.cpp src/app.rc)
   target_link_libraries(re7mp PRIVATE re7mp_core winhttp)
-  set_source_files_properties(src/app.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/lua/re7mp.lua")
+  set_source_files_properties(src/app.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/lua/re7mp.lua;${CMAKE_CURRENT_SOURCE_DIR}/data/re7mp/defaults.json")
 endif()
 
 foreach(t re7mp_core re7mp_cli re7mp_tests re7mp)

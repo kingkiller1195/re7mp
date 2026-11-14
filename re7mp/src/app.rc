@@ -1,3 +1,5 @@
 // Embeds the Lua autorun script into the exe so the GUI can install it for you.
 // The script's source of truth is lua/re7mp.lua; edit that file and rebuild.
 101 RCDATA "../lua/re7mp.lua"
+// The built-in clips and settings a new install starts with (the script reads it as re7mp/defaults.json; tools/build_defaults.py makes it).
+102 RCDATA "../data/re7mp/defaults.json"

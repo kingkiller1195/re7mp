@@ -20,7 +20,7 @@ enum class Mode {
     Loopback,  // a built-in fake Player 2 (reached over real TCP on 127.0.0.1) orbits you
 };
 
-// TCP only (UDP was removed in 9.7: nobody used it; players connect over Tailscale or a forwarded port).
+// TCP only (UDP was removed in 9.7: nobody used it; players connect over a VPN (Radmin VPN is the recommended one) or a forwarded port).
 enum class Transport {
     TcpHost,  // wait for the other player to connect (the default)
     TcpJoin,  // connect to the other player (who hosts)
@@ -29,6 +29,7 @@ enum class Transport {
 enum class BotMode {
     Orbit,       // the loopback bot circles you
     Stationary,  // the loopback bot teleports to you, stays put, and keeps copying where your camera points
+    Follow,      // (9.37) the loopback bot walks after you (a walk when close, a run when far) and stops about 2 m away
 };
 
 struct Config {
@@ -65,6 +66,8 @@ struct Status {
     uint64_t states_sent = 0;      // enemy snapshots sent (TCP only)
     uint64_t states_received = 0;  // enemy snapshots received
     std::string last_save_event;
+    uint32_t my_account = 0;    // (9.42) Steam32 id of the account whose save folder is watched (0 = not known)
+    uint32_t peer_account = 0;  // (9.42) the other player's, as their re7mp.exe told us (0 = not told yet)
     int foreign_protocol = 0;  // nonzero: packets are arriving from a re7mp.exe with this (different) protocol version
 };
 

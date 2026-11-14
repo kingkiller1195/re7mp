@@ -40,6 +40,12 @@ constexpr uint16_t kFlagPoseGuard = 64;   // the player is blocking (arms up)
 constexpr uint16_t kFlagPoseHeal = 128;   // the player is using a healing item
 constexpr uint16_t kFlagPoseCrouch = 256; // the player is crouching (9.9; read from how far their eyes sit above their feet)
 constexpr uint16_t kFlagPoseMask = kFlagPoseGuard | kFlagPoseHeal | kFlagPoseCrouch;
+// Gun bits (9.28, the script's POSE_GUN / POSE_AIM / POSE_SHOOT): a gun is out, it is aimed, a shot was just fired. The exe passes them through;
+// the loopback bot (9.38) shows and copies them.
+constexpr uint16_t kFlagGun = 1024;
+constexpr uint16_t kFlagAim = 2048;
+constexpr uint16_t kFlagShoot = 4096;
+constexpr uint16_t kFlagGunMask = kFlagGun | kFlagAim | kFlagShoot;
 inline uint8_t flag_difficulty(uint16_t f) { return static_cast<uint8_t>((f & kFlagDiffMask) >> 1); }
 
 // What the loopback bot does with its body (9.8, crouch added in 9.9), so the poses can be watched without a second player.
@@ -138,6 +144,26 @@ struct StateFixed {  // followed on the wire by `len` payload bytes
     uint16_t len;
 };
 #pragma pack(pop)
+
+// (9.42) Exe-to-exe message kind: "acct|1|<Steam32 account id>" = "my PC's RE7 saves belong to this Steam account". Each re7mp.exe
+// sends it once the other one is reachable (and again every minute) and CONSUMES the one it receives: it names both accounts in
+// the manifest and the panel. An older exe hands it to its script, which has no handler for it and ignores it. No wire change.
+constexpr uint16_t kMsgAccount = 65001;
+inline std::string account_text(uint32_t account) { return "acct|1|" + std::to_string(account); }
+// True for exactly "acct|1|<1..4294967295>" (digits only, no sign, no spaces, at most 10 of them).
+inline bool parse_account_text(const std::string& s, uint32_t& out) {
+    static const char kHead[] = "acct|1|";
+    const size_t hn = sizeof(kHead) - 1;
+    if (s.size() <= hn || s.size() > hn + 10 || s.compare(0, hn, kHead) != 0) return false;
+    uint64_t v = 0;
+    for (size_t i = hn; i < s.size(); ++i) {
+        if (s[i] < '0' || s[i] > '9') return false;
+        v = v * 10 + static_cast<uint64_t>(s[i] - '0');
+    }
+    if (v == 0 || v > 0xFFFFFFFFull) return false;
+    out = static_cast<uint32_t>(v);
+    return true;
+}
 
 static_assert(sizeof(MessageFixed) == 20, "MessageFixed layout changed");
 static_assert(sizeof(StateFixed) == 18, "StateFixed layout changed");

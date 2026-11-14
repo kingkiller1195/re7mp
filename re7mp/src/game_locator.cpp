@@ -89,20 +89,20 @@ bool looks_like_re7(const fs::path& dir) { return is_file(dir / "re7.exe"); }
 bool refw_installed(const fs::path& dir) { return is_file(dir / "dinput8.dll"); }
 fs::path data_dir_for(const fs::path& game_dir) { return game_dir / "reframework" / "data"; }
 
-InstallResult install_lua(const fs::path& game_dir, const std::string& lua_text) {
+namespace {
+// Creates the folder and writes the file unless it already holds exactly this text.
+InstallResult install_text_file(const fs::path& file, const std::string& text, const char* what) {
     InstallResult r;
-    const fs::path dir = game_dir / "reframework" / "autorun";
     std::error_code ec;
-    fs::create_directories(dir, ec);
+    fs::create_directories(file.parent_path(), ec);
     if (ec) {
-        r.message = "could not create " + dir.u8string() + ": " + ec.message();
+        r.message = "could not create " + file.parent_path().u8string() + ": " + ec.message();
         return r;
     }
-    const fs::path file = dir / "re7mp.lua";
     const std::string existing = read_file(file);
-    if (!existing.empty() && existing == lua_text) {
+    if (!existing.empty() && existing == text) {
         r.ok = true;
-        r.message = "Lua script is up to date.";
+        r.message = std::string(what) + " is up to date.";
         return r;
     }
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
@@ -110,7 +110,7 @@ InstallResult install_lua(const fs::path& game_dir, const std::string& lua_text)
         r.message = "could not write " + file.u8string();
         return r;
     }
-    out.write(lua_text.data(), static_cast<std::streamsize>(lua_text.size()));
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
     out.close();
     if (!out) {
         r.message = "error while writing " + file.u8string();
@@ -118,8 +118,17 @@ InstallResult install_lua(const fs::path& game_dir, const std::string& lua_text)
     }
     r.ok = true;
     r.changed = true;
-    r.message = (existing.empty() ? "Installed the Lua script to " : "Updated the Lua script in ") + file.u8string();
+    r.message = (existing.empty() ? std::string("Installed the ") : std::string("Updated the ")) + what + " in " + file.u8string();
     return r;
+}
+}  // namespace
+
+InstallResult install_lua(const fs::path& game_dir, const std::string& lua_text) {
+    return install_text_file(game_dir / "reframework" / "autorun" / "re7mp.lua", lua_text, "Lua script");
+}
+
+InstallResult install_defaults(const fs::path& game_dir, const std::string& json_text) {
+    return install_text_file(game_dir / "reframework" / "data" / "re7mp" / "defaults.json", json_text, "built-in clips and settings (defaults.json)");
 }
 
 }  // namespace re7mp
