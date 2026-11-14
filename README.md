@@ -1,3 +1,4 @@
+Co created with xXCroissantXx
 This is the latest version available, I wish I could code this myself but unfortunately I cant, if anyone can make a better one themselves then I can credit the better mod. I have tested the RT version and that is the intended release but this has potential for non RT too if needed!
 
 Installation:
