@@ -6,7 +6,7 @@ Installation:
 
 https://www.youtube.com/watch?v=3M1CG62zraA
 
-1. Have Tailscale or a similar VPN client like radmin that you can use to share IP's in a LAN.
+1. Have Tailscale or a similar VPN client like radmin that you can use to share IP's in a LAN or you can invite through steam!
 
 2. Run the EXE file and press install/Update script (EXE might give blue prompt, just press more info and run anyway, this is because it is unsigned atm)
 
