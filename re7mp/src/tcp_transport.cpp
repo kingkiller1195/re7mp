@@ -62,6 +62,41 @@ bool resolve_ipv4(const std::string& host, uint32_t& ip_be) {
     return true;
 }
 
+std::string ip_text(uint32_t ip_be) {
+    in_addr a{};
+    a.s_addr = ip_be;
+    char buf[INET_ADDRSTRLEN] = {0};
+    if (!inet_ntop(AF_INET, &a, buf, sizeof(buf))) return "?";
+    return buf;
+}
+
+// The OS error as the log shows it: the number (what to search for) and, for the usual ones, what it means.
+std::string describe_error(int e) {
+    std::string text;
+#ifdef _WIN32
+    switch (e) {
+        case WSAECONNRESET: text = "the other side reset the connection"; break;
+        case WSAECONNABORTED: text = "the connection was aborted"; break;
+        case WSAETIMEDOUT: text = "timed out"; break;
+        case WSAECONNREFUSED: text = "refused"; break;
+        case WSAENETUNREACH: case WSAEHOSTUNREACH: text = "no route to the other side"; break;
+        case WSAENETDOWN: case WSAENETRESET: text = "the network went down"; break;
+        default: break;
+    }
+#else
+    switch (e) {
+        case ECONNRESET: text = "the other side reset the connection"; break;
+        case ECONNABORTED: text = "the connection was aborted"; break;
+        case ETIMEDOUT: text = "timed out"; break;
+        case ECONNREFUSED: text = "refused"; break;
+        case ENETUNREACH: case EHOSTUNREACH: text = "no route to the other side"; break;
+        case EPIPE: text = "the other side closed the connection"; break;
+        default: break;
+    }
+#endif
+    return "error " + std::to_string(e) + (text.empty() ? "" : ": " + text);
+}
+
 void tune(uintptr_t s) {
     set_nonblocking(s);
     int one = 1;
@@ -147,7 +182,28 @@ void TcpTransport::on_connected(uintptr_t s, const std::string& what) {
     in_.clear();
     out_.clear();
     in_off_ = 0;
-    status_.push_back(what);
+    connected_at_ = Clock::now();
+    // 10.19a: the joiner says which of its own addresses the host sees (the host's "Other player" box has to match it)
+    std::string msg = what;
+    if (role_ == Role::Join) {
+        sockaddr_in me{};
+        socklen_t len = sizeof(me);
+        if (getsockname(raw(s), reinterpret_cast<sockaddr*>(&me), &len) == 0 && me.sin_addr.s_addr != 0) {
+            if (!msg.empty() && msg.back() == '.') msg.pop_back();
+            msg += " (the host sees you as " + ip_text(me.sin_addr.s_addr) + ").";
+        }
+    }
+    status_.push_back(msg);
+}
+
+// The host turned a connection away because of its "Other player" box. It used to do this without a word, and the joiner only saw "connected", then a reset.
+void TcpTransport::note_refused(uint32_t ip_be) {
+    const auto now = Clock::now();
+    if (ip_be == refused_ip_be_ && now - refused_at_ < std::chrono::seconds(30)) return;
+    refused_ip_be_ = ip_be;
+    refused_at_ = now;
+    status_.push_back("TCP: turned away a connection from " + ip_text(ip_be) + ": the 'Other player' box allows only " + ip_text(peer_ip_be_) +
+                      ". If " + ip_text(ip_be) + " is the other player, clear that box (it is optional) or type " + ip_text(ip_be) + " in it.");
 }
 
 void TcpTransport::disconnect(const std::string& why) {
@@ -156,9 +212,21 @@ void TcpTransport::disconnect(const std::string& why) {
     in_.clear();
     out_.clear();
     in_off_ = 0;
-    next_connect_ = Clock::now() + std::chrono::seconds(1);
+    const auto now = Clock::now();
+    next_connect_ = now + std::chrono::seconds(1);
     status_.push_back(role_ == Role::Join ? "TCP connection lost (" + why + "); reconnecting..."
                                           : "TCP connection lost (" + why + "); waiting for the other player...");
+    if (role_ == Role::Join) {
+        // A host that accepts and drops at once (the "Other player" box names another address, another program on that port, a firewall that resets after the handshake)
+        // looks the same from here every time: say so after the second time, then every tenth.
+        quick_drops_ = (now - connected_at_ < std::chrono::seconds(3)) ? quick_drops_ + 1 : 0;
+        if (quick_drops_ == 2 || (quick_drops_ > 2 && (quick_drops_ - 2) % 10 == 0)) {
+            status_.push_back(
+                "TCP: the host takes the connection and drops it at once (" + std::to_string(quick_drops_) +
+                " times). Check on the host: (1) the 'Other player' box in re7mp.exe is empty or holds the address shown above as 'the host sees you as'; (2) the host's "
+                "re7mp.exe is running as 'TCP: I host' on this port and nothing else uses that port; (3) re7mp.exe is allowed through the host's firewall on the VPN network.");
+        }
+    }
 }
 
 void TcpTransport::begin_connect() {
@@ -221,10 +289,11 @@ void TcpTransport::service() {
             if (static_cast<RawSock>(s) == static_cast<RawSock>(kNoSock)) break;
             if (have_peer_ && from.sin_addr.s_addr != peer_ip_be_) {
                 close_raw(s);
+                note_refused(from.sin_addr.s_addr);
                 continue;
             }
             const bool replaced = conn_ != kNoSock;
-            on_connected(s, replaced ? "TCP: the other player reconnected." : "TCP: the other player connected.");
+            on_connected(s, (replaced ? "TCP: the other player reconnected" : "TCP: the other player connected") + std::string(" (from ") + ip_text(from.sin_addr.s_addr) + ").");
         }
     } else if (conn_ == kNoSock) {
         if (connecting_ == kNoSock && Clock::now() >= next_connect_) begin_connect();
@@ -240,7 +309,7 @@ void TcpTransport::flush() {
         if (n > 0) {
             out_.erase(out_.begin(), out_.begin() + n);
         } else if (n < 0 && !err_would_block(last_error())) {
-            disconnect("send failed");
+            disconnect("send failed, " + describe_error(last_error()));
         } else {
             break;
         }
@@ -265,8 +334,9 @@ void TcpTransport::read_some() {
         in_.insert(in_.end(), tmp, tmp + n);
     } else if (n == 0) {
         disconnect("closed by the other side");
-    } else if (!err_would_block(last_error())) {
-        disconnect("read failed");
+    } else {
+        const int e = last_error();
+        if (!err_would_block(e)) disconnect("read failed, " + describe_error(e));
     }
 }
 

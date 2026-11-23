@@ -1,7 +1,7 @@
 // re7mp_cli: headless front end for the engine (handy for debugging and scripts).
 //   re7mp_cli --data-dir <game>/reframework/data --loopback
 //   re7mp_cli --data-dir <game>/reframework/data --peer <host:port> [--listen <port>]
-//   --tcp-host (the default) or --tcp-join picks the side, --bot-stationary for a parked loopback bot, --bot-follow for one that walks after you (9.37)
+//   --tcp-host (the default) or --tcp-join picks the side, Ethan's friend (the loopback bot) walks after you by default (10.5; Orbit is gone), --bot-stationary parks it, --bot-follow is the default (10.26: --bot-beside is gone; in the game the script's F5 key switches follow / stay), --bot-as <ethan|mia|clancy|pete|andre|chris|zoe|joe> sets what it looks like
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -38,6 +38,8 @@ int main(int argc, char** argv) {
             cfg.bot_mode = re7mp::BotMode::Stationary;
         } else if (a == "--bot-follow") {  // 9.37
             cfg.bot_mode = re7mp::BotMode::Follow;
+        } else if (a == "--bot-as" && has_next) {  // 10.5: what Ethan's friend looks like
+            cfg.bot_character = argv[++i];
         } else if (a == "--name" && has_next) {
             cfg.name = argv[++i];
         } else if (a == "--data-dir" && has_next) {

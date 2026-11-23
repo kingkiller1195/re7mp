@@ -30,6 +30,9 @@ inline const std::vector<CharacterChoice>& character_choices() {
         {"clancy", "Clancy Jarvis"},
         {"pete", "Pete Walken"},        // 9.37: enemy models the script can wear as a body (em9200, em6200)
         {"andre", "Andre Stickland"},
+        {"chris", "Chris Redfield (Not a Hero)"},  // 10.5: the full models in the pack (the script wears them as a body; the pack must be installed)
+        {"zoe", "Zoe Baker (Daughters)"},
+        {"joe", "Joe Baker (End of Zoe)"},
     };
     return v;
 }

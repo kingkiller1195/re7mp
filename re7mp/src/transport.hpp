@@ -59,6 +59,7 @@ private:
     void check_connect();
     void on_connected(uintptr_t s, const std::string& what);
     void disconnect(const std::string& why);
+    void note_refused(uint32_t ip_be);
     void flush();
     void read_some();
     bool extract_frame(void* buf, size_t cap, int& n_out);
@@ -75,6 +76,10 @@ private:
     std::chrono::steady_clock::time_point next_connect_{}, connect_started_{};
     std::deque<std::string> status_;
     bool wsa_started_ = false;
+    // 10.19a: what the log can say about a link that connects and drops at once (seen over Radmin VPN: "connected to the host", one second later "read failed")
+    std::chrono::steady_clock::time_point connected_at_{}, refused_at_{};
+    int quick_drops_ = 0;           // Join: connections in a row that were dropped within 3 s
+    uint32_t refused_ip_be_ = 0;    // Host: the last address that was turned away (logged once, again after 30 s)
 };
 
 }  // namespace re7mp

@@ -1,5 +1,5 @@
 #pragma once
-// What the loopback bot says back, so features that need a second player can be tried alone (9.13):
+// What Ethan's friend (the loopback bot until 10.4) says back, so features that need a second player can be tried alone (9.13):
 //  - a gift (message kind 5, "id|count") is answered with kind 10 ("g|id|count|ok|..."), like a receiving script does,
 //    otherwise the sender's script waits for a confirmation that never comes and never takes the item out of the inventory;
 //  - a drop (kind 6, "id|count|x|y|z") is answered the same way ("d|id|count|ok|...");
@@ -72,7 +72,7 @@ inline std::string bot_answer_gift(const std::string& payload) {
     const auto p = bot_split(payload, '|');
     int n = 0;
     if (p.size() != 2 || !bot_item_id_ok(p[0]) || !bot_parse_count(p[1], 1, 999, n)) return "";
-    return "g|" + p[0] + "|" + std::to_string(n) + "|ok|the loopback bot took it";
+    return "g|" + p[0] + "|" + std::to_string(n) + "|ok|Ethan's friend took it";
 }
 
 // "Herb|1|1.00|0.00|2.00" -> "d|Herb|1|ok|..."
@@ -84,7 +84,7 @@ inline std::string bot_answer_drop(const std::string& payload) {
     for (int i = 2; i < 5; ++i) {
         if (!bot_parse_number(p[static_cast<size_t>(i)], v)) return "";
     }
-    return "d|" + p[0] + "|" + std::to_string(n) + "|ok|the loopback bot sees it on the ground";
+    return "d|" + p[0] + "|" + std::to_string(n) + "|ok|Ethan's friend sees it on the ground";
 }
 
 struct BotEvent {
@@ -155,6 +155,30 @@ inline std::string bot_health_text_hp(int hp) {
     return b;
 }
 
+// (10.8) The script can set the friend's health exactly ("hp:<n>", kind 11): the fighting friend heals itself with an item that gives back a part of
+// its health, and "up" could only restore all of it. Returns the health (2..kBotHealthMax), or 0 when this is not such a command or the number is
+// damaged. 1 is not allowed: 1 health is "down", and only a hit or the "down" command takes it there.
+inline int bot_hp_command(const std::string& payload) {
+    if (payload.compare(0, 3, "hp:") != 0) return 0;
+    int n = 0;
+    if (!bot_parse_count(payload.substr(3), 2, kBotHealthMax, n)) return 0;
+    return n;
+}
+
+// (10.9) After the player's game over the script asks the friend ("revive", kind 11) to get up at FULL health (whether it was down, hurt or fine) and to be
+// put next to the player (the reload put the player somewhere else; a bot closer than kFollowSnap would only walk there, and a bot that was down stays
+// where it fell). It is not a down / up command (bot_command says -1 for it): the script sends "up" right after it, which an exe from before 10.9 obeys.
+inline bool bot_revive_command(const std::string& payload) { return payload == "revive"; }
+
+// (10.26) Follow or stay put. The window's radios are gone; the script's F5 key sends "mode:follow" or "mode:stay" (kind 11), once when the key is
+// pressed and again every few seconds like the other friend commands (a repeat changes nothing). Returns 1 = follow you, 2 = stay where it stands,
+// 0 = not a mode command (or a word that is neither: it keeps what it does).
+inline int bot_mode_command(const std::string& payload) {
+    if (payload == "mode:follow") return 1;
+    if (payload == "mode:stay") return 2;
+    return 0;
+}
+
 // What kind 11 asks for: 1 = go down, 0 = get up, -1 = anything else.
 inline int bot_command(const std::string& payload) {
     if (payload == "down") return 1;
@@ -162,16 +186,20 @@ inline int bot_command(const std::string& payload) {
     return -1;
 }
 
-// (9.33) The loopback bot can say which character it is (the script's "char" event, the one a real player's script sends every 10 s), so the
-// body that is made from a character's files (Mia, Clancy, Pete, Andre) can be tried without a second player. Kind 11 with "char:ethan", "char:mia" or
-// "char:clancy" (also "char:pete", "char:andre": 9.37) sets it; "char:none" takes it back (the bot says nothing again, as it always did).
-// Returns 1 and the key (set it), 2 (take it back), or 0 (not a character command, or a key that is none of the three).
+// (9.33) The friend can say which character it is (the script's "char" event, the one a real player's script sends every 10 s), so the body that is
+// made from a character's files (Mia, Clancy, Pete, Andre; Chris, Zoe and Joe since 10.5) is shown on it. 10.5: the exe's "Appear as" drop-down picks it
+// (Engine::set_bot_character); the script's panel can still ask through kind 11, "char:<key>" ("char:none" takes it back: it says nothing again).
+// The keys are the script's own (CFG.who.LIST).
+inline bool bot_character_ok(const std::string& k) {
+    return k == "ethan" || k == "mia" || k == "clancy" || k == "pete" || k == "andre" || k == "chris" || k == "zoe" || k == "joe";
+}
+// Returns 1 and the key (set it), 2 (take it back), or 0 (not a character command, or a key that is none of the known ones).
 inline int bot_character_command(const std::string& payload, std::string& key) {
     key.clear();
     if (payload.compare(0, 5, "char:") != 0) return 0;
     const std::string k = payload.substr(5);
     if (k == "none") return 2;
-    if (k == "ethan" || k == "mia" || k == "clancy" || k == "pete" || k == "andre") {
+    if (bot_character_ok(k)) {
         key = k;
         return 1;
     }
@@ -218,11 +246,11 @@ inline float bot_follow_step(BotFollow& f, float px, float pz, float dt) {
 }
 
 // (9.38) What the loopback bot DOES with its body, picked in the script's drop-down (kind 11, "state:<key>"). Timer is how it always was (the exe's
-// radio decides where it walks, and it blocks / crouches / heals on a 16 s loop); Copy does what you do (your pose and gun bits, your rotation, and it
-// stands kCopyOffsetX metres beside you, so it moves exactly as fast as you); the rest show one state, so each animation can be looked at as long as
-// wanted: the ones with a speed circle around a fixed spot at that speed, the others stand still where they are.
+// mode (follow or stay, 10.26: the script's F5) decides where it walks, and it blocks / crouches / heals on a 16 s loop); Copy does what you do (your
+// pose and gun bits, your rotation) wherever the mode puts it (10.26: it used to stand 1.6 m beside you; "Beside you" is gone); the rest show one state,
+// so each animation can be looked at as long as wanted: the ones with a speed circle around a fixed spot at that speed, the others stand still where
+// they are.
 enum class BotAct : int { Timer = 0, Copy, Idle, Walk, Run, Crouch, CrouchWalk, Guard, Heal, Gun, GunWalk, GunRun, Aim, Shoot };
-constexpr float kCopyOffsetX = 1.6f;      // metres: the Copy bot stands this far from you (along the world x axis)
 constexpr float kBotWalkSpeed = 1.4f;     // metres per second (the script calls anything under 2.4 a walk)
 constexpr float kBotRunSpeed = 4.5f;      // ... and from 2.4 a run
 constexpr float kBotCrouchWalkSpeed = 0.9f;

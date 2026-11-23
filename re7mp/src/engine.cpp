@@ -1,4 +1,5 @@
 #include "engine.hpp"
+#include "steam_transport.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -21,10 +22,9 @@
 namespace re7mp {
 
 namespace {
-constexpr float kOrbitRadius = 3.0f;  // metres: the loopback bot circles you at this distance
-constexpr float kOrbitSpeed = 0.8f;   // radians per second
-constexpr const char* kLoopbackName = "Loopback Bot";
-constexpr int kBotReadyDelayMs = 1500;  // how long the loopback bot takes to "press ready" after you
+constexpr float kOrbitRadius = 3.0f;  // metres: the friend circles a spot at this distance when the script asks for a one-state animation test ("walk", "run" ...)
+constexpr const char* kLoopbackName = "Ethan's friend";  // (10.5; "Loopback Bot" before: the script knows both names)
+constexpr int kBotReadyDelayMs = 1500;  // how long the friend takes to "press ready" after you
 constexpr size_t kMaxPendingMessages = 64;
 constexpr size_t kInboxSize = 64;
 using Clock = std::chrono::steady_clock;
@@ -51,7 +51,8 @@ struct PendingMessage {
     uint32_t id = 0;
     uint16_t kind = 0;
     std::string payload;
-    Clock::time_point first, last;
+    Clock::time_point first, last;  // first = when the retry clock started (it only runs while the other player is reachable)
+    Clock::time_point born;         // when the Lua script handed it over (hard limit, in case the other player never shows up)
 };
 
 std::string timestamp_now() {
@@ -114,6 +115,15 @@ void Engine::set_bot_mode(BotMode mode) {
     if (mode == BotMode::Stationary) bot_teleport_ = true;
 }
 
+// (10.5) The window's "Appear as" choice for the friend (works while running). "" / "auto" / "none" = the friend says nothing about its character again.
+void Engine::set_bot_character(const std::string& key) {
+    const bool clear = key.empty() || key == "auto" || key == "none";
+    if (!clear && !bot_character_ok(key)) return;  // a key that is none of the known ones changes nothing
+    std::lock_guard<std::mutex> g(mu_);
+    bot_char_want_ = clear ? std::string() : key;
+    ++bot_char_ver_;
+}
+
 void Engine::teleport_bot_here() { bot_teleport_ = true; }
 
 bool Engine::start(const Config& cfg, std::string& err) {
@@ -142,7 +152,19 @@ bool Engine::start(const Config& cfg, std::string& err) {
             fake_ = std::move(b);
         }
     } else {
-        if (cfg_.transport == Transport::TcpHost) {
+        if (cfg_.transport == Transport::SteamHost || cfg_.transport == Transport::SteamJoin) {
+            if (!cfg_.steam_api) {
+                err = "Steam is not available in this build";
+                return false;
+            }
+            auto a = SteamTransport::create(cfg_.steam_api(), cfg_.peer_steam_id, err);
+            if (!a) return false;
+            {   // the role follows the two Steam IDs (the lower one hosts); the window only guesses it from the registry, Steam itself is the truth
+                const Transport right = steam_i_host(a->self_id(), a->peer_id()) ? Transport::SteamHost : Transport::SteamJoin;
+                cfg_.transport = right;
+            }
+            net_ = std::move(a);
+        } else if (cfg_.transport == Transport::TcpHost) {
             auto a = TcpTransport::create(TcpTransport::Role::Host, cfg_.listen_port, cfg_.peer_host, cfg_.peer_port, err);
             if (!a) return false;
             net_ = std::move(a);
@@ -168,6 +190,11 @@ bool Engine::start(const Config& cfg, std::string& err) {
     }
     bot_mode_ = static_cast<int>(cfg_.bot_mode);
     bot_teleport_ = cfg_.bot_mode == BotMode::Stationary;
+    bot_char_ver_ = 0;
+    {
+        std::lock_guard<std::mutex> g(mu_);
+        bot_char_want_.clear();
+    }
     stop_ = false;
     running_ = true;
     thread_ = std::thread(&Engine::run, this);
@@ -247,6 +274,7 @@ void Engine::run() {
     // loopback bot state
     bool bot_seen_ready = false, bot_ready = false, bot_go = false;
     bool bot_anchor_valid = false;
+    bool bot_stay_here = false;                 // (10.26) the script said "stay": the next position packet parks the friend where it stands
     float bot_ax = 0, bot_ay = 0, bot_az = 0;
     BotFollow bot_follow;                       // (9.37) where the following bot walks
     bool bot_follow_spawn = false;              // "Move bot to me" in follow mode: put it next to the player, not where it was
@@ -261,8 +289,9 @@ void Engine::run() {
     bool bot_hp_report = false;       // a hit changed it: tell the script at once
     float bot_fx = 0, bot_fy = 0, bot_fz = 0;
     Clock::time_point bot_health_at{};
-    std::string bot_char;               // (9.33) the character the bot says it is ("" = it says nothing); the script is told every 10 s
+    std::string bot_char = bot_character_ok(cfg_.bot_character) ? cfg_.bot_character : std::string();  // (9.33; 10.5: the window's choice at the start) the character the friend says it is ("" = it says nothing); the script is told every 10 s
     Clock::time_point bot_char_at{};
+    uint32_t bot_char_seen = 0;         // (10.5) the last pick of the window this loop has applied
     // (9.38) what the bot does with its body (the script's drop-down): Timer = as before, Copy = what you do, the rest one state each
     BotAct bot_act = BotAct::Timer;
     bool bot_act_spot = false, bot_act_centre = false;  // a spot to stand on / a centre to circle, set when the state changes
@@ -273,7 +302,7 @@ void Engine::run() {
     std::vector<uint8_t> bufv(20480);  // big enough for a file chunk
 
     // --- co-op save sharing state ---
-    const char* role_name = cfg_.mode == Mode::Loopback || cfg_.transport == Transport::TcpHost ? "host" : "join";
+    const char* role_name = cfg_.mode == Mode::Loopback || cfg_.transport == Transport::TcpHost || cfg_.transport == Transport::SteamHost ? "host" : "join";
     CoopManifest manifest(cfg_.data_dir / "re7mp_coop_saves.json");
     std::unique_ptr<SaveWatcher> watcher;
     bool save_sync_on = false;
@@ -326,6 +355,9 @@ void Engine::run() {
     log(std::string("re7mp.exe v") + kReleaseVersion + " (protocol " + std::to_string(static_cast<int>(kProtocolVersion)) + ")");
     if (cfg_.mode == Mode::Loopback) {
         log("Started in loopback mode over TCP: a fake player will appear once the game is running.");
+    } else if (cfg_.transport == Transport::SteamHost || cfg_.transport == Transport::SteamJoin) {
+        log(std::string("Started: over Steam's relay to Steam ID ") + std::to_string(cfg_.peer_steam_id) + " (" +
+            (cfg_.transport == Transport::SteamHost ? "you host" : "they host") + "); waiting for the other player.");
     } else if (cfg_.transport == Transport::TcpHost) {
         log("Started: hosting on TCP " + std::to_string(cfg_.listen_port) + ", waiting for the other player.");
     } else {
@@ -398,15 +430,24 @@ void Engine::run() {
                 pm.id = ++msg_seq;
                 pm.kind = lm.kind;
                 pm.payload = std::move(lm.payload);
-                pm.first = pm.last = now;
+                pm.first = pm.last = pm.born = now;
                 send_message_packet(*net_, session, pm.id, pm.kind, pm.payload);
                 pending_msgs.push_back(std::move(pm));
                 ++st.messages_sent;
             }
         }
+        // (10.12) The 15 s retry clock only runs while the other player is reachable (a packet from them in the last 6 s). The old clock
+        // started when the script handed the message over, so health/version messages queued while the link was still coming up (Steam relay,
+        // a save being copied, the other game loading) were reported as "never confirmed" although nobody could have confirmed them yet.
+        // They now wait for the link, with a 3-minute hard limit.
+        const bool link_up = last_any != Clock::time_point{} && now - last_any < seconds(6);
         for (auto it = pending_msgs.begin(); it != pending_msgs.end();) {
-            if (now - it->first > seconds(15)) {
-                log("A message (kind " + std::to_string(it->kind) + ") was never confirmed by the other player.");
+            if (!link_up && now - it->born <= seconds(180)) {
+                it->first = now;  // not reachable: the clock stands still and nothing is resent into the void
+                ++it;
+            } else if (now - it->first > seconds(15) || now - it->born > seconds(180)) {
+                log("A message (kind " + std::to_string(it->kind) + ") was never confirmed by the other player" +
+                    (link_up ? "." : " (the link to them was down)."));
                 it = pending_msgs.erase(it);
             } else {
                 if (now - it->last >= milliseconds(250)) {
@@ -440,7 +481,7 @@ void Engine::run() {
                 pm.id = ++msg_seq;
                 pm.kind = kMsgAccount;
                 pm.payload = account_text(my_account);
-                pm.first = pm.last = now;
+                pm.first = pm.last = pm.born = now;
                 send_message_packet(*net_, session, pm.id, pm.kind, pm.payload);
                 pending_msgs.push_back(std::move(pm));
             }
@@ -493,7 +534,9 @@ void Engine::run() {
                         out_file->label = "CO-OP " + (nm.empty() ? std::string("Player") : nm) + " " + timestamp_now();
                         out_file->data = std::move(data);
                         out_file->started = now;
-                        log("Sending your save (" + p.filename().u8string() + ", " +
+                        // 10.9: which Load-screen row the exe takes this file for, so it can be compared with the row you saved in
+                        log("Sending your save (" + p.filename().u8string() +
+                            (out_file->slot > 0 ? " = Load screen row " + std::to_string(out_file->slot) : std::string()) + ", " +
                             std::to_string(out_file->data.size() / 1024) + " KB) to the other player...");
                     }
                 }
@@ -581,6 +624,19 @@ void Engine::run() {
             std::string unused;
             while (fake_->take_status(unused)) {}
             const auto mode = static_cast<BotMode>(bot_mode_.load());
+            if (bot_char_ver_.load() != bot_char_seen) {  // (10.5) the window picked what the friend looks like
+                std::string want;
+                {
+                    std::lock_guard<std::mutex> g(mu_);
+                    want = bot_char_want_;
+                    bot_char_seen = bot_char_ver_.load();
+                }
+                if (want != bot_char) {
+                    log(want.empty() ? std::string("Ethan's friend: says nothing about its character again.") : "Ethan's friend: now looks like " + want + ".");
+                    bot_char = want;
+                    bot_char_at = Clock::time_point{};  // said at once
+                }
+            }
             for (int i = 0; i < 16; ++i) {
                 const int n = fake_->recv(buf, kBuf, 0);
                 if (n <= 0) break;
@@ -598,16 +654,24 @@ void Engine::run() {
                         bot_az = in.z;
                         bot_anchor_valid = true;
                     }
+                    if (bot_stay_here) {  // (10.26) the script said "stay": it stops where it stands now (not where you are)
+                        bot_stay_here = false;
+                        if (bot_l_valid && !tele) {
+                            bot_ax = bot_lx;
+                            bot_ay = in.y;
+                            bot_az = bot_lz;
+                            bot_anchor_valid = true;
+                        }
+                    }
                     if (tele) {  // (9.37) "Move bot to me" also puts a following bot next to you
                         bot_follow.valid = false;
                         bot_follow_spawn = true;
                     }
                     float bx, by, bz;
-                    if (bot_act == BotAct::Copy) {  // (9.38) beside you, moving as you move
-                        bx = in.x + kCopyOffsetX;
-                        by = in.y;
-                        bz = in.z;
-                    } else if (bot_act != BotAct::Timer) {  // (9.38) one state: circle a fixed spot at that state's speed, or stand
+                    // (10.1) Where the bot stands is the mode's choice for "Copies me" and the old timer (10.26: follow or stay, the script's F5 key;
+                    // it was the window's radios, with "beside you" as a third).
+                    // Only the one-state choices of the script's list (idle, walk, run ...) place the bot themselves.
+                    if (bot_act != BotAct::Timer && bot_act != BotAct::Copy) {  // (9.38) one state: circle a fixed spot at that state's speed, or stand
                         float dt = std::chrono::duration<float>(now - bot_act_at).count();
                         bot_act_at = now;
                         if (!(dt > 0.0f) || dt > 0.25f) dt = 0.0f;
@@ -636,7 +700,7 @@ void Engine::run() {
                         bx = bot_ax;
                         by = bot_ay;
                         bz = bot_az;
-                    } else if (mode == BotMode::Follow) {
+                    } else {  // (10.5) BotMode::Follow, the default: walk after you (Orbit is gone)
                         float dt = std::chrono::duration<float>(now - bot_follow_at).count();
                         bot_follow_at = now;
                         if (!bot_follow.valid && !bot_follow_spawn && bot_l_valid) {  // switched over from another mode: walk from where it stood
@@ -650,10 +714,6 @@ void Engine::run() {
                         bx = bot_follow.x;
                         by = in.y;
                         bz = bot_follow.z;
-                    } else {
-                        bx = in.x + kOrbitRadius * std::cos(kOrbitSpeed * t);
-                        by = in.y;
-                        bz = in.z + kOrbitRadius * std::sin(kOrbitSpeed * t);
                     }
                     if (bot_down) {  // down: it stays where it fell
                         if (!bot_fall_valid) {
@@ -796,7 +856,7 @@ void Engine::run() {
                         const std::string answer = m_kind == kMsgGive ? bot_answer_gift(m_payload) : bot_answer_drop(m_payload);
                         if (!answer.empty()) {
                             send_message_packet(*fake_, fake_session, ++fake_msg_id, kMsgGiveAnswer, answer);
-                            log(std::string("Loopback bot answered ") + (m_kind == kMsgGive ? "a gift" : "a drop") + ": " + answer);
+                            log(std::string("Ethan's friend answered ") + (m_kind == kMsgGive ? "a gift" : "a drop") + ": " + answer);
                         }
                     } else if (m_kind == kMsgAccount) {
                         // (9.42) answer like a real player's re7mp.exe: the bot "uses" the same Steam account (it is this PC)
@@ -806,12 +866,12 @@ void Engine::run() {
                         const int cc = bot_character_command(m_payload, ckey);
                         if (cc == 1) {
                             if (ckey != bot_char) {  // a new answer goes out at once; the script repeats the command now and then, and a repeat changes nothing
-                                log("Loopback bot: now says it is " + ckey + ".");
+                                log("Ethan's friend: now says it is " + ckey + ".");
                                 bot_char = ckey;
                                 bot_char_at = Clock::time_point{};
                             }
                         } else if (cc == 2) {
-                            if (!bot_char.empty()) log("Loopback bot: says nothing about its character again.");
+                            if (!bot_char.empty()) log("Ethan's friend: says nothing about its character again.");
                             bot_char.clear();
                         }
                         BotAct want = bot_act;
@@ -820,7 +880,38 @@ void Engine::run() {
                             bot_act_spot = false;
                             bot_act_centre = false;
                             bot_act_at = now;
-                            log(std::string("Loopback bot: now does '") + bot_act_key(want) + "'.");
+                            log(std::string("Ethan's friend: now does '") + bot_act_key(want) + "'.");
+                        }
+                        const int want_mode = bot_mode_command(m_payload);  // (10.26) the script's F5 key: follow you / stay where it stands
+                        if (want_mode != 0) {
+                            const BotMode now_mode = static_cast<BotMode>(bot_mode_.load());
+                            const BotMode new_mode = want_mode == 2 ? BotMode::Stationary : BotMode::Follow;
+                            if (new_mode != now_mode) {  // the script repeats it now and then: a repeat changes nothing
+                                bot_mode_ = static_cast<int>(new_mode);
+                                bot_stay_here = new_mode == BotMode::Stationary;
+                                log(new_mode == BotMode::Stationary ? "Ethan's friend: told to stay where it is." : "Ethan's friend: told to follow you.");
+                            }
+                        }
+                        const int set_hp = bot_hp_command(m_payload);  // (10.8) the script heals the friend by an exact amount
+                        if (set_hp > 0 && !bot_down) {
+                            bot_hp = set_hp;
+                            bot_hp_report = true;
+                            char hpnote[96];
+                            std::snprintf(hpnote, sizeof(hpnote), "Ethan's friend: health set to %d / %d.", bot_hp, kBotHealthMax);
+                            log(hpnote);
+                        }
+                        if (bot_revive_command(m_payload)) {  // (10.9) after the player's game over: up at full health, next to the player
+                            const bool was_down = bot_down;
+                            bot_down = false;
+                            bot_fall_valid = false;
+                            bot_hp = kBotHealthMax;
+                            if (was_down) bot_say = 2;  // "up" + a health report go out
+                            else bot_hp_report = true;
+                            bot_teleport_ = true;       // the next position packet puts it next to the player (following and parked bots alike)
+                            bot_act_centre = false;     // a one-state bot circles the player again
+                            bot_act_spot = false;
+                            log(was_down ? "Ethan's friend: told to revive after a game over: up at full health, put next to you."
+                                         : "Ethan's friend: told to revive after a game over: full health, put next to you.");
                         }
                         const int cmd = bot_command(m_payload);
                         if (cmd == 1 && !bot_down) {
@@ -828,16 +919,16 @@ void Engine::run() {
                             bot_fall_valid = false;
                             bot_say = 1;
                             bot_hp_report = false;
-                            log("Loopback bot: told to go down.");
+                            log("Ethan's friend: told to go down.");
                         } else if (cmd == 0 && bot_down) {
                             bot_down = false;
                             bot_hp = kBotHealthMax;
                             bot_say = 2;
-                            log("Loopback bot: told to get up.");
+                            log("Ethan's friend: told to get up.");
                         } else if (cmd == 0 && bot_hp < kBotHealthMax) {  // (9.33) "up" also heals a bot that was shot but is still standing
                             bot_hp = kBotHealthMax;
                             bot_hp_report = true;
-                            log("Loopback bot: told to get up (healed to full health).");
+                            log("Ethan's friend: told to get up (healed to full health).");
                         }
                     } else if (m_kind == kMsgHealth) {
                         BotEvent be;
@@ -848,14 +939,14 @@ void Engine::run() {
                                 if (!bot_down) {  // (9.33) friendly fire: a hit takes health off, never below 1; at 1 it goes down
                                     bot_hp = bot_apply_damage(bot_hp, ff);
                                     bot_hp_report = true;
-                                    std::snprintf(note, sizeof(note), "Loopback bot: shot for %d, health now %d / %d.", ff, bot_hp, kBotHealthMax);
+                                    std::snprintf(note, sizeof(note), "Ethan's friend: shot for %d, health now %d / %d.", ff, bot_hp, kBotHealthMax);
                                     log(note);
                                     if (bot_hp <= 1) {
                                         bot_down = true;
                                         bot_fall_valid = false;
                                         bot_say = 1;
                                         bot_hp_report = false;  // the "down" report says it
-                                        log("Loopback bot: its health ran out, it goes down.");
+                                        log("Ethan's friend: its health ran out, it goes down.");
                                     }
                                 }
                             } else if (bot_down && bot_is_healing(be) && bot_fall_valid) {
@@ -864,9 +955,9 @@ void Engine::run() {
                                     bot_down = false;
                                     bot_hp = kBotHealthMax;
                                     bot_say = 2;
-                                    std::snprintf(note, sizeof(note), "Loopback bot: got up (a %s %.1f m away).", be.kind.c_str(), d);
+                                    std::snprintf(note, sizeof(note), "Ethan's friend: got up (a %s %.1f m away).", be.kind.c_str(), d);
                                 } else {
-                                    std::snprintf(note, sizeof(note), "Loopback bot: still down (a %s %.1f m away, it takes %.0f m).",
+                                    std::snprintf(note, sizeof(note), "Ethan's friend: still down (a %s %.1f m away, it takes %.0f m).",
                                                   be.kind.c_str(), d, kBotReviveRadius);
                                 }
                                 log(note);

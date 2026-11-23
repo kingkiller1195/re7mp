@@ -71,4 +71,25 @@ with zipfile.ZipFile(os.path.join(OUT, "release_noexe.zip"), "w") as z:
     add(z, "re7mp/README.md", b"readme\n")
     add(z, "re7mp/lua/re7mp.lua", b"-- lua\n")
 
+# (9.45) a release that carries its own script and defaults, one whose script is from another release, and the author's
+# model pack (the files are tiny stand-ins; the layout is the real one: natives/stm/..., plus a modinfo.ini and a screenshot)
+LUA_SCRIPT = b'local CFG = {\n    RELEASE = "0.6",\n    BUILD = "9.45",\n}\n'
+with zipfile.ZipFile(os.path.join(OUT, "release_pkg.zip"), "w") as z:
+    add(z, "re7mp/re7mp.exe", fake_exe(90000, 31))
+    add(z, "re7mp/lua/re7mp.lua", LUA_SCRIPT)
+    add(z, "re7mp/data/re7mp/defaults.json", b'{"format":1,"clips":{}}')
+with zipfile.ZipFile(os.path.join(OUT, "release_pkg_wrong.zip"), "w") as z:
+    add(z, "re7mp/re7mp.exe", fake_exe(90000, 31))
+    add(z, "re7mp/lua/re7mp.lua", b'local CFG = {\n    RELEASE = "0.5",\n    BUILD = "9.44",\n}\n')
+    add(z, "re7mp/data/re7mp/defaults.json", b'{"format":1,"clips":{}}')
+with zipfile.ZipFile(os.path.join(OUT, "models.zip"), "w") as z:
+    add(z, "Third Person Full Model Placeholders/modinfo.ini", b"[Mod]\nauthor=AfroJackX\n")
+    add(z, "Third Person Full Model Placeholders/screenshot.jpg", b"jpg")
+    add(z, "Third Person Full Model Placeholders/natives/stm/character/player/pl2000/pl2001/pl2001.mesh.220128762", b"mia mesh\n" * 500)
+    add(z, "Third Person Full Model Placeholders/natives/stm/character/player/pl2000/pl2001/pl2001.mdf2.21", b"mia material\n")
+    add(z, "Third Person Full Model Placeholders/natives/stm/character/player/pl2000/pl2001/pl2001_BM.tex.35", b"mia texture\n" * 300)
+    add(z, "Third Person Full Model Placeholders/natives/stm/ch8/character/player/pl1000/pl1001/pl1001.mesh.220128762", b"chris mesh\n" * 400)
+    add(z, "Third Person Full Model Placeholders/natives/stm/character/enemy/em0000.mesh.1", b"not a player part\n")
+    add(z, "Third Person Full Model Placeholders/natives/../../outside.mesh.1", b"must never be written\n")
+
 print("wrote", sorted(os.listdir(OUT)))

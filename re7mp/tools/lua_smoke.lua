@@ -139,6 +139,7 @@ local function make_go(name, pos, comps, rot0)
             calls[#calls + 1] = string.format("%s.set_Position %.2f %.2f %.2f", name, v.x, v.y, v.z)
         end,
         get_Rotation = function() return rot end,
+        set_Rotation = function(_, q) rot = { x = q.x, y = q.y, z = q.z, w = q.w } calls[#calls + 1] = string.format("%s.set_Rotation", name) end, -- (10.19)
         set_EulerAngle = function(_, v) calls[#calls + 1] = string.format("%s.set_EulerAngle %.2f", name, v.y) end,
         get_Child = function() return nil end,
         get_Parent = function() return nil end,
@@ -185,7 +186,7 @@ local function new_environment()
     local env = {
         -- (9.33) a running exe has made its inbox file: with none at all the script reads it less and less often (see CFG.bridge)
         files = { ["re7mp_msg_in.json"] = { epoch = 1, msgs = {} } }, log = {}, hooks = {}, posthooks = {}, frame_cbs = {}, ui_cbs = {}, reset_cbs = {},
-        texts = {}, lines = 0, quads = 0, ui_texts = {}, ui_press = {}, combo_override = {}, check_override = {}, slider_override = {}, input_override = {}, keys = {},
+        texts = {}, lines = 0, quads = 0, ui_texts = {}, ui_nodes = {}, ui_press = {}, combo_override = {}, check_override = {}, slider_override = {}, input_override = {}, keys = {},
         clock = 100.0, singletons = {}, scene = nil, camera_pos = vec(0, 1.6, 0), phase_cbs = {},
         -- 9.9: the fake physics. A ray hits the floor (the plane y = 0) on the layers in floor_layers, and a wall (the plane
         -- x = wall_x, if set) on the layers in wall_layers. physics_broken makes every cast fail.
@@ -276,6 +277,9 @@ local function new_environment()
     local G = env.G
     G._G = G
     G.RE7MP_TEST_FLUSH_S = 2 -- (9.36) the script writes the debug file every 15 s while playing; the tests keep the old 2 s
+    G.RE7MP_TEST_QUIET_S = 0 -- (10.15) the script reads the message inbox ten times a second while it is quiet; the older tests keep reading it on every pose read
+    G.RE7MP_TEST_ACTIVE_GAP, G.RE7MP_TEST_ACTIVE_S = 0, 2 -- (10.20) the script now keeps 0.07 s between inbox reads for 1 s after a message; the older tests keep reading on every pose read for 2 s
+    G.RE7MP_TEST_SAVES_S = 1 -- (10.20) the script reads re7mp_coop_saves.json every 5 s (15 s when idle); the older tests keep the 1 s read
 
     G.log = { info = function(s) env.log[#env.log + 1] = s end }
     G.json = {
@@ -308,9 +312,15 @@ local function new_environment()
             if env.line_pts then env.line_pts[#env.line_pts + 1] = { x1, y1 } env.line_pts[#env.line_pts + 1] = { x2, y2 } end
         end,
         filled_quad = function() env.quads = env.quads + 1 end,
+        -- (10.15) the boss bar: draw.filled_rect(x, y, w, h, color); env.rect_list keeps what was drawn
+        filled_rect = function(x, y, w, h, c)
+            env.rects = (env.rects or 0) + 1
+            env.rect_list = env.rect_list or {}
+            env.rect_list[#env.rect_list + 1] = { x = x, y = y, w = w, h = h, c = c }
+        end,
     }
     G.imgui = {
-        tree_node = function() return true end, tree_pop = function() end,
+        tree_node = function(label) env.ui_nodes[#env.ui_nodes + 1] = tostring(label) return true end, tree_pop = function() end,
         text = function(s) env.ui_texts[#env.ui_texts + 1] = tostring(s) end,
         button = function(label)
             if env.ui_press[label] then
@@ -346,7 +356,9 @@ local function new_environment()
             end
             return false, v
         end,
-        combo = function(label, idx)
+        combo = function(label, idx, items)
+            env.seen_combos = env.seen_combos or {}
+            env.seen_combos[label] = { idx = idx, items = items } -- (10.22: what the panel showed in the box, and which entry was selected)
             local o = env.combo_override[label]
             if o then
                 env.combo_override[label] = nil
@@ -537,6 +549,12 @@ local function new_environment()
 end
 
 local function load_script(env)
+    -- (10.7) four menu sections were retired (hidden unless settings.json has "show_retired_panels": true); the tests that look at them need them shown
+    if not env.retired_hidden then
+        local st = env.files["re7mp/settings.json"]
+        if type(st) ~= "table" then st = {} env.files["re7mp/settings.json"] = st end
+        if st.show_retired_panels == nil then st.show_retired_panels = true end
+    end
     local f, err = loadfile(SCRIPT, "t", env.G)
     if not f then error("syntax: " .. tostring(err)) end
     f()
@@ -560,6 +578,7 @@ end
 
 local function run_ui(env)
     env.ui_texts = {}
+    env.ui_nodes = {}
     for _, cb in ipairs(env.ui_cbs) do
         local ok, err = pcall(cb)
         if not ok then
@@ -780,7 +799,7 @@ end
 local function host_role_files(env, role, transport)
     env.files["re7mp_in.json"] = {
         seq = 1, x = 3, y = 1.6, z = 4, qx = 0, qy = 0, qz = 0, qw = 1, flags = 0, recv_count = 1,
-        name = "Bob", transport = transport or "tcp", role = role, exe = "0.9", proto = 6,
+        name = "Bob", transport = transport or "tcp", role = role, exe = "0.11", proto = 6,
     }
 end
 
@@ -807,6 +826,289 @@ local function bump_remote(env, n)
     d.recv_count = d.recv_count + 1
 end
 
+-- (10.15) The checks of build 10.15 (one health pool, the other player's weapon on their body, the Molded copies) are in tools/lua_smoke_1015.lua. It is a chunk that
+-- gets this file's helpers in one table (this file is at Lua's limit of 200 local variables, so nothing new can be a local here). RE7MP_ONLY_1015=1 runs only that file,
+-- which takes seconds instead of minutes.
+function run_1015_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1015.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.15 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, Obj = Obj, make_td = make_td, make_go = make_go, make_scene = make_scene, vec = vec,
+        new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        near_remote = near_remote, push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui,
+        ui_has = ui_has, texts_have = texts_have, log_has = log_has, calls_have = calls_have, messages_of_kind = messages_of_kind,
+        get_calls = function() return calls end, set_calls = function(t) calls = t end, get_types = function() return TYPES end,
+        weapons_by_type = weapons_by_type, SCRIPT = SCRIPT,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.15 checks stopped with an error: " .. tostring(e))
+    end
+end
+-- (10.18) the checks of build 10.18 (story points, enemy targeting, the enemy hand-over) are in tools/lua_smoke_1018.lua, loaded the same way. RE7MP_ONLY_1018=1 runs only that file.
+function run_1018_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1018.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.18 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, Obj = Obj, make_td = make_td, make_go = make_go, make_scene = make_scene, vec = vec,
+        new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui,
+        ui_has = ui_has, texts_have = texts_have, log_has = log_has, calls_have = calls_have, messages_of_kind = messages_of_kind,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.18 checks stopped with an error: " .. tostring(e))
+    end
+end
+-- (10.19) the checks of build 10.19 (the exe's enemy box, the garage car sync, the actor probe) are in tools/lua_smoke_1019.lua. RE7MP_ONLY_1019=1 runs only that file.
+function run_1019_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1019.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.19 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, Obj = Obj, make_td = make_td, make_go = make_go, make_scene = make_scene, vec = vec,
+        new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui,
+        ui_has = ui_has, texts_have = texts_have, log_has = log_has, calls_have = calls_have, messages_of_kind = messages_of_kind,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.19 checks stopped with an error: " .. tostring(e))
+    end
+end
+-- (10.20) the checks of build 10.20 (the frame-gap recorder, the saves polling, the inbox and debug file rates) are in tools/lua_smoke_1020.lua. RE7MP_ONLY_1020=1 runs only that file.
+function run_1020_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1020.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.20 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, Obj = Obj, make_td = make_td, make_go = make_go, make_scene = make_scene, vec = vec,
+        new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui,
+        ui_has = ui_has, texts_have = texts_have, log_has = log_has, calls_have = calls_have, messages_of_kind = messages_of_kind,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.20 checks stopped with an error: " .. tostring(e))
+    end
+end
+-- (10.21) the checks of build 10.21 (kills both ways, the Molded limb sync) are in tools/lua_smoke_1021.lua. RE7MP_ONLY_1021=1 runs only that file. (The stand-in removal and the per-gun
+-- damage are checked in this file, next to the 9.31 tests they change.)
+function run_1021_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1021.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.21 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, Obj = Obj, make_td = make_td, make_go = make_go, make_scene = make_scene, vec = vec,
+        new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        near_remote = near_remote, push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui,
+        ui_has = ui_has, texts_have = texts_have, log_has = log_has, calls_have = calls_have, messages_of_kind = messages_of_kind,
+        get_calls = function() return calls end, set_calls = function(t) calls = t end, get_types = function() return TYPES end,
+        weapons_by_type = weapons_by_type, SCRIPT = SCRIPT,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.21 checks stopped with an error: " .. tostring(e))
+    end
+end
+-- (10.22) the checks of build 10.22 (the hotfix: one Items tab, doors always on, mode 3 as the default, the cutscene recorder and the spawn log gone) are in tools/lua_smoke_1022.lua.
+-- RE7MP_ONLY_1022=1 runs only that file. (The door, enemy-mode, version and shipped-defaults checks that the hotfix changes are in this file, next to the older tests.)
+function run_1022_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1022.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.22 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, Obj = Obj, make_td = make_td, make_go = make_go, make_scene = make_scene, vec = vec,
+        new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        near_remote = near_remote, push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui,
+        ui_has = ui_has, texts_have = texts_have, log_has = log_has, calls_have = calls_have, messages_of_kind = messages_of_kind,
+        get_calls = function() return calls end, set_calls = function(t) calls = t end, get_types = function() return TYPES end,
+        weapons_by_type = weapons_by_type, SCRIPT = SCRIPT,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.22 checks stopped with an error: " .. tostring(e))
+    end
+end
+-- (10.23) the checks of build 10.23 (the Enemies section moved into Developer tools, the execution test and Mia's hair physics gone) are in tools/lua_smoke_1023.lua.
+-- RE7MP_ONLY_1023=1 runs only that file. (The Death-section, hair-gone, version and shipped-defaults checks that the build changes are in this file, next to the older tests.)
+function run_1023_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1023.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.23 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, Obj = Obj, make_td = make_td, make_go = make_go, make_scene = make_scene, vec = vec,
+        new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        near_remote = near_remote, push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui,
+        ui_has = ui_has, texts_have = texts_have, log_has = log_has, calls_have = calls_have, messages_of_kind = messages_of_kind,
+        get_calls = function() return calls end, set_calls = function(t) calls = t end, get_types = function() return TYPES end,
+        weapons_by_type = weapons_by_type, SCRIPT = SCRIPT,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.23 checks stopped with an error: " .. tostring(e))
+    end
+end
+if os.getenv("RE7MP_ONLY_1023") then
+    run_1023_file()
+    print(string.format("lua smoke test (10.23 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+-- (10.24) the checks of build 10.24 (re7mp_channel.json: the channel and the exe's build in the debug file and the panel; a note when the other player runs another build
+-- of the same release) are in tools/lua_smoke_1024.lua. RE7MP_ONLY_1024=1 runs only that file.
+function run_1024_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1024.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.24 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui, ui_has = ui_has, log_has = log_has,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.24 checks stopped with an error: " .. tostring(e))
+    end
+end
+if os.getenv("RE7MP_ONLY_1024") then
+    run_1024_file()
+    print(string.format("lua smoke test (10.24 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+-- (10.26) the checks of build 10.26 (F5 = Ethan's friend follows you / stays put, the corner text, "mode:" messages; the release / build label) are in
+-- tools/lua_smoke_1026.lua. RE7MP_ONLY_1026=1 runs only that file.
+function run_1026_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1026.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.26 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui, ui_has = ui_has, log_has = log_has,
+        texts_have = texts_have, messages_of_kind = messages_of_kind,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.26 checks stopped with an error: " .. tostring(e))
+    end
+end
+if os.getenv("RE7MP_ONLY_1026") then
+    run_1026_file()
+    print(string.format("lua smoke test (10.26 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+-- (10.27) the checks of build 10.27 (the frame dips of the 10.26 file; the garage car) are in tools/lua_smoke_1027.lua. RE7MP_ONLY_1027=1 runs only that file.
+function run_1027_file()
+    local dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$") or "."
+    local path = dir .. "/lua_smoke_1027.lua"
+    local fn, err = loadfile(path)
+    if not fn then
+        failed = failed + 1
+        print("FAIL: the 10.27 checks could not be loaded from " .. path .. ": " .. tostring(err))
+        return
+    end
+    local H = {
+        check = check, Obj = Obj, make_td = make_td, make_go = make_go, make_scene = make_scene, vec = vec,
+        new_environment = new_environment, build_world = build_world, load_script = load_script, host_role_files = host_role_files,
+        push_msgs = push_msgs, bump_remote = bump_remote, run_frames = run_frames, run_ui = run_ui,
+        ui_has = ui_has, texts_have = texts_have, log_has = log_has, calls_have = calls_have, messages_of_kind = messages_of_kind,
+    }
+    local ok, e = pcall(fn, H)
+    if not ok then
+        failed = failed + 1
+        print("FAIL: the 10.27 checks stopped with an error: " .. tostring(e))
+    end
+end
+if os.getenv("RE7MP_ONLY_1027") then
+    run_1027_file()
+    print(string.format("lua smoke test (10.27 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+if os.getenv("RE7MP_ONLY_1022") then
+    run_1022_file()
+    print(string.format("lua smoke test (10.22 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+if os.getenv("RE7MP_ONLY_1021") then
+    run_1021_file()
+    print(string.format("lua smoke test (10.21 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+if os.getenv("RE7MP_ONLY_1020") then
+    run_1020_file()
+    print(string.format("lua smoke test (10.20 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+if os.getenv("RE7MP_ONLY_1019") then
+    run_1019_file()
+    print(string.format("lua smoke test (10.19 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+if os.getenv("RE7MP_ONLY_1018") then
+    run_1018_file()
+    print(string.format("lua smoke test (10.18 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+if os.getenv("RE7MP_ONLY_1015") then
+    run_1015_file()
+    print(string.format("lua smoke test (10.15 only): %d checks passed, %d failed", passed, failed))
+    os.exit(failed == 0 and 0 or 1)
+end
+
 -- =============================================================================================
 -- Scenario 1: start-up
 -- =============================================================================================
@@ -815,7 +1117,7 @@ do
     build_world(env)
     local ok, err = pcall(load_script, env)
     check(ok, "script loads without error: " .. tostring(err))
-    check(log_has(env, "script v9.44 loaded"), "script announces v9.44")
+    check(log_has(env, "script v10.27 loaded"), "script announces v10.27")
     check(env.hooks["app.Item.isCanDiscard"] and env.hooks["app.Item.reduceNum"], "item discard hooks installed")
     check(env.hooks["app.ItemManager.createItemInstance"] and env.hooks["app.Inventory.getExtendLevelState"], "manager hooks installed")
     check(#env.frame_cbs == 1 and #env.ui_cbs == 1, "one frame callback and one UI callback")
@@ -845,7 +1147,9 @@ do
     local by = {}
     if d then
         local entries = {}
-        for e in d.p:gmatch("[^;]+") do entries[#entries + 1] = e end
+        local clock_first = d.p:match("^T%d+%.?%d*;") ~= nil -- (10.12) the host's clock is the first entry, "T<seconds>"
+        check(clock_first, "the snapshot starts with the host's clock: " .. d.p:sub(1, 20))
+        for e in d.p:gmatch("[^;]+") do if not e:match("^T[%d%.]+$") then entries[#entries + 1] = e end end
         check(#entries == 6, "all six Em#### objects are in the snapshot, the AI zones and props named like enemies are not (got " .. #entries .. "): " .. d.p)
         for _, e in ipairs(entries) do
             local f = {}
@@ -1098,7 +1402,7 @@ do
     -- ---------------- joiner: slack of the box, and no enemies at all ----------------
     local envm = new_environment()
     build_world(envm)
-    envm.files["re7mp/settings.json"] = { enemy_mode = 1 } -- enemies off
+    envm.files["re7mp/settings.json"] = { enemy_mode2 = 1 } -- enemies off (10.22: the key is enemy_mode2)
     load_script(envm)
     host_role_files(envm, "join", "tcp")
     live(envm, 1)
@@ -1804,6 +2108,10 @@ do
     build_world(env)
     load_script(env)
     host_role_files(env, "join", "tcp")
+    run_ui(env)
+    check(env.seen_combos and env.seen_combos["Enemy sync"] and env.seen_combos["Enemy sync"].idx == 3, "(10.22) a joiner that chose nothing starts in mode 3")
+    env.combo_override["Enemy sync"] = 2 -- (10.22: mode 3 is the default; this first part is about mode 2, the ghosts only)
+    run_ui(env)
     env.files["re7mp_state_in.json"] = { seq = 5, n = 1,
         p = "Em2000,5.00,0.00,6.00,0,0.7071,0,0.7071,500,1,2,3,4.0;Em6100,1.00,2.00,3.00,0,0,0,1,-1,1,0,0,0;Em9999,bad,1,1,0,0,0,1,1,1,0,0,0"
             .. ";Em8000,-5.79,-7.77,13.25,0,0,0,1,-1,3,0,4294967295,0;Em6190,0,0,0,0,0,0,1,-1,15,0,4294967295,0" }
@@ -1833,7 +2141,7 @@ do
     for i = 1, 6 do run_frames(env, 0.05) bump_remote(env) end
     check(texts_have(env, "Em2000  HP 400") and not texts_have(env, "Em6100"), "ghost list follows the host")
 
-    -- mode 3 (experimental): my Em2000 is moved onto the host's; parked ones are left alone
+    -- mode 3 (the default since 10.22; "experimental" before): my Em2000 is moved onto the host's; parked ones are left alone
     env.combo_override["Enemy sync"] = 3
     run_ui(env)
     calls = {}
@@ -2040,7 +2348,7 @@ do
     run_ui(env)
     run_frames(env, 3.0)
     local dbg = env.files["re7mp/debug.json"]
-    check(dbg ~= nil and dbg.script == "re7mp v9.44", "debug file written by v9.44")
+    check(dbg ~= nil and dbg.script == "re7mp v10.27", "debug file written by v10.27")
     local pinned = table.concat(dbg and dbg.pinned or {}, "\n")
     check(pinned:find("=== enemy details done ===", 1, true) ~= nil, "enemy details finished")
     check(pinned:find("component app.Em2000Status", 1, true) ~= nil, "Status component listed")
@@ -2075,18 +2383,21 @@ do
     run_ui(env)
     run_frames(env, 2.0)
     local s = env.files["re7mp/settings.json"]
-    check(s ~= nil and s.enemy_mode == 1 and s.drop_on_discard == true and s.enemy_drive_ai == false and s.give_hint == true,
+    check(s ~= nil and s.enemy_mode2 == 1 and s.enemy_mode == nil and s.drop_on_discard == true and s.enemy_drive_ai == false and s.give_hint == true,
         "new settings are saved when one changes")
     check(s ~= nil and s.hide_near == 0.4 and s.show_parked == false, "hide distance (0.4 m default) and show_parked are in the settings file")
 
-    -- the experimental mode is never restored from a saved file
+    -- (10.22) mode 3 is the default and is not "experimental" any more: no warning line in the panel, and the label of the mode says nothing about it
     local env2 = new_environment()
     build_world(env2)
-    env2.files["re7mp/settings.json"] = { enemy_mode = 3 }
     load_script(env2)
     env2.files["re7mp_in.json"] = nil
     run_ui(env2)
-    check(not ui_has(env2, "EXPERIMENTAL: this moves your own enemies"), "mode 3 is not switched on by a saved setting")
+    check(not ui_has(env2, "EXPERIMENTAL: this moves your own enemies"), "(10.22) mode 3: no 'experimental, use a throwaway save' line in the panel")
+    local cb = env2.seen_combos and env2.seen_combos["Enemy sync"]
+    check(cb and cb.idx == 3 and cb.items and cb.items[3] == "Ghosts, and move my own enemies onto the host's", "(10.22) a new player starts on mode 3, and its label has no EXPERIMENTAL: " .. tostring(cb and cb.items and cb.items[3]))
+    run_frames(env2, 2.5)
+    check(env2.files["re7mp/settings.json"] and env2.files["re7mp/settings.json"].enemy_mode2 == 3, "(10.22) ...and it is remembered under enemy_mode2")
 end
 
 -- =============================================================================================
@@ -2430,7 +2741,7 @@ do
     env.files["re7mp_in.json"].x, env.files["re7mp_in.json"].z = 1, 1
     push_msgs(env, { { 7, "h|1|1000|1" } })
     connected(env, 6)
-    -- the other player getting up by themselves (or the loopback bot's revive) cancels it too
+    -- the other player getting up by themselves (or Ethan's friend's revive) cancels it too
     env.keys[0x77] = true
     connected(env, 4)
     env.keys[0x77] = false
@@ -2900,26 +3211,26 @@ do
     load_script(env)
     host_role_files(env, "host", "tcp")
     connected(env, 30)
-    check(ver_msgs(env)[1] == "v|0.9|9.44|0.9|6", "the script introduces its release when the other player appears: " .. tostring(ver_msgs(env)[1]))
-    push_msgs(env, { { 8, "v|0.9|9.44|0.9|6" } })
+    check(ver_msgs(env)[1] == "v|0.11|10.27|0.11|6", "the script introduces its release when the other player appears: " .. tostring(ver_msgs(env)[1]))
+    push_msgs(env, { { 8, "v|0.11|10.27|0.11|6" } })
     connected(env, 10)
     run_ui(env)
-    check(ui_has(env, "Release v0.9   (script build 9.44, re7mp.exe v0.9)"), "the panel shows the release, build and exe version")
-    check(ui_has(env, "Bob runs release v0.9 (script build 9.44, re7mp.exe v0.9)"), "...and the other player's version")
+    check(ui_has(env, "Release v0.11   (script build 10.27, re7mp.exe v0.11)"), "the panel shows the release, build and exe version")
+    check(ui_has(env, "Bob runs release v0.11 (script build 10.27, re7mp.exe v0.11)"), "...and the other player's version")
     check(not ui_has(env, "update so you both run the same version"), "same release: no warning")
     local nversions = #ver_msgs(env)
     connected(env, 440) -- 22 s: it is sent again (the other script may have been reloaded)
     check(#ver_msgs(env) > nversions, "the version is re-sent about every 20 s")
     run_frames(env, 3)
     local dbg = env.files["re7mp/debug.json"]
-    check(dbg and dbg.release == "0.9" and dbg.build == "9.44" and dbg.exe == "0.9" and dbg.exe_protocol == 6
-        and dbg.other_player_version and dbg.other_player_version:find("v0.9", 1, true), "the debug file carries the versions")
+    check(dbg and dbg.release == "0.11" and dbg.build == "10.27" and dbg.exe == "0.11" and dbg.exe_protocol == 6
+        and dbg.other_player_version and dbg.other_player_version:find("v0.11", 1, true), "the debug file carries the versions")
 
     -- the other player is on another release
     push_msgs(env, { { 8, "v|0.5|9.1|0.5|6" } })
     connected(env, 10)
     run_ui(env)
-    check(ui_has(env, "Bob is on release v0.5 but you are on v0.9: update so you both run the same version"), "a different release is flagged in the panel")
+    check(ui_has(env, "Bob is on release v0.5 but you are on v0.11: update so you both run the same version"), "a different release is flagged in the panel")
     check(log_has(env, "version: Bob runs release v0.5"), "...and logged")
 
     -- an older script sends nothing: flagged after 8 s
@@ -2932,45 +3243,46 @@ do
     check(not ui_has(env2, "older than release"), "not flagged straight away")
     connected(env2, 100) -- 10 s
     run_ui(env2)
-    check(ui_has(env2, "Bob's script is older than release v0.9"), "no version after 8 s means an older script")
+    check(ui_has(env2, "Bob's script is older than release v0.11"), "no version after 8 s means an older script")
 
-    -- the loopback bot is not a script: never flagged
+    -- Ethan's friend is not a script: never flagged
     local env3 = new_environment()
     build_world(env3)
     load_script(env3)
     host_role_files(env3, "host", "tcp")
-    env3.files["re7mp_in.json"].name = "Loopback Bot"
+    env3.files["re7mp_in.json"].name = "Ethan's friend"
     connected(env3, 260)
     run_ui(env3)
-    check(not ui_has(env3, "older than release"), "the loopback bot is never reported as an old script")
+    check(not ui_has(env3, "older than release"), "Ethan's friend is never reported as an old script")
 
-    -- ---- 9.13: the loopback bot can go down, so a revive can be tried alone ----
+    -- ---- 9.13: Ethan's friend can go down, so a revive can be tried alone ----
     -- (9.38) the bot is also told what to do ("state:<key>"): those messages are looked at below; the 9.13 / 9.33 checks count the others
-    local function k11(env) local out = {} for _, m in ipairs(messages_of_kind(env, 11)) do if not m:find("^state:") then out[#out + 1] = m end end return out end
+    -- (10.26) ...and "mode:follow" / "mode:stay" (F5, tools/lua_smoke_1026.lua) are not counted here either
+    local function k11(env) local out = {} for _, m in ipairs(messages_of_kind(env, 11)) do if not m:find("^state:") and not m:find("^mode:") then out[#out + 1] = m end end return out end
     run_ui(env3)
-    check(ui_has(env3, "The loopback bot can go down: walk within 3 m of it and press F8, then stay put for 3 s"), "the panel explains the bot buttons when the other player is the loopback bot")
-    env3.ui_press["Loopback bot: make it go down"] = true
+    check(ui_has(env3, "Ethan's friend can go down: walk within 3 m of it and press F8, then stay put for 3 s"), "the panel explains the bot buttons when the other player is Ethan's friend")
+    env3.ui_press["Ethan's friend: make it go down"] = true
     run_ui(env3)
     connected(env3, 4)
     check(#k11(env3) == 1 and k11(env3)[1] == "down", "'make it go down' sends the bot command (kind 11): " .. table.concat(k11(env3), ","))
-    env3.ui_press["Loopback bot: make it get up"] = true
+    env3.ui_press["Ethan's friend: make it get up"] = true
     run_ui(env3)
     connected(env3, 4)
     local bm = k11(env3)
     check(#bm == 2 and bm[2] == "up", "'make it get up' sends 'up': " .. table.concat(bm, ","))
     -- (9.33) the bot can be told which character to say it is (a test aid for the bodies made from files): sent when picked, repeated every 10 s, taken back
-    env3.combo_override["The loopback bot is"] = 4 -- Clancy Jarvis
+    env3.combo_override["Ethan's friend is"] = 4 -- Clancy Jarvis
     run_ui(env3)
     connected(env3, 4)
     local cm = k11(env3)
-    check(cm[#cm] == "char:clancy", "(9.33) picking Clancy for the loopback bot tells it: " .. table.concat(cm, ","))
+    check(cm[#cm] == "char:clancy", "(9.33) picking Clancy for Ethan's friend tells it: " .. table.concat(cm, ","))
     local n_told = #cm
     connected(env3, 20) -- 1 s: no repeat yet
     check(#k11(env3) == n_told, "(9.33) ...and it is not told again every frame")
     connected(env3, 240) -- 12 s: the repeat
     cm = k11(env3)
     check(#cm > n_told and cm[#cm] == "char:clancy", "(9.33) ...but every 10 s, in case the exe was restarted: " .. #cm)
-    env3.combo_override["The loopback bot is"] = 1
+    env3.combo_override["Ethan's friend is"] = 1
     run_ui(env3)
     connected(env3, 4)
     cm = k11(env3)
@@ -2983,13 +3295,13 @@ do
         local function lastk(env, state) -- the newest kind-11 message (a "state:" one, or any other): its id and payload (the ring holds 32, so counts are not used)
             local bid, bp = 0, nil
             for _, m in ipairs((env.files["re7mp_msg_out.json"] or {}).msgs or {}) do
-                if m.k == 11 and (m.p:find("^state:") ~= nil) == state and m.id > bid then bid, bp = m.id, m.p end
+                if m.k == 11 and not m.p:find("^mode:") and (m.p:find("^state:") ~= nil) == state and m.id > bid then bid, bp = m.id, m.p end -- (10.26: "mode:" is neither)
             end
             return bid, bp
         end
         local id0, p0 = lastk(env3, true)
-        check(p0 == "state:copy", "(9.38) the loopback bot is told to copy me by default: " .. tostring(p0))
-        env3.combo_override["The loopback bot does"] = 4 -- Walk
+        check(p0 == "state:copy", "(9.38) Ethan's friend is told to copy me by default: " .. tostring(p0))
+        env3.combo_override["Ethan's friend does"] = 5 -- Walk
         run_ui(env3)
         connected(env3, 4)
         local id1, p1 = lastk(env3, true)
@@ -3000,39 +3312,39 @@ do
         local id3, p3 = lastk(env3, true)
         check(id3 > id1 and p3 == "state:walk", "(9.38) ...but every 10 s, in case the exe was restarted")
         local kid0 = lastk(env3, false)
-        env3.combo_override["The loopback bot does"] = 15 -- Down
+        env3.combo_override["Ethan's friend does"] = 16 -- Down
         run_ui(env3)
         connected(env3, 4)
         local kid1, kp1 = lastk(env3, false)
         check(kid1 > kid0 and kp1 == "down", "(9.38) 'Down' in the drop-down sends the down command: " .. tostring(kp1))
         connected(env3, 260)
         check(lastk(env3, false) == kid1, "(9.38) ...once (a bot that was got up is not knocked down again by a repeat)")
-        env3.combo_override["The loopback bot does"] = 6 -- Crouch: leaving Down tells the bot to get up first
+        env3.combo_override["Ethan's friend does"] = 7 -- Crouch: leaving Down tells the bot to get up first
         run_ui(env3)
         connected(env3, 4)
         local kid2, kp2 = lastk(env3, false)
         local id4, p4 = lastk(env3, true)
         check(kid2 > kid1 and kp2 == "up" and p4 == "state:crouch" and id4 > id3, "(9.38) leaving 'Down' tells it to get up, then the new state: " .. tostring(kp2) .. " / " .. tostring(p4))
         local who = (function() env3.ui_press["Clear the debug log"] = true run_ui(env3) connected(env3, 60) return env3.files["re7mp/debug.json"].health.who end)()
-        check(who.loopback_bot_does == "crouch" and who.loopback_bot_does_told == "crouch", "(9.38) the debug file says what the bot was told: " .. tostring(who.loopback_bot_does))
-        env3.combo_override["The loopback bot does"] = 1 -- Copies me again
+        check(who.friend_does == "crouch" and who.friend_does_told == "crouch", "(9.38) the debug file says what the bot was told: " .. tostring(who.friend_does))
+        env3.combo_override["Ethan's friend does"] = 2 -- Copies me again
         run_ui(env3)
         connected(env3, 4)
         local _, p5 = lastk(env3, true)
         check(p5 == "state:copy", "(9.38) back to 'Copies me': " .. tostring(p5))
-        env3.combo_override["The loopback bot does"] = nil
+        env3.combo_override["Ethan's friend does"] = nil
     end
     -- what the bot sends back is understood: its exact strings (the C++ suite checks they are what the engine sends)
     env3.files["re7mp_in.json"].x, env3.files["re7mp_in.json"].z = 2, 3
     push_msgs(env3, { { 7, "e|down||1.00|2.00|3.00" } })
     env3.texts = {}
     connected(env3, 6)
-    check(texts_have(env3, "Loopback Bot [downed]"), "the bot's down event marks it [downed]")
+    check(texts_have(env3, "Ethan's friend [downed]"), "the bot's down event marks it [downed]")
     push_msgs(env3, { { 7, "h|1|1000|1" } })
     connected(env3, 4)
     env3.texts = {}
     connected(env3, 6)
-    check(texts_have(env3, "Loopback Bot [downed]"), "...and its once-a-second health report keeps it down")
+    check(texts_have(env3, "Ethan's friend [downed]"), "...and its once-a-second health report keeps it down")
     push_msgs(env3, { { 7, "e|up||1.00|2.00|3.00" } })
     connected(env3, 4)
     push_msgs(env3, { { 7, "h|1000|1000|0" } })
@@ -3046,8 +3358,8 @@ do
     host_role_files(envb, "host", "tcp")
     connected(envb, 260)
     run_ui(envb)
-    check(not ui_has(envb, "The loopback bot can go down"), "with a real player the bot buttons are not shown")
-    envb.ui_press["Loopback bot: make it go down"] = true
+    check(not ui_has(envb, "Ethan's friend can go down"), "with a real player the bot buttons are not shown")
+    envb.ui_press["Ethan's friend: make it go down"] = true
     run_ui(envb)
     check(#messages_of_kind(envb, 11) == 0, "...and nothing is sent to a real player")
 
@@ -3059,8 +3371,8 @@ do
     env4.files["re7mp_in.json"].exe = "0.5"
     connected(env4, 20)
     run_ui(env4)
-    check(ui_has(env4, "re7mp.exe is v0.5 but this script is v0.9"), "an exe from another release than the script is flagged")
-    check(ui_has(env4, "script build 9.44, re7mp.exe v0.5"), "...with both versions shown")
+    check(ui_has(env4, "re7mp.exe is v0.5 but this script is v0.11"), "an exe from another release than the script is flagged")
+    check(ui_has(env4, "script build 10.27, re7mp.exe v0.5"), "...with both versions shown")
 
     -- the file of an exe that is NOT running (an older release's leftover, never rewritten) is not taken for the exe's version
     local env5 = new_environment()
@@ -3075,13 +3387,13 @@ do
     -- the old exe is started: now it is real, and flagged
     connected(env5, 20)
     run_ui(env5)
-    check(ui_has(env5, "re7mp.exe is v0.6 but this script is v0.9"), "an exe that is running and older than the script is flagged")
+    check(ui_has(env5, "re7mp.exe is v0.6 but this script is v0.11"), "an exe that is running and older than the script is flagged")
     -- ...and the warning goes away once the exe is updated and restarted (it used to stay up for the rest of the session)
-    env5.files["re7mp_in.json"].exe = "0.9"
+    env5.files["re7mp_in.json"].exe = "0.11"
     connected(env5, 20)
     run_ui(env5)
     check(not ui_has(env5, "re7mp.exe is v0.6"), "the warning goes away when the exe reports the same release as the script")
-    check(ui_has(env5, "script build 9.44, re7mp.exe v0.9"), "...and the panel shows the new exe release")
+    check(ui_has(env5, "script build 10.27, re7mp.exe v0.11"), "...and the panel shows the new exe release")
 
     -- the first introduction waits for the exe's release, so the other player is not told "re7mp.exe v?"
     check(ver_msgs(env5)[1] and not ver_msgs(env5)[1]:find("|?|", 1, true), "the first version message carries the exe's release: " .. tostring(ver_msgs(env5)[1]))
@@ -3096,7 +3408,7 @@ do
     connected(env6, 20) -- 1 s
     check(ver_msgs(env6)[1] == nil, "the introduction waits a moment for the exe's release")
     connected(env6, 60) -- 4 s
-    check(ver_msgs(env6)[1] == "v|0.9|9.44|?|?", "...but not for ever: it goes out with '?' when the exe never says: " .. tostring(ver_msgs(env6)[1]))
+    check(ver_msgs(env6)[1] == "v|0.11|10.27|?|?", "...but not for ever: it goes out with '?' when the exe never says: " .. tostring(ver_msgs(env6)[1]))
 
     -- garbage in a version message does nothing
     push_msgs(env4, { { 8, "v|nonsense" }, { 8, "hello" } })
@@ -5178,6 +5490,7 @@ do
     local function started(files, no_folders)
         local env = new_environment()
         env.no_subfolders = no_folders
+        env.retired_hidden = true -- (these tests look at which settings files exist: the harness leaves them alone)
         build_world(env)
         for k, v in pairs(files or {}) do env.files[k] = v end
         load_script(env)
@@ -5225,7 +5538,7 @@ do
     check(not ui_has(env3, "Real body: off"), "(9.30) when both exist, the file in the folder wins")
     -- the played-with list and the item trail from an older build are read from the flat names too
     local env4 = started({ ["re7mp_trail.json"] = { session = 5, entries = { { t = 12.5, w = "flat-trail-step" } } },
-        ["re7mp_coop_played.json"] = { slots = { { slot = 4, partner = "Bob", when = "2026-11-08 10:00" } } } })
+        ["re7mp_coop_played.json"] = { slots = { { slot = 4, partner = "Bob", when = "2026-11-08 10:00" } } }, ["re7mp_settings.json"] = { show_retired_panels = true } })
     local said = false
     for _, l in ipairs(env4.log) do if l:find("flat%-trail%-step", 1, false) then said = true end end
     check(said, "(9.30) the previous session's item trail is read from a flat file")
@@ -5263,6 +5576,7 @@ do
     check(env5.files["re7mp_lastcall.json"] == nil or env5.files["re7mp_lastcall.json"].session == 1700000000, "(9.30) ...and the crash breadcrumb")
     -- a folder that takes the write but cannot be read back counts as refused
     local env6 = new_environment()
+    env6.retired_hidden = true
     build_world(env6)
     local real_load = env6.G.json.load_file
     env6.G.json.load_file = function(name) if name == "re7mp/folder_check.json" then return nil end return real_load(name) end
@@ -6409,6 +6723,73 @@ do
     envd2.hooks["app.PlayerDamageController.doDie"]({ 0, pdc })
     live(envd2, 0.2)
     check(#messages_of_kind(envd2, 4) == 1 and log_has(envd2, "death signal: doDie"), "the player's damage controller dying tells the other player (a finisher)")
+    -- (10.9) after a game over Ethan's friend is told to revive and come to you once the reload has finished
+    do
+        local function friend_world(settings, friend)
+            local e = world(settings or { death_mode_choice = 4 }, false, death_pre)
+            local gmx = Obj.new("app.GameManager", {}, { ["<IsSceneLoading>k__BackingField"] = false, RequestChapterJump = false, RequestPlayerChange = false })
+            e.singletons["app.GameManager"] = gmx
+            if friend ~= false then e.files["re7mp_in.json"].name = "Ethan's friend" end
+            live(e, 1.5)
+            return e, gmx
+        end
+        local function cmds(e) local out = {} for _, p in ipairs(messages_of_kind(e, 11)) do if p == "revive" or p == "up" then out[#out + 1] = p end end return out end
+        local function over(e) refresh_debug(e) return e.files["re7mp/debug.json"].health.friend.after_game_over end
+        local GOVER = Obj.new("app.GameManager", {})
+        local e, gm = friend_world()
+        check(#cmds(e) == 0 and over(e).waiting == false and over(e).on == true, "(10.9 game over) nothing is sent before a game over")
+        e.hooks["app.GameManager.setGameOverFlag"]({ 0, GOVER, 1 })
+        live(e, 0.5)
+        local o = over(e)
+        check(o.waiting == true and o.game_overs_seen == 1 and #cmds(e) == 0, "(10.9 game over) a game over starts the wait; nothing is sent yet: " .. tostring(o.last))
+        live(e, 5)
+        check(#cmds(e) == 0 and over(e).load_seen == false, "(10.9 game over) 5 s later, with no reload yet, it is still waiting")
+        gm.f["<IsSceneLoading>k__BackingField"] = true -- the reload starts
+        live(e, 4)
+        check(over(e).load_seen == true and #cmds(e) == 0, "(10.9 game over) while the scene loads nothing is sent")
+        gm.f["<IsSceneLoading>k__BackingField"] = false -- the reload ends
+        live(e, 1.5)
+        check(#cmds(e) == 0, "(10.9 game over) ...nor in the first second after it (the gate is held 1 s, then 2 s more are waited)")
+        live(e, 3)
+        local c = cmds(e)
+        check(#c == 2 and c[1] == "revive" and c[2] == "up", "(10.9 game over) once the reload has finished it is told 'revive', then 'up' (for an older exe): " .. table.concat(c, ","))
+        o = over(e)
+        check(o.waiting == false and o.revives_sent == 1 and o.last:find("revive and come to you", 1, true) ~= nil, "(10.9 game over) the debug file says so: " .. tostring(o.last))
+        check(log_has(e, "friend: told Ethan's friend to revive and come to you"), "(10.9 game over) ...and the journal")
+        live(e, 5)
+        check(#cmds(e) == 2, "(10.9 game over) and it is not sent again")
+        -- no reload seen at all (the loading flags never showed): 45 s after the game over it is sent anyway
+        local e2 = friend_world()
+        e2.hooks["app.GameManager.setGameOverFlag"]({ 0, GOVER, 1 })
+        live(e2, 30)
+        check(#cmds(e2) == 0, "(10.9 game over) 30 s with no reload seen: still waiting")
+        live(e2, 17)
+        check(#cmds(e2) == 2 and cmds(e2)[1] == "revive" and over(e2).last:find("no reload seen", 1, true) ~= nil, "(10.9 game over) ...after 45 s it is sent anyway: " .. table.concat(cmds(e2), ","))
+        -- the game over screen signals more than once: only the first starts the wait (and one revive goes out)
+        local e3, gm3 = friend_world()
+        e3.hooks["app.GameManager.setGameOverFlag"]({ 0, GOVER, 1 })
+        live(e3, 1)
+        e3.hooks["app.GameManager.requestGameOver"]({ 0, GOVER })
+        live(e3, 1)
+        check(over(e3).game_overs_seen == 1, "(10.9 game over) a second signal while waiting does not start it again: " .. tostring(over(e3).game_overs_seen))
+        -- not the friend (Bob, a real player): nothing to do and nothing sent
+        local e4 = friend_world(nil, false)
+        e4.hooks["app.GameManager.setGameOverFlag"]({ 0, GOVER, 1 })
+        live(e4, 50)
+        check(#cmds(e4) == 0 and over(e4).waiting == false and over(e4).last:find("not here", 1, true) ~= nil, "(10.9 game over) a real player is not the friend: " .. tostring(over(e4).last))
+        -- the switch
+        local e5 = friend_world({ death_mode_choice = 4, friend_revive_after_over = false })
+        e5.hooks["app.GameManager.setGameOverFlag"]({ 0, GOVER, 1 })
+        live(e5, 50)
+        check(#cmds(e5) == 0 and over(e5).on == false and over(e5).waiting == false, "(10.9 game over) with the switch off (settings.json) nothing is sent: " .. tostring(over(e5).last))
+        -- the test button in the panel
+        local e6 = friend_world()
+        run_ui(e6)
+        e6.ui_press["Ethan's friend: revive it and bring it to me (what happens after a game over)"] = true
+        run_ui(e6)
+        live(e6, 0.3)
+        check(#cmds(e6) == 2 and cmds(e6)[1] == "revive", "(10.9 game over) the panel's button sends it at once: " .. table.concat(cmds(e6), ","))
+    end
     -- a method that fires all the time is given up after 50 firings
     local envd3 = world({ death_mode_choice = 4 }, false, death_pre)
     live(envd3, 1.5)
@@ -6425,7 +6806,9 @@ do
     live(envd4, 0.2)
     check(#messages_of_kind(envd4, 4) == 0, "with shared fate off a death is not sent")
 
-    -- ---- (9.18) the execution test: what does a finisher call, and can it become 'down'? ----
+    -- ---- (10.23) the execution test is GONE: it was a log of the grab and game-over calls, and an opt-in 'block the game over and go down instead' ----
+    -- Nothing of it is left in the script, so what is checked now is that nothing is left to act. The helpers stay: the checks of the execution team-wipe (9.27),
+    -- which is kept, use them.
     local EXEC_LOG = "    log the calls a grab / finisher / game over makes (hooks a few more methods; may crash the game)"
     local EXEC_BLOCK = "    ...and block the game over and go down instead (needs Downed mode and the other player next to you; may leave the game stuck)"
     local function exec_pre(env)
@@ -6449,182 +6832,41 @@ do
         live(e, 1.5)
         return e
     end
-    local function exec_dbg(e) refresh_debug(e) return e.files["re7mp/debug.json"].health.execution_test end
     local function hp_of(e) return e.player_hi.f._CurrentHealth end
+    local WIPE_BOX_1023 = "Executions end the game for BOTH players (a death the game won't let me hold at 1 health: Jack's grab, scripted kills)"
+    local GRAB_HOOKS = { "app.Em3000Grapple.startGrapple", "app.Em3000Grapple.onCatchPlayer", "app.Em3000Grapple.releaseGrapple", "app.PlayerGrappleEm3000.requestFinish",
+        "app.PlayerGrappleEm3000.beginHold", "app.GameOverScreen.open", "app.GameOverScreen.closeScreen" }
     do
         local e = exec_world()
         run_ui(e)
-        check(ui_has(e, "Execution test (EXPERIMENTAL, off at every start)"), "(9.18) the panel has the execution test")
-        local x = exec_dbg(e)
-        check(x.logging == false and x.block_on == false and #x.hooked == 0 and x.game_overs_seen == 0, "(9.18) both switches are off at the start and nothing is hooked")
-        check(not e.hooks["app.Em3000Grapple.startGrapple"] and not e.hooks["app.GameOverScreen.open"], "(9.18) ...the grab classes are not touched until the box is ticked")
-        -- the death test hooks still work with the test off: a doDie is a death signal, not blocked
-        e.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) })
-        live(e, 0.2)
-        check(#messages_of_kind(e, 4) == 1 and e.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) }) ~= 1,
-            "(9.18) with the test off a game-over call is never skipped")
-        x = exec_dbg(e)
-        check(x.game_overs_seen == 0 and #x.latest == 0 and #x.calls_seen == 0, "(9.18) ...and with the test off nothing is recorded either")
-        e.check_override[EXEC_LOG] = true
-        e.check_override[EXEC_BLOCK] = true
-        run_ui(e)
-        live(e, 3)
-        local sf, bad = e.files["re7mp/settings.json"], false
-        for k in pairs(sf or {}) do if k ~= "exec_wipe" and (tostring(k):lower():find("exec", 1, true) or tostring(k):lower():find("block", 1, true)) then bad = true end end -- (exec_wipe is the real "executions end the game for both" setting)
-        check(sf ~= nil and not bad, "(9.18) the switches are not in the settings file")
-    end
-    do -- a settings file that (wrongly) says the test is on does not switch it on
-        local e = exec_world({ death_mode_choice = 4, exec_on = true, exec_log = true, exec = true, execution_test = true, block = true, exec_block = true })
-        local x = exec_dbg(e)
-        check(x.logging == false and x.block_on == false and #x.hooked == 0, "(9.18) the switches cannot be switched on from the settings file")
-    end
-    do
-        local e = exec_world()
-        e.check_override[EXEC_LOG] = true
-        run_ui(e)
-        for _, k in ipairs({ "app.Em3000Grapple.startGrapple", "app.Em3000Grapple.onCatchPlayer", "app.Em3000Grapple.releaseGrapple",
-            "app.PlayerGrappleEm3000.requestFinish", "app.PlayerGrappleEm3000.beginHold", "app.GameOverScreen.open", "app.GameOverScreen.closeScreen" }) do
-            check(e.hooks[k] ~= nil, "(9.18) ticking the log box hooks " .. k)
+        check(not ui_has(e, "Execution test") and not ui_has(e, "game overs seen") and not ui_has(e, "no game over seen yet"), "(10.23) the Death section has no execution test")
+        check(e.seen_checks[EXEC_LOG] == nil and e.seen_checks[EXEC_BLOCK] == nil, "(10.23) ...neither of its two boxes is drawn")
+        check(e.seen_checks[WIPE_BOX_1023] ~= nil, "(10.23) ...but the box that ends the game for both players on an execution is still there")
+        refresh_debug(e)
+        local h = e.files["re7mp/debug.json"].health
+        check(h.execution_test == nil and h.execution_wipe ~= nil, "(10.23) the debug file has no execution_test, and still has execution_wipe")
+        for _, k in ipairs(GRAB_HOOKS) do
+            check(e.hooks[k] == nil, "(10.23) " .. k .. " is not hooked (the game has the class; the log that hooked it is gone)")
         end
-        for _, k in ipairs({ "app.Em3000Grapple.get_isGrappleEnableDie", "app.Em3000Grapple.isGrapple", "app.Em3000Grapple.UpdateGrapple", "app.Em3000Grapple.doAwake",
-            "app.PlayerGrappleEm3000.LateUpdateGrapple", "app.GameOverScreen.get_IsOpen", "app.GameOverScreen.OnUpdate" }) do
-            check(e.hooks[k] == nil, "(9.18) ...but not " .. k .. " (a getter, an update or a per-frame call)")
-        end
-        check(not e.hooks["app.Em4000Grapple.startGrapple"] and log_has(e, "app.Em4000Grapple does not exist in this game"), "(9.18) a class the game lacks is skipped and the journal says so")
-        check(log_has(e, "execution test: logging ON (experimental)") and log_has(e, "execution test: 9 methods are watched"), "(9.18) the journal says what is watched: " .. tostring(exec_dbg(e).hooked and #exec_dbg(e).hooked))
-        run_ui(e)
-        check(ui_has(e, "watching 9 methods; game overs seen 0; blocked 0") and ui_has(e, "no game over seen yet"), "(9.18) the panel shows the count and the verdict")
-        -- a grab, then a game over 2 s later with health still 600/1000
-        local gobj = Obj.new("app.Em3000Grapple", {})
-        e.hooks["app.Em3000Grapple.startGrapple"]({ 0, gobj })
-        live(e, 0.3)
-        e.clock = e.clock + 1.7
-        local gm = Obj.new("app.GameManager", {})
-        e.hooks["app.GameManager.setGameOverFlag"]({ 0, gm, 1 })
-        live(e, 0.2)
-        local x = exec_dbg(e)
-        check(x.game_overs_seen == 1 and x.first_game_over and x.first_game_over.what == "app.GameManager.setGameOverFlag" and x.first_game_over.kind == "over",
-            "(9.18) the first game over is written down")
-        check(#x.the_20_calls_before_it >= 1 and x.the_20_calls_before_it[#x.the_20_calls_before_it].what == "app.Em3000Grapple.startGrapple", "(9.18) ...with the calls before it")
-        check(x.verdict:find("came 2.0 s after app.Em3000Grapple.startGrapple", 1, true) and x.verdict:find("with health 600/1000", 1, true)
-            and x.verdict:find("holding health at 1 cannot stop this kind of death", 1, true), "(9.18) the verdict names the grab, the time and that the health was not 0: " .. tostring(x.verdict))
-        check(x.blocked == 0 and #messages_of_kind(e, 4) == 1, "(9.18) logging alone blocks nothing, and the death is still sent")
-        -- a second game over later (no grab before it) does not replace the first one in the verdict
-        e.clock = e.clock + 40
-        e.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) })
-        local x2 = exec_dbg(e)
-        check(x2.game_overs_seen == 2 and x2.first_game_over.what == "app.GameManager.setGameOverFlag" and x2.verdict:find("after app.Em3000Grapple.startGrapple", 1, true),
-            "(9.18) a second game over does not replace the first in the verdict")
-        local seen = {}
-        for _, c in ipairs(x.calls_seen) do seen[c.call] = c.n end
-        check(seen["app.Em3000Grapple.startGrapple"] == 1 and seen["app.GameManager.setGameOverFlag"] == 1, "(9.18) the debug file counts each call")
-        -- the ring keeps 60 events, a method is recorded at most 40 times
-        for _ = 1, 100 do
-            e.hooks["app.PlayerGrappleEm3000.beginHold"]({ 0, gobj })
-            e.hooks["app.PlayerGrappleEm3000.endHold"]({ 0, gobj })
-            e.hooks["app.PlayerGrappleEm3000.requestFinish"]({ 0, gobj })
-        end
-        x = exec_dbg(e)
-        local n = 0
-        for _, c in ipairs(x.calls_seen) do if c.call == "app.PlayerGrappleEm3000.beginHold" then n = c.n end end
-        check(n == 40 and #x.latest == 60, "(9.18) a method is recorded at most 40 times and the list holds the last 60 events: " .. tostring(n) .. ", " .. tostring(#x.latest))
-        -- switching off stops the recording of new calls
-        e.check_override[EXEC_LOG] = false
-        run_ui(e)
-        e.hooks["app.Em3000Grapple.releaseGrapple"]({ 0, gobj })
-        x = exec_dbg(e)
-        local rel = 0
-        for _, c in ipairs(x.calls_seen) do if c.call == "app.Em3000Grapple.releaseGrapple" then rel = c.n end end
-        check(x.logging == false and rel == 0, "(9.18) switched off again, a call is not recorded")
-    end
-    do -- an ordinary death: no grab before it
-        local e = exec_world()
-        e.check_override[EXEC_LOG] = true
-        run_ui(e)
-        e.player_hi.f._CurrentHealth = 0
-        live(e, 0.2)
-        e.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) })
-        local x = exec_dbg(e)
-        check(x.verdict:find("with no grab or finisher call before it", 1, true) and x.verdict:find("an ordinary death", 1, true), "(9.18) a game over with no grab before it is an ordinary death: " .. tostring(x.verdict))
-        -- a grab long before (30 s) does not count as the cause
-        local e2 = exec_world()
-        e2.check_override[EXEC_LOG] = true
-        run_ui(e2)
-        e2.hooks["app.Em3000Grapple.startGrapple"]({ 0, Obj.new("app.Em3000Grapple", {}) })
-        e2.clock = e2.clock + 30
-        e2.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) })
-        check(exec_dbg(e2).verdict:find("an ordinary death", 1, true), "(9.18) a grab 30 s earlier is not blamed")
-        -- the GameMode path records too
-        local e3 = exec_world()
-        e3.check_override[EXEC_LOG] = true
-        run_ui(e3)
-        e3.hooks["app.Em3000Grapple.onCatchPlayer"]({ 0, Obj.new("app.Em3000Grapple", {}) })
-        e3.clock = e3.clock + 0.5
-        e3.hooks["app.GameManager.setGamemode"]({ 0, Obj.new("app.GameManager", {}), 1 })
-        live(e3, 0.3)
-        local x3 = exec_dbg(e3)
-        check(x3.first_game_over and x3.first_game_over.what == "GameMode.Gameover" and x3.verdict:find("after app.Em3000Grapple.onCatchPlayer", 1, true),
-            "(9.18) the game switching to its Gameover mode is recorded as a game over too: " .. tostring(x3.verdict))
-    end
-    do -- blocking
-        local e = exec_world()
-        e.check_override[EXEC_BLOCK] = true
-        run_ui(e)
-        local x = exec_dbg(e)
-        check(x.block_on == true and x.logging == false and #x.hooked == 0, "(9.18) the block box alone hooks nothing extra")
-        check(e.hooks["app.GameManager.setGameOverFlag"]({ 0, Obj.new("app.GameManager", {}), 0 }) ~= 1, "(9.18) a flag being CLEARED is never blocked")
-        local pdc = Obj.new("app.PlayerDamageController", {})
-        local r = e.hooks["app.PlayerDamageController.doDie"]({ 0, pdc })
-        check(r == 1, "(9.18) with Downed mode and the other player here, doDie is skipped (SKIP_ORIGINAL)")
-        check(hp_of(e) == 1, "(9.18) ...and the health is 1 at once, not only at the next frame: " .. tostring(hp_of(e)))
-        local xb = exec_dbg(e)
-        check(xb.latest[#xb.latest].kind == "blocked" and xb.latest[#xb.latest].what == "app.PlayerDamageController.doDie BLOCKED", "(9.18) ...and the blocked call is in the list of events")
-        -- a game-over PAUSE flag is not a death: it is never skipped
-        local before_blocked = xb.blocked
-        check(e.hooks["app.GameManager.setGameOverPauseFlag"]({ 0, Obj.new("app.GameManager", {}), 1 }) ~= 1 and exec_dbg(e).blocked == before_blocked,
-            "(9.18) setGameOverPauseFlag(true) is not blocked")
-        live(e, 0.2)
-        check(#messages_of_kind(e, 4) == 0, "(9.18) ...and, right after a block, it is not sent as a death either")
-        e.hooks["app.GameManager.setGamemode"]({ 0, Obj.new("app.GameManager", {}), 1 })
-        live(e, 0.2)
-        check(#messages_of_kind(e, 4) == 0 and exec_dbg(e).game_overs_seen >= 2, "(9.18) the GameMode switch to Gameover right after a block is recorded but not sent as a death")
+        -- the game-over calls are death signals (hooked), and are never skipped, even in Downed mode with the other player here
+        e.player_hi.f._CurrentHealth = 600
         live(e, 0.5)
-        run_ui(e)
-        check(hp_of(e) == 1, "(9.18) ...health is held at 1: " .. tostring(hp_of(e)))
-        check(ui_has(e, "YOU ARE DOWN: waiting for Bob"), "(9.18) ...and the player is down")
-        check(#messages_of_kind(e, 4) == 0 and log_has(e, "execution test: blocked app.PlayerDamageController.doDie"), "(9.18) ...no death is sent, and the journal says what was blocked")
-        x = exec_dbg(e)
-        check(x.blocked == 1, "(9.18) the blocked call is counted")
-        -- already down, and the game put the health back up: a second block holds it at 1 again at once
-        e.player_hi.f._CurrentHealth = 300
-        e.hooks["app.GameManager.setGameOverFlag"]({ 0, Obj.new("app.GameManager", {}), 1 })
-        check(hp_of(e) == 1, "(9.18) a second block while down holds the health at 1 again: " .. tostring(hp_of(e)))
-        -- the flag being set is blocked too; the 3-per-minute limit lets the 4th one through
-        live(e, 5)
-        local r1 = e.hooks["app.GameManager.setGameOverFlag"]({ 0, Obj.new("app.GameManager", {}), 1 })
-        live(e, 5)
-        local r2 = e.hooks["app.GameManager.setGameOverFlag"]({ 0, Obj.new("app.GameManager", {}), 1 })
-        live(e, 5)
-        local r3 = e.hooks["app.GameManager.setGameOverFlag"]({ 0, Obj.new("app.GameManager", {}), 1 })
-        check(r1 == 1 and r2 ~= 1 and r3 ~= 1, "(9.18) at most 3 blocks a minute: the fourth in the minute is let through, so a game that keeps asking can end")
-        live(e, 0.2)
-        check(#messages_of_kind(e, 4) == 1, "(9.18) ...and that one is a death like any other")
-        x = exec_dbg(e)
-        check(x.blocked == 3 and x.let_through == 2, "(9.18) the counts: 3 blocked, 2 let through: " .. tostring(x.blocked) .. "/" .. tostring(x.let_through))
-        live(e, 61)
-        local r4 = e.hooks["app.PlayerDamageController.doDie"]({ 0, pdc })
-        check(r4 == 1, "(9.18) a minute later blocking works again")
+        check(e.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) }) ~= 1, "(10.23) doDie is never skipped")
+        check(e.hooks["app.GameManager.setGameOverFlag"]({ 0, Obj.new("app.GameManager", {}), 1 }) ~= 1, "(10.23) setGameOverFlag(true) is never skipped")
+        live(e, 0.3)
+        check(hp_of(e) == 600, "(10.23) ...and the health is left alone (nothing holds it at 1 and puts the player down): " .. tostring(hp_of(e)))
+        local sf, bad = e.files["re7mp/settings.json"], false
+        live(e, 3)
+        sf = e.files["re7mp/settings.json"]
+        for k in pairs(sf or {}) do if k ~= "exec_wipe" and (tostring(k):lower():find("exec", 1, true) or tostring(k):lower():find("block", 1, true)) then bad = true end end -- (exec_wipe is the real "executions end the game for both" setting)
+        check(not bad, "(10.23) no switch of the execution test is in the settings file")
     end
-    do -- the 5 s memory of a block ends with the box
-        local e = exec_world()
-        e.check_override[EXEC_BLOCK] = true
-        run_ui(e)
-        check(e.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) }) == 1, "(9.18) (control) the game over is blocked")
-        e.check_override[EXEC_BLOCK] = false
-        run_ui(e)
-        e.hooks["app.GameManager.setGameOverPauseFlag"]({ 0, Obj.new("app.GameManager", {}), 1 })
-        live(e, 0.2)
-        check(#messages_of_kind(e, 4) == 1, "(9.18) with the block box unticked again, the next game-over signal is a death as usual")
+    do -- a settings file of an older build that says the test was on does nothing now
+        local e = exec_world({ death_mode_choice = 4, exec_on = true, exec_log = true, exec = true, execution_test = true, block = true, exec_block = true })
+        for _, k in ipairs(GRAB_HOOKS) do check(e.hooks[k] == nil, "(10.23) an old file that says the log was on does not hook " .. k) end
+        e.player_hi.f._CurrentHealth = 600
+        live(e, 0.5)
+        check(e.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) }) ~= 1 and hp_of(e) == 600, "(10.23) ...and one that says the block was on does not block a game over")
     end
     do -- (9.27) an execution ends the game for both players
         local WIPE_BOX = "Executions end the game for BOTH players (a death the game won't let me hold at 1 health: Jack's grab, scripted kills)"
@@ -6649,30 +6891,16 @@ do
         live(e2, 0.2)
         m = messages_of_kind(e2, 4)
         check(#m == 1 and m[1] == "died", "(9.27) a death with health at 0 or 1 is the ordinary message, not an execution: " .. tostring(m[1]))
-        -- a grab call just before (execution test's log on) makes it an execution whatever the health says
+        -- (10.23) a grab call is not a signal any more (it needed the log): a game over at health 1 is a death by damage, whatever came before it
         local e3 = exec_world()
-        e3.check_override[EXEC_LOG] = true
-        run_ui(e3)
-        e3.hooks["app.Em3000Grapple.startGrapple"]({ 0, Obj.new("app.Em3000Grapple", {}) })
         e3.player_hi.f._CurrentHealth = 1
         live(e3, 0.5)
         e3.hooks["app.GameManager.setGameOverFlag"]({ 0, gm(), 1 })
         live(e3, 0.2)
         m = messages_of_kind(e3, 4)
-        check(#m == 1 and m[1] == "exec", "(9.27) a game over soon after a grab call is an execution even at health 1: " .. tostring(m[1]))
+        check(#m == 1 and m[1] == "died", "(10.23) a game over at health 1 is an ordinary death (the grab-call signal went with the log): " .. tostring(m[1]))
         run_ui(e3)
-        check(ui_has(e3, "a grab call came"), "(9.27) ...and the panel names the grab call")
-        -- the game-over screen opening is not a grab: alone, it does not make a death an execution
-        local e3b = exec_world()
-        e3b.check_override[EXEC_LOG] = true
-        run_ui(e3b)
-        e3b.hooks["app.GameOverScreen.open"]({ 0, Obj.new("app.GameOverScreen", {}) })
-        e3b.player_hi.f._CurrentHealth = 1
-        live(e3b, 0.5)
-        e3b.hooks["app.GameManager.setGameOverFlag"]({ 0, gm(), 1 })
-        live(e3b, 0.2)
-        m = messages_of_kind(e3b, 4)
-        check(#m == 1 and m[1] == "died", "(9.27) the game-over screen opening is not a grab call: the death at health 1 stays an ordinary one: " .. tostring(m[1]))
+        check(not ui_has(e3, "a grab call came"), "(10.23) ...and the panel does not mention a grab call")
         -- the switch
         local e4 = exec_world({ death_mode_choice = 4, exec_wipe = false })
         e4.player_hi.f._CurrentHealth = 600
@@ -6749,27 +6977,14 @@ do
         run_ui(r6)
         check(ui_has(r6, "was executed: the team is wiped"), "(9.27) the test button acts as an execution")
     end
-    do -- with the test off no hook of the script ever answers 'skip'
+    do -- (10.23) no hook of the script answers 'skip' in an ordinary session (the execution test's block is gone; a downed player's healing-item block skips only while down)
         local e = exec_world()
         local skips = {}
         for k, h in pairs(e.hooks) do
             local ok, r = pcall(h, { 0, Obj.new("app.Whatever", {}), 1, 1, 1 })
             if ok and r == 1 then skips[#skips + 1] = k end
         end
-        check(#skips == 0, "(9.18) with the test off, no hook of the script skips a game call: " .. table.concat(skips, ", "))
-    end
-    do -- blocking needs Downed mode, the other player, and a partner who is not down
-        local e = exec_world({ death_mode_choice = 1 })
-        e.check_override[EXEC_BLOCK] = true
-        run_ui(e)
-        local r = e.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) })
-        check(r ~= 1 and exec_dbg(e).note:find("Downed mode needs the other player connected and not down", 1, true), "(9.18) without Downed mode nothing is blocked, and the panel says why")
-        local e2 = exec_world()
-        e2.check_override[EXEC_BLOCK] = true
-        run_ui(e2)
-        for _ = 1, 400 do run_frames(e2, 0.05) end -- the other player's packets stop coming (20 s without a bump)
-        local r2 = e2.hooks["app.PlayerDamageController.doDie"]({ 0, Obj.new("app.PlayerDamageController", {}) })
-        check(r2 ~= 1, "(9.18) with nobody else connected nothing is blocked")
+        check(#skips == 0, "(10.23) no hook of the script skips a game call in an ordinary session: " .. table.concat(skips, ", "))
     end
     do -- the real wiring: a pre-hook returning "skip" gives SKIP_ORIGINAL, nothing else does
         local e = exec_world()
@@ -7259,7 +7474,7 @@ do
     check(not calls_have("Pl0000.set_Position") and log_has(envr, "I am the host: the joiner follows the host, not the other way round"), "the host is never moved by the joiner's cutscene")
     envr.ui_press[TEST_BTN] = true
     run_ui(envr)
-    check(calls_have("Pl0000.set_Position 3.00 0.05 4.00"), "the test button moves me to where the other player stands, even as the host (that is how it is tried with the loopback bot)")
+    check(calls_have("Pl0000.set_Position 3.00 0.05 4.00"), "the test button moves me to where the other player stands, even as the host (that is how it is tried with Ethan's friend)")
     refresh_debug(envr)
     check(envr.files["re7mp/debug.json"].health.story.not_moved_because["I am the host: the joiner follows the host, not the other way round"] == 1, "the file counts the reasons for not moving")
     -- (9.28) the HOST can follow the joiner too, when it asks for that
@@ -7904,7 +8119,7 @@ do
     env2.ui_press["COLLECT the characters in view now  [F11]"] = true
     run_ui(env2)
     check(ui_has(env2, "button: ") and ui_has(env2, "0 new, 3 collected in all"), "(9.27) the button collects too, and says nothing was new")
-    env2.check_override["Collect by itself every 20 s while this is ticked (may stutter a little each time)"] = true
+    env2.check_override["Collect by itself every 20 s while this is ticked (a scan stops the game for about 0.1 s: it waits for a menu, a cutscene or standing still)"] = true
     run_ui(env2)
     local before = env2.files[FILE]
     env2.scene_objects[#env2.scene_objects + 1] = char("Em4000", "Character/Enemy/em4000/em4000.mesh", { root, hips }, 5)
@@ -7921,7 +8136,7 @@ do
     local lines0 = auto_lines()
     for _ = 1, 50 do run_frames(env2, 0.5) bump_remote(env2) end
     check(lines0 == 1 and auto_lines() == 1, "(9.27) the automatic mode says (and saves) something only when it found a new model, not every 20 s: " .. lines0 .. " -> " .. auto_lines())
-    env2.check_override["Collect by itself every 20 s while this is ticked (may stutter a little each time)"] = false
+    env2.check_override["Collect by itself every 20 s while this is ticked (a scan stops the game for about 0.1 s: it waits for a menu, a cutscene or standing still)"] = false
     run_ui(env2)
     env2.scene_objects[#env2.scene_objects + 1] = char("Em5000", "Character/Enemy/em5000/em5000.mesh", { root, hips }, 5)
     env2.scene = make_scene(env2.scene_objects)
@@ -8312,7 +8527,7 @@ do
     check(log_has(env, "Parts: 3 added"), "(9.23) ...and the journal says so")
 
     -- follow the other player (Bob at 3, 1.6, 4 -> feet 3, 0, 4)
-    env.check_override["It follows the other player (the loopback bot does)"] = true
+    env.check_override["It follows the other player (Ethan's friend does)"] = true
     run_ui(env)
     for _ = 1, 30 do run_frames(env, 0.05) bump_remote(env) phase("UpdateBehavior") end
     local last
@@ -8565,7 +8780,7 @@ do
     local c1 = flush_dbg()
     check(c1 and c1.recording == false and c1.saved == 1, "(9.24) after the longest time the recording stops by itself and is saved")
     local f = env.files["re7mp/clips/walk.json"]
-    check(f ~= nil and f.format == 1 and f.label == "walk" and f.rate == 20 and f.build == "9.44", "(9.24) the file is re7mp/clips/walk.json, labelled walk, 20 frames a second")
+    check(f ~= nil and f.format == 1 and f.label == "walk" and f.rate == 20 and f.build == "10.27", "(9.24) the file is re7mp/clips/walk.json, labelled walk, 20 frames a second")
     check(f and math.abs(f.dur - 3) < 0.3, "(9.24) ...about 3 s long: " .. tostring(f and f.dur))
     check(f and #f.body.frames == math.floor(f.dur * 20 + 0.5) + 1, "(9.24) ...with a frame every 1/20 s (resampled): " .. tostring(f and #f.body.frames))
     check(f and f.body.na == 156 and #f.body.names == 52 and #f.body.frames[1] == 159 and f.body.hip == true, "(9.24) ...52 joints x 3 angles and the hip position (159 numbers per frame)")
@@ -9065,414 +9280,7 @@ do
     local ld = flush_dbg()
     check(ld.library.melee == nil and ld.library.walk ~= nil and ld.library.run ~= nil and ld.library.idle ~= nil, "(9.24) ...the good ones are listed after reading the files again")
 
-    -- =========================================================================================
-    -- (9.28) the cutscene probe: which animations play near me when a cutscene starts, and Ethan's joints, per cutscene
-    -- =========================================================================================
-    do
-        local PROBE_BOX = "Cutscene probe: on (remembered)"
-        local LINK_BOX = "Linked to cutscenes: a recording starts and ends by itself with every cutscene (OFF = the cutscene is only counted; remembered)"
-        local SECS_SL = "Seconds to record per cutscene"
-        local function motion_object(name, pos, bank, mid, frame)
-            local comps = {}
-            local go = make_go(name, pos, comps)
-            local layer = Obj.new("via.motion.TreeLayer", { get_Frame = function() return frame end, get_MotionID = function() return mid end,
-                get_MotionBankID = function() return bank end })
-            local m = Obj.new("via.motion.Motion", { getLayerCount = function() return 1 end, getLayer = function() return layer end,
-                get_GameObject = function() return go end })
-            comps[#comps + 1] = m
-            return go, m
-        end
-        local ppos = env.player:call("get_Transform"):call("get_Position")
-        local npc_go, npc_m = motion_object("Jack_cutscene_actor", vec(ppos.x + 3, ppos.y, ppos.z + 4), 7, 41000, 12.0)
-        local far_go, far_m = motion_object("Far_away_enemy", vec(ppos.x + 300, ppos.y, ppos.z), 9, 222, 1.0)
-        local door_go, door_m = motion_object("Door_anim", vec(ppos.x + 1, ppos.y, ppos.z + 1), 3, 88, 0.5)
-        weapons_by_type["via.motion.Motion"] = { far_m, npc_m, door_m }
-        local function gm_args(id, x, y, z)
-            local idobj = Obj.new("System.String", { ["ToString()"] = function() return id end })
-            local xf = Obj.new("via.Transform", { get_Position = function() return vec(x, y, z) end })
-            return { 0, Obj.new("app.GameManager", {}), idobj, xf }
-        end
-        local function cs_dbg()
-            for _ = 1, 90 do run_frames(env, 0.05) bump_remote(env) end
-            local d = env.files["re7mp/debug.json"]
-            return d and d.health.cutscenes
-        end
-
-        -- off at the start: a cutscene writes nothing
-        check(env.hooks["app.GameManager.requestEvent"] == nil, "(9.28) the cutscene probe is off at the start: requestEvent is not hooked")
-        run_ui(env)
-        check(ui_has(env, "WHAT TO DO: tick the box"), "(9.28) the panel says what to do")
-        check((cs_dbg() or {}).linked_to_cutscenes == false, "(9.38) the probe is NOT linked to cutscenes at the start")
-        env.slider_override[SECS_SL] = 5
-        env.check_override[LINK_BOX] = true -- (9.38) the older tests below are of the linked probe
-        env.check_override[PROBE_BOX] = true
-        run_ui(env)
-        check(env.hooks["app.GameManager.requestEvent"] ~= nil, "(9.28) ticking the box hooks requestEvent (the read-only story hook)")
-        run_ui(env)
-        env.slider_override[SECS_SL] = nil
-        env.check_override[PROBE_BOX] = nil
-
-        env.hooks["app.GameManager.requestEvent"](gm_args("c03e03_00", ppos.x + 2, ppos.y, ppos.z))
-        steps(2, 0)
-        check(log_has(env, "cutscene: c03e03_00 started: recording 5 s"), "(9.28) a cutscene start is noticed and the recording announced")
-        steps(10, 0)
-        check(log_has(env, "Record: starting (cs_c03e03_00)"), "(9.28) ...Ethan's joints are recorded under cs_<name> (in the game phase)")
-        env.hooks["app.GameManager.requestEvent"](gm_args("c03e09_00", 0, 0, 0))
-        steps(2, 0)
-        check(log_has(env, "c03e09_00 started while c03e03_00 is being recorded: not recorded"), "(9.28) a second cutscene while one is recorded is skipped, and said")
-        env.hooks["app.GameManager.requestEvent"](gm_args("c03e03_00", 0, 0, 0))
-        steps(2, 0)
-        steps(170, 0)
-        local f = env.files["re7mp/cutscenes/c03e03_00.json"]
-        check(f ~= nil, "(9.28) the cutscene file is written")
-        check(f and #f.scans == 2 and f.scans[1].at < 1 and f.scans[2].at > 2.9 and f.scans[2].at < 4, "(9.28) ...with a look at +0.4 s and +3 s (the ones after the 5 s are not taken)")
-        local sc = f and f.scans[1]
-        check(sc and sc.objects_with_motion_in_scene == 3 and #sc.items == 2, "(9.28) ...each look counts the animated objects in the scene and lists those within 40 m (the far one is left out)")
-        check(sc and sc.items[1].path:find("Door_anim", 1, true) and sc.items[2].path:find("Jack_cutscene_actor", 1, true), "(9.28) ...nearest first")
-        check(sc and sc.items[2].ids == "L0=7/41000/12.0" and sc.items[2].dist > 4.9 and sc.items[2].dist < 5.1, "(9.28) ...each with its motion bank / id / frame and its distance: " .. tostring(sc and sc.items[2].ids))
-        check(f and f.ethan == "recording" and f.ethan_clip_file == "re7mp/clips/cs_c03e03_00.json", "(9.28) ...and says Ethan's joints were recorded")
-        local cf = env.files["re7mp/clips/cs_c03e03_00.json"]
-        check(cf ~= nil and cf.dur > 4 and cf.dur < 6 and cf.label == "cs_c03e03_00" and cf.note == "cutscene c03e03_00", "(9.28) the joint clip is written under its own name and is about the 5 s asked for: " .. tostring(cf and cf.dur))
-        check(f and f.player and f.event_transform and math.abs(f.event_transform.x - (ppos.x + 2)) < 0.01, "(9.28) the player's place and the cutscene's own place are in the file")
-        local d = cs_dbg()
-        check(d and d.on == true and d.started == 1 and d.saved == 1 and d.repeats == 1 and #d.skipped == 1 and d.skipped[1].id == "c03e09_00" and d.recording == nil,
-            "(9.28) the debug file counts starts, saves, repeats and the skipped one: " .. tostring(d and (d.started .. "/" .. d.saved .. "/" .. d.repeats .. "/" .. #d.skipped)))
-        check(d and #d.files == 1 and d.files[1].id == "c03e03_00" and d.files[1].scans == 2, "(9.28) ...and lists the files")
-        run_ui(env)
-        check(ui_has(env, "c03e03_00: 2 looks, up to 2 animated objects near you, Ethan: recording"), "(9.28) the panel lists what was collected")
-        -- clip recordings by hand are unaffected
-        check(env.files["re7mp/clips/cs_c03e03_00.json"].label == "cs_c03e03_00" and env.files["re7mp/clips/idle.json"] ~= nil, "(9.28) (the normal clips are still there)")
-
-        -- a scene that changes in the middle of a cutscene does not drop the joint recording (the clip recorder would drop a normal one)
-        do
-            local function dropped_lines()
-                local n = 0
-                for _, l in ipairs(env.log) do if l:find("Record: the scene changed, so the recording is dropped", 1, true) then n = n + 1 end end
-                return n
-            end
-            local drops_before = dropped_lines()
-            env.hooks["app.GameManager.requestEvent"](gm_args("c03e20_00", 0, 0, 0))
-            steps(30, 0)
-            local sc_before = env.scene
-            env.scene = make_scene(env.scene_objects)
-            steps(200, 0)
-            check(dropped_lines() == drops_before and env.files["re7mp/clips/cs_c03e20_00.json"] ~= nil,
-                "(9.28) a scene change in the middle of a cutscene does not drop the joint recording")
-        end
-
-        -- one long frame (a hitch, a loading screen): the looks later than the asked length are still not taken
-        do
-            env.hooks["app.GameManager.requestEvent"](gm_args("c03e21_00", 0, 0, 0))
-            steps(4, 0)
-            run_frames(env, 13, 13)
-            steps(200, 0)
-            local fh = env.files["re7mp/cutscenes/c03e21_00.json"]
-            check(fh ~= nil and #fh.scans <= 2, "(9.28) a frame that lasts longer than the whole cutscene still takes only the looks inside the asked length: " .. tostring(fh and #fh.scans))
-        end
-
-        -- the second look sees actors that were not there at the first
-        local late_go, late_m = motion_object("Late_actor", vec(ppos.x + 6, ppos.y, ppos.z), 5, 555, 0.0)
-        env.hooks["app.GameManager.requestEvent"](gm_args("c03e10_00", 0, 0, 0))
-        steps(25, 0)
-        weapons_by_type["via.motion.Motion"] = { far_m, npc_m, door_m, late_m }
-        steps(60, 0)
-        local env_slider = SECS_SL
-        steps(180, 0)
-        local f2 = env.files["re7mp/cutscenes/c03e10_00.json"]
-        check(f2 and #f2.scans == 2 and #f2.scans[2].new_since_first == 1 and f2.scans[2].new_since_first[1]:find("Late_actor", 1, true),
-            "(9.28) a later look lists the objects that were not there at the first one (the cutscene's own actors)")
-        weapons_by_type["via.motion.Motion"] = { far_m, npc_m, door_m }
-
-        -- at most 25 objects per look
-        do
-            local many = { far_m, npc_m, door_m }
-            for i = 1, 30 do
-                local _, mm = motion_object("Crowd_" .. i, vec(ppos.x + 1 + i * 0.5, ppos.y, ppos.z), 1, i, 0)
-                many[#many + 1] = mm
-            end
-            weapons_by_type["via.motion.Motion"] = many
-            env.hooks["app.GameManager.requestEvent"](gm_args("c03e30_00", 0, 0, 0))
-            steps(200, 0)
-            local f30 = env.files["re7mp/cutscenes/c03e30_00.json"]
-            check(f30 and #f30.scans[1].items == 25 and f30.scans[1].objects_with_motion_in_scene == 33, "(9.28) a look lists the 25 nearest animated objects and counts them all: " .. tostring(f30 and #f30.scans[1].items))
-            weapons_by_type["via.motion.Motion"] = { far_m, npc_m, door_m }
-        end
-
-        -- no Ethan object here (a cutscene that is not about him): the animations are still written down
-        local saved_scene2 = env.scene
-        env.scene = make_scene({})
-        env.hooks["app.GameManager.requestEvent"](gm_args("c03e11_00", 0, 0, 0))
-        steps(200, 0)
-        local f3 = env.files["re7mp/cutscenes/c03e11_00.json"]
-        check(f3 and f3.ethan:find("no Ethan object", 1, true) and f3.ethan_clip_file == nil and #f3.scans >= 1, "(9.28) with no Ethan object the file says so and the animation looks are kept: " .. tostring(f3 and f3.ethan))
-        env.scene = saved_scene2
-
-        -- a bad id is not used; the same id within a minute is not recorded twice, a minute later it is
-        env.hooks["app.GameManager.requestEvent"](gm_args("bad id!", 0, 0, 0))
-        steps(5, 0)
-        local d2 = cs_dbg()
-        check(d2 and d2.bad_id == 1 and d2.started == 6, "(9.28) an id with odd characters is counted as bad and not recorded: " .. tostring(d2 and (tostring(d2.bad_id) .. "/" .. tostring(d2.started) .. "/" .. tostring(d2.seen))))
-        for _ = 1, 700 do run_frames(env, 0.1) bump_remote(env) end
-        env.hooks["app.GameManager.requestEvent"](gm_args("c03e03_00", 0, 0, 0))
-        steps(10, 0)
-        check(log_has(env, "c03e03_00 started: recording"), "(9.28) the same id a minute later is recorded again")
-        steps(200, 0)
-
-        -- a recording of the same id made earlier is not reported when this time there is no Ethan
-        do
-            for _ = 1, 700 do run_frames(env, 0.1) bump_remote(env) end
-            local keep_scene = env.scene
-            env.scene = make_scene({})
-            env.hooks["app.GameManager.requestEvent"](gm_args("c03e03_00", 0, 0, 0))
-            steps(200, 0)
-            local fr = env.files["re7mp/cutscenes/c03e03_00.json"]
-            check(fr and fr.ethan_clip_file == nil and fr.ethan:find("no Ethan object", 1, true), "(9.28) a clip recorded for the same cutscene earlier is not claimed when this time Ethan could not be recorded")
-            env.scene = keep_scene
-        end
-
-        -- switching off in the middle stops it, the file is still written
-        env.hooks["app.GameManager.requestEvent"](gm_args("c03e12_00", 0, 0, 0))
-        steps(30, 0)
-        env.check_override[PROBE_BOX] = false
-        run_ui(env)
-        steps(10, 0)
-        check(env.files["re7mp/cutscenes/c03e12_00.json"] ~= nil and env.files["re7mp/cutscenes/c03e12_00.json"].why_it_ended == "switched off", "(9.28) switching the probe off in the middle ends the recording and keeps what was seen")
-        env.check_override[PROBE_BOX] = nil
-        steps(200, 0)
-        local started_now = (cs_dbg() or {}).started
-        env.hooks["app.GameManager.requestEvent"](gm_args("c03e13_00", 0, 0, 0))
-        steps(10, 0)
-        check((cs_dbg() or {}).started == started_now and env.files["re7mp/cutscenes/c03e13_00.json"] == nil, "(9.28) switched off, a cutscene start is ignored")
-
-        -- =====================================================================================
-        -- (9.32) the cutscene recording stops when the player's own animation is idle / walk / run again; F10 stops any recording
-        -- =====================================================================================
-        do
-            local STOP_BOX = "Stop a recording when I am idle / walking / running again (that is gameplay, not a cutscene)"
-            local GRACE_SL = "...but not in the first seconds (a cutscene can take a moment to start)"
-            local function ev(id) env.hooks["app.GameManager.requestEvent"](gm_args(id, 0, 0, 0)) end
-            local function sec(n) steps(math.floor(n * 20 + 0.5), 0) end -- n seconds of play (0.05 s a step)
-            local function cs_file(id) return env.files["re7mp/cutscenes/" .. id .. ".json"] end
-            local function set_secs(n)
-                env.slider_override[SECS_SL] = n
-                run_ui(env)
-                env.slider_override[SECS_SL] = nil
-            end
-            env.check_override[PROBE_BOX] = true
-            run_ui(env)
-            env.check_override[PROBE_BOX] = nil
-            set_secs(20)
-            run_ui(env)
-            env.check_override[STOP_BOX] = true
-            env.slider_override[GRACE_SL] = 4
-            run_ui(env)
-            check(env.check_override[STOP_BOX] == nil and env.slider_override[GRACE_SL] == nil,
-                "(9.32) the panel has the box 'stop when idle / walking / running again' and the wait-at-the-start slider (both were read)")
-            check(ui_has(env, "F10 stops a recording that is running (also these ones)"), "(9.32) ...and says F10 stops a recording")
-            local d0 = cs_dbg()
-            check(d0 and d0.stop_when_gameplay == true and d0.wait_at_start_s == 4, "(9.32) the debug file has the stop box (on) and the wait (4 s) by default: " .. tostring(d0 and d0.wait_at_start_s))
-
-            -- A: an event trigger (the player only idles): ends by itself after the wait, and its joint clip (all idle) is not kept
-            mstate.bank, mstate.id = 0, 0
-            ev("c06e01_00")
-            sec(2)
-            check(cs_file("c06e01_00") == nil, "(9.32) idle at the start does not end the recording inside the first seconds")
-            run_ui(env)
-            check(ui_has(env, "the player is: 0/0 idle"), "(9.32) the panel shows what the player is doing while it records")
-            sec(3.5)
-            local fa = cs_file("c06e01_00")
-            check(fa ~= nil, "(9.32) an event where the player only idles ends by itself: the cutscene file is written")
-            check(fa and fa.why_it_ended:find("gameplay again", 1, true) ~= nil, "(9.32) ...saying why: " .. tostring(fa and fa.why_it_ended))
-            check(fa and fa.kind == "event_trigger", "(9.32) ...and calling it an event trigger: " .. tostring(fa and fa.kind))
-            check(fa and fa.seconds_recorded >= 3.9 and fa.seconds_recorded <= 5.6, "(9.32) ...after the 4 s wait, not at the 20 s asked for: " .. tostring(fa and fa.seconds_recorded))
-            check(env.files["re7mp/clips/cs_c06e01_00.json"] == nil and fa and fa.ethan_clip_file == nil, "(9.32) ...and its joint clip (idle noise) is not kept")
-            check(fa and fa.ethan:find("not kept", 1, true) ~= nil, "(9.32) ...the file says it was recorded but not kept: " .. tostring(fa and fa.ethan))
-            check(fa and fa.scans[#fa.scans].final == true, "(9.32) ...a last look at the animations near the player was taken when it stopped")
-            check(fa and fa.player_motion.ids_seen["0/0"] ~= nil and fa.player_motion.ids_seen["0/0"] >= 20 and fa.player_motion.timeline[1].id == "0/0"
-                and fa.player_motion.timeline[1].name == "idle" and fa.player_motion.gameplay_ids["0/1"] == "walk / run",
-                "(9.32) ...with the player's own animation ids (0/0 = idle) and the ids that count as gameplay")
-            check(log_has(env, "c06e01_00: stopped at") and log_has(env, "an event trigger, not a cutscene"), "(9.32) ...and the journal says so")
-            local dA = cs_dbg()
-            local cl = env.files["re7mp/debug.json"].health.clips
-            check(cl and cl.recording == false, "(9.32) ...no recording is left running")
-            check(dA and dA.stopped_when_gameplay == 1 and dA.event_triggers_seen == 1 and dA.files[#dA.files].kind == "event_trigger",
-                "(9.32) ...and the debug file counts it: " .. tostring(dA and dA.stopped_when_gameplay))
-
-            -- B: a real cutscene: it takes hold of the player after 1 s, gameplay is back after 8 s
-            mstate.bank, mstate.id = 0, 0
-            ev("c06e02_00")
-            sec(1)
-            mstate.bank, mstate.id = 0, 10 -- the cutscene's own animation
-            sec(7)
-            check(cs_file("c06e02_00") == nil, "(9.32) while the player's animation is not idle / walk / run the recording goes on")
-            mstate.bank, mstate.id = 0, 1 -- walking again
-            sec(0.5)
-            check(cs_file("c06e02_00") == nil, "(9.32) half a second of gameplay does not end it yet")
-            sec(1.8)
-            local fb = cs_file("c06e02_00")
-            check(fb ~= nil and fb.kind == "cutscene", "(9.32) a cutscene whose animation was not idle / walk / run is a cutscene: " .. tostring(fb and fb.kind))
-            check(fb and fb.why_it_ended:find("gameplay again", 1, true) and fb.why_it_ended:find("walk / run", 1, true), "(9.32) ...it ended when gameplay was back: " .. tostring(fb and fb.why_it_ended))
-            local cb = env.files["re7mp/clips/cs_c06e02_00.json"]
-            check(cb ~= nil and cb.dur > 7.9 and cb.dur < 8.7, "(9.32) ...its joint clip is cut off where gameplay began (about 8.2 of the 9.2 s): " .. tostring(cb and cb.dur))
-            check(cb and cb.trimmed_to and cb.ended_because and cb.ended_because:find("gameplay again", 1, true), "(9.32) ...and says it was trimmed and why")
-            local last_t = 0
-            for _, line in ipairs(cb and cb.ids or {}) do
-                local t = tonumber(line:match("^([%d%.]+) "))
-                if t and t > last_t then last_t = t end
-            end
-            check(cb and last_t <= cb.dur + 0.4, "(9.32) ...and its animation id lines stop there too: " .. tostring(last_t))
-            check(fb and fb.ethan_clip_file == "re7mp/clips/cs_c06e02_00.json" and fb.player_motion.ids_seen["0/10"] ~= nil, "(9.32) ...the file lists the clip and the 0/10 the player played")
-            local tl = fb and fb.player_motion.timeline or {}
-            check(#tl >= 3 and tl[1].id == "0/0" and tl[2].id == "0/10" and tl[2].t > 0.9 and tl[2].t < 1.3 and tl[3].id == "0/1" and tl[3].t > 7.9 and tl[3].t < 8.4,
-                "(9.32) ...with a timeline of the changes (idle, 0/10 at 1 s, walk at 8 s)")
-
-            -- C: a cutscene that takes hold of the player late (2.5 s) is not cut by the idle before it
-            mstate.bank, mstate.id = 0, 0
-            ev("c06e03_00")
-            sec(2.5)
-            mstate.bank, mstate.id = 0, 11
-            sec(3)
-            check(cs_file("c06e03_00") == nil, "(9.32) a cutscene that takes hold of the player late is not stopped by the idle before it")
-            mstate.bank, mstate.id = 0, 0
-            sec(2.5)
-            local fc = cs_file("c06e03_00")
-            check(fc ~= nil and fc.kind == "cutscene" and fc.seconds_recorded > 6 and fc.seconds_recorded < 7.8, "(9.32) ...it ends a second after the player is idle again: " .. tostring(fc and fc.seconds_recorded))
-
-            -- D: F10 stops a cutscene recording with the clip recorder switched OFF (before 9.32 it did nothing there)
-            env.check_override[REC_BOX] = false
-            run_ui(env)
-            env.check_override[REC_BOX] = nil
-            mstate.bank, mstate.id = 0, 10
-            ev("c06e04_00")
-            sec(3)
-            check(log_has(env, "Record: starting (cs_c06e04_00)"), "(9.32) the cutscene recording is running")
-            check(cs_file("c06e04_00") == nil, "(9.32) ...and the file is not written yet")
-            env.keys[0x79] = true
-            steps(2, 0)
-            env.keys[0x79] = false
-            sec(1)
-            local fd = cs_file("c06e04_00")
-            check(fd ~= nil and fd.why_it_ended == "you pressed F10", "(9.32) F10 ends it: " .. tostring(fd and fd.why_it_ended))
-            check(fd and fd.seconds_recorded < 5.5 and fd.kind == "cutscene", "(9.32) ...at once, not at the 20 s: " .. tostring(fd and fd.seconds_recorded))
-            local cd = env.files["re7mp/clips/cs_c06e04_00.json"]
-            check(cd ~= nil and cd.dur > 2.5 and cd.dur < 4.5 and cd.ended_because == "you pressed F10", "(9.32) ...and the joint clip up to then is kept")
-            check(fd and fd.scans[#fd.scans].final == true, "(9.32) ...with a last look at the animations")
-            local dD = cs_dbg()
-            check(dD and dD.stopped_by_f10 == 1 and dD.f10_presses_that_stopped >= 1, "(9.32) ...the debug file counts the F10 stop")
-            -- F10 with nothing recording and the recorder off still does nothing
-            local lines_before = #env.log
-            env.keys[0x79] = true
-            steps(2, 0)
-            env.keys[0x79] = false
-            steps(2, 0)
-            local started_again = false
-            for i = lines_before + 1, #env.log do if env.log[i]:find("Record: starting", 1, true) then started_again = true end end
-            check(not started_again, "(9.32) F10 with nothing recording and the recorder off starts nothing")
-
-            -- E: box unticked: an idle event is recorded for the whole time and its clip is kept
-            env.check_override[STOP_BOX] = false
-            run_ui(env)
-            env.check_override[STOP_BOX] = nil
-            set_secs(5)
-            mstate.bank, mstate.id = 0, 0
-            ev("c06e05_00")
-            sec(7)
-            local fe = cs_file("c06e05_00")
-            check(fe ~= nil and fe.why_it_ended == "finished" and fe.seconds_recorded >= 5 and fe.kind == "event_trigger", "(9.32) with the box unticked the idle event is recorded to the end: " .. tostring(fe and fe.why_it_ended))
-            check(env.files["re7mp/clips/cs_c06e05_00.json"] ~= nil and fe.player_motion.stop_box == false, "(9.32) ...and its clip is kept (nothing was stopped)")
-
-            -- F: the player's animation can't be read: nothing is stopped, it is called unknown
-            env.check_override[STOP_BOX] = true
-            run_ui(env)
-            env.check_override[STOP_BOX] = nil
-            mstate.none = true
-            ev("c06e06_00")
-            sec(7)
-            local ff = cs_file("c06e06_00")
-            check(ff ~= nil and ff.why_it_ended == "finished" and ff.kind == "unknown" and ff.player_motion.readings == 0 and ff.player_motion.unreadable > 5,
-                "(9.32) when the player's animation can't be read nothing is stopped and the file says unknown: " .. tostring(ff and ff.kind))
-            check(env.files["re7mp/clips/cs_c06e06_00.json"] ~= nil, "(9.32) ...and the clip is kept")
-            mstate.none = false
-
-            -- G: remembered
-            env.slider_override[GRACE_SL] = 6
-            env.check_override[STOP_BOX] = false
-            run_ui(env)
-            env.slider_override[GRACE_SL] = nil
-            env.check_override[STOP_BOX] = nil
-            for _ = 1, 40 do run_frames(env, 0.1) bump_remote(env) end
-            local svg = env.files["re7mp/settings.json"] or {}
-            check(svg.cutscene_stop_loco == false and svg.cutscene_loco_grace == 6, "(9.32) the box and the wait are saved with the settings: " .. tostring(svg.cutscene_stop_loco) .. " / " .. tostring(svg.cutscene_loco_grace))
-            -- back to the defaults for what follows
-            env.slider_override[GRACE_SL] = 4
-            env.check_override[STOP_BOX] = true
-            run_ui(env)
-            env.slider_override[GRACE_SL] = nil
-            env.check_override[STOP_BOX] = nil
-            set_secs(5)
-            mstate.bank, mstate.id, mstate.none = nil, nil, false
-        end
-        -- at most 60 cutscenes are recorded in a session
-        do
-            env.check_override[PROBE_BOX] = true
-            run_ui(env)
-            env.check_override[PROBE_BOX] = nil
-            for i = 1, 70 do
-                env.hooks["app.GameManager.requestEvent"](gm_args(string.format("c05e%02d_00", i), 0, 0, 0))
-                for _ = 1, 24 do
-                    run_frames(env, 0.25)
-                    bump_remote(env)
-                    phase("UpdateBehavior")
-                end
-            end
-            local dd = cs_dbg()
-            check(dd and dd.started == 60, "(9.28) no more than 60 cutscenes are recorded in a session: " .. tostring(dd and dd.started))
-            run_ui(env)
-            check(ui_has(env, "60 cutscenes were recorded this session already: not recorded"), "(9.28) ...and the ones after that are said to be skipped (the panel's last line)")
-            env.check_override[PROBE_BOX] = false
-            run_ui(env)
-            env.check_override[PROBE_BOX] = nil
-            steps(5, 0)
-        end
-
-        -- (9.38) unlinked from cutscenes: a cutscene start is only counted; "Record now" records by hand and gameplay does not stop that recording
-        do
-            env.check_override[LINK_BOX] = false
-            env.check_override[PROBE_BOX] = true
-            env.slider_override[SECS_SL] = 20
-            run_ui(env)
-            env.check_override[PROBE_BOX] = nil
-            local function fresh() env.ui_press["Clear the debug log"] = true run_ui(env) return cs_dbg() or {} end
-            local b = fresh()
-            env.hooks["app.GameManager.requestEvent"](gm_args("c09e01_00", 0, 0, 0))
-            steps(40, 0)
-            local d1 = fresh()
-            check(d1.linked_to_cutscenes == false and d1.started == b.started and d1.seen == b.seen + 1 and (d1.cutscenes_not_recorded_because_unlinked or 0) >= 1 and d1.recording == nil,
-                "(9.38) unlinked: a cutscene start is counted and nothing is recorded: started " .. tostring(d1.started) .. "/" .. tostring(b.started) .. ", not recorded " .. tostring(d1.cutscenes_not_recorded_because_unlinked))
-            check(env.files["re7mp/cutscenes/c09e01_00.json"] == nil, "(9.38) ...and no file is written for it")
-            env.ui_press["Record now (by hand; F10 stops it)##csnow"] = true
-            run_ui(env)
-            steps(40, 0)
-            local d2 = fresh()
-            check(d2.recording == "manual_1" and d2.recorded_by_hand == 1, "(9.38) 'Record now' records by hand: " .. tostring(d2.recording))
-            steps(200, 0) -- 10 s of the player idling (gameplay): a linked recording would have stopped by now
-            local d3 = fresh()
-            check(d3.recording == "manual_1" and d3.stopped_when_gameplay == b.stopped_when_gameplay, "(9.38) ...and the player idling does not stop a recording made by hand: " .. tostring(d3.recording))
-            env.slider_override[SECS_SL] = 5
-            run_ui(env)
-            env.slider_override[SECS_SL] = nil
-            env.check_override[PROBE_BOX] = false
-            run_ui(env)
-            env.check_override[PROBE_BOX] = nil
-            env.check_override[LINK_BOX] = nil
-            steps(20, 0)
-        end
-
-        -- remembered
-        for _ = 1, 40 do run_frames(env, 0.1) bump_remote(env) end
-        local sv = env.files["re7mp/settings.json"] or {}
-        check(sv.cutscene_probe == false and sv.cutscene_secs == 5, "(9.28) the switch and the length are saved with the settings: " .. tostring(sv.cutscene_probe) .. " / " .. tostring(sv.cutscene_secs))
-    end
+    -- (10.22) the cutscene recorder (the 9.28 to 9.38 probe) was taken out of the script; its checks went with it (tools/lua_smoke_1022.lua checks that it is gone)
 end
 
 -- =============================================================================================
@@ -9644,7 +9452,7 @@ do
         env.files["re7mp_in.json"] = { seq = 1, x = x, y = 1.6, z = z, qx = 0, qy = 0, qz = 0, qw = 1, flags = 0, recv_count = 1,
             name = "Bob", transport = "tcp", role = "host" }
     end
-    local FACE = "Face me: the other player's body (the loopback bot too) turns to look at me, so I can see the model from the front"
+    local FACE = "Face me: the other player's body (Ethan's friend too) turns to look at me, so I can see the model from the front"
     local env = new_environment()
     build_world(env)
     load_script(env)
@@ -9878,6 +9686,9 @@ do
                             if not (from_file() and (is_body or is_part or is_pup_body or is_pup_part)) then return true end
                             if is_body and opts.mesh_never_ready then return false end
                             if is_part and opts.part_never_ready then return false end
+                            if is_part and opts.part_never_ready_for then -- (10.7) only these parts (a list of name pieces) never load
+                                for _, piece in ipairs(opts.part_never_ready_for) do if name:find(piece, 1, true) then return false end end
+                            end
                             if is_pup_body and opts.pup_never_ready then return false end
                             if is_pup_part and opts.pup_part_never_ready then return false end
                             if is_pup_body then return env.clock - set_at >= (opts.pup_ready_after or 0) end
@@ -9891,6 +9702,120 @@ do
                         end
                         go.xf.m.get_Joints = function() return { get_elements = function() return ready_now() and all_joints or {} end } end
                         go.m.createComponent = function(_, ctype)
+                            if ctype == "via.motion.Motion" and opts.game_motion then -- (10.2) the body's own Motion component, as the game's would answer
+                                local gm = opts.game_motion
+                                if gm.create_fails then error("fake: createComponent(via.motion.Motion) refused") end
+                                rec.motion_made = (rec.motion_made or 0) + 1
+                                local S = { enabled = false, layers = 0, type = 0, frame = 0, t = env.clock, speed = 1, plays = {}, calls = {}, set_at = env.clock }
+                                rec.motion = S
+                                local function sync() if S.enabled and not gm.frozen then S.frame = S.frame + (env.clock - S.t) * 30 * S.speed end S.t = env.clock end
+                                local function dyn_clip(bank, id) -- (10.14) a clip of an added bank: gm.dyn_lists[path] = { { id, name, frames }, ... }
+                                    for _, db in ipairs(S.dyn_active) do
+                                        if db.bank == bank then
+                                            for _, c in ipairs(gm.dyn_lists and gm.dyn_lists[db.path] or {}) do
+                                                if c.id == id then return { bank = bank, id = id, name = c.name, frames = c.frames or 40 } end
+                                            end
+                                        end
+                                    end
+                                    return nil
+                                end
+                                local function in_set(bank, id)
+                                    local dc = dyn_clip(bank, id)
+                                    if dc then return dc end
+                                    for _, c in ipairs(gm.clips or {}) do
+                                        if c.bank == bank and c.id == id and (c.type or 0) == S.type then return c end
+                                    end
+                                    return nil
+                                end
+                                S.lay, S.layer_idx, S.act_plays = {}, {}, {} -- (10.10) layers by number; layer 1 is the small-action layer: its plays, mask, blend mode and rate are kept apart
+                                S.act_by, S.dyn, S.dyn_active, S.dyn_log = {}, {}, {}, {} -- (10.14) the plays per layer number; the dynamic banks (added, and active only after setupMotionBank) and what was done to them
+                                local function the_layer()
+                                    local L
+                                    local R = { mask = 0, blend = 0, rate = 1 }
+                                    L = Obj.new("via.motion.TreeLayer", {
+                                        [".ctor"] = function() end,
+                                        get_Frame = function() sync() return S.frame end, get_EndFrame = function() return 5000 end,
+                                        set_Speed = function(_, v) if (S.layer_idx[L] or 0) == 0 then sync() S.speed = v end end, set_Resource = function() end,
+                                        set_JointMaskID = function(_, v) R.mask = v end, get_JointMaskID = function() return R.mask end,
+                                        set_BlendMode = function(_, v) R.blend = v end, get_BlendMode = function() return R.blend end,
+                                        set_BlendRate = function(_, v) R.rate = v end, get_BlendRate = function() return R.rate end,
+                                        changeMotion = function(_, bank, id)
+                                            if gm.change_fails then error("fake: changeMotion refused") end
+                                            if (S.layer_idx[L] or 0) > 0 then
+                                                S.act_plays[#S.act_plays + 1] = bank .. "/" .. id
+                                                local ix = S.layer_idx[L]
+                                                S.act_by[ix] = S.act_by[ix] or {}
+                                                S.act_by[ix][#S.act_by[ix] + 1] = bank .. "/" .. id
+                                                return
+                                            end
+                                            S.plays[#S.plays + 1] = bank .. "/" .. id
+                                            S.bank, S.id, S.frame, S.t = bank, id, 0, env.clock
+                                        end })
+                                    L.add_ref = function(self) return self end
+                                    L.R = R
+                                    return L
+                                end
+                                S.make_layer = the_layer
+                                local info_cur = env.gm_info_cur
+                                local mm
+                                mm = Obj.new("via.motion.Motion", {
+                                    getLayerCount = function() return S.layers end, setLayerCount = function(_, n) S.layers = n end,
+                                    getLayer = function(_, i) return S.lay[tonumber(i) or 0] end, setLayer = function(_, i, tl) S.lay[tonumber(i) or 0] = tl S.layer_idx[tl] = tonumber(i) or 0 end,
+                                    set_MotionBankAsset = function(_, b) S.bank_asset = b end, set_JointMap = function(_, j) S.jmap = j end,
+                                    setupMotionBank = function()
+                                        S.setup = (S.setup or 0) + 1
+                                        S.dyn_active = {}
+                                        for i, db in ipairs(S.dyn) do S.dyn_active[i] = db end
+                                    end,
+                                    set_TargetBankType = function(_, t) S.type = t S.calls[#S.calls + 1] = "type " .. t end,
+                                    set_Enabled = function(_, v) sync() S.enabled = v S.calls[#S.calls + 1] = v and "on" or "off" end, get_Enabled = function() return S.enabled end,
+                                    getActiveMotionBankCount = function() if S.bank_asset and env.clock - S.set_at >= (gm.banks_after or 0.5) then return gm.repeated_banks or 1 end return 0 end,
+                                    getMotionBankCount = function() return 1 end,
+                                    getDynamicMotionBankCount = function() return #S.dyn end,
+                                    getDynamicMotionBank = function(_, i) return S.dyn[i + 1] end,
+                                    setDynamicMotionBankCount = function(_, n)
+                                        S.dyn_log[#S.dyn_log + 1] = "count " .. n
+                                        while #S.dyn > n do table.remove(S.dyn) end
+                                    end,
+                                    setDynamicMotionBank = function(_, i, db)
+                                        S.dyn_log[#S.dyn_log + 1] = string.format("bank %d %s ow %s", i, tostring(db.bank), tostring(db.ow))
+                                        S.dyn[i + 1] = db
+                                    end,
+                                    get_JointsConstructed = function() return true end, get_JointCount = function() return 158 end,
+                                    getActiveMotionBank = function() return Obj.new("via.motion.MotionBank", { get_BankID = function() return 0 end }) end,
+                                    getMotionCount = function(_, bid)
+                                        for _, db in ipairs(S.dyn_active) do
+                                            if db.bank == bid then return #(gm.dyn_lists and gm.dyn_lists[db.path] or {}) end
+                                        end
+                                        local n = 0 for _, c in ipairs(gm.clips or {}) do if (c.type or 0) == S.type then n = n + 1 end end return n
+                                    end,
+                                    ["getMotionInfoByIndex(System.UInt32, System.UInt32, via.motion.MotionInfo)"] = function(_, bid, i, info)
+                                        for _, db in ipairs(S.dyn_active) do
+                                            if db.bank == bid then
+                                                local c = (gm.dyn_lists and gm.dyn_lists[db.path] or {})[i + 1]
+                                                if c == nil then return false end
+                                                env.gm_info_cur.c = { bank = bid, id = c.id, name = c.name, frames = c.frames or 40 }
+                                                return true
+                                            end
+                                        end
+                                        local n = 0
+                                        for _, c in ipairs(gm.clips or {}) do
+                                            if (c.type or 0) == S.type then
+                                                if n == i then env.gm_info_cur.c = c return true end
+                                                n = n + 1
+                                            end
+                                        end
+                                        return false
+                                    end,
+                                    ["getMotionInfo(System.UInt32, System.UInt32, via.motion.MotionInfo)"] = function(_, bank, id, info)
+                                        local c = in_set(bank, id)
+                                        env.gm_info_cur.c = c
+                                        return c ~= nil
+                                    end })
+                                S.motion = mm
+                                rec.motion_angle = function() sync() return (S.enabled and not gm.joints_stuck) and S.frame * 0.02 or 0 end
+                                return mm
+                            end
                             if ctype == "via.motion.Chain" then -- (9.35) Mia's hair physics: the new component is the test's own (it records what is set on it)
                                 if opts.chain_create_fails then error("fake: createComponent(via.motion.Chain) refused") end
                                 rec.chain_made = (rec.chain_made or 0) + 1
@@ -9916,8 +9841,8 @@ do
                                 getMesh = function() if opts.mesh_fails or (from_file() and not ready_now()) then return nil end return st.mesh end,
                                 set_Material = function(_, h) st.mat = h end, get_Material = function() return st.mat end,
                                 get_MeshReady = function() return ready_now() end, get_Enabled = function() return true end,
-                                get_DrawDefault = function() return true end, get_HasJoint = function() return true end, get_MaterialNum = function() if not mat_ok() then return 0 end return 2 end,
-                                get_MaterialReady = function() if not mat_ok() then return false end return not (opts.mat_not_ready and name:find(opts.mat_not_ready, 1, true) and not (opts.mat_first_only and serial > 1)) end,
+                                get_DrawDefault = function() return true end, get_HasJoint = function() return true end, get_MaterialNum = function() if not mat_ok() or (opts.body_no_mats_first and name == "re7mp_body" and serial == 1) then return 0 end return 2 end,
+                                get_MaterialReady = function() if not mat_ok() or (opts.body_no_mats_first and name == "re7mp_body" and serial == 1) then return false end return not (opts.mat_not_ready and name:find(opts.mat_not_ready, 1, true) and not (opts.mat_first_only and serial > 1)) end,
                                 -- (9.36) the texture slots: tex_slots per material; no texture in them for an object whose name holds tex_missing (it looks untextured)
                                 getMaterialTextureNum = function() if opts.no_tex_api then return nil end return opts.tex_slots or 3 end,
                                 getMaterialTexture = function(_, m, t)
@@ -9930,6 +9855,15 @@ do
                                 end,
                                 set_DrawDefault = function(_, v) rec.draw[name] = v end })
                             go.mc = mc
+                            -- (10.4) a body mesh that carries the VR hands as a material (pl0000_VR on Ethan's pl0001): two layers, both on; the writes are kept
+                            if opts.vr_layers and name == "re7mp_body" then
+                                local vn, von = opts.vr_names or { "pl3000_body", "pl3000_VR" }, { true, true }
+                                rec.vr_on, rec.vr_writes = von, {} -- (the writes of the latest body: the first body of a test is Ethan's and is made again for the character that is asked for)
+                                mc.m.get_MaterialNum = function() return 2 end
+                                mc.m.getMaterialName = function(_, i) return vn[i + 1] end
+                                mc.m.getMaterialsEnable = function(_, i) return von[i + 1] end
+                                mc.m.setMaterialsEnable = function(_, i, v) rec.vr_writes[#rec.vr_writes + 1] = { i = i, v = v } von[i + 1] = v end
+                            end
                             -- (9.33) the copy of Mia's head has the seven layers of the real em2050 head, each with an enable flag the script can switch
                             if opts.layers and name:find("Em2000Head", 1, true) then
                                 local lnames = { "em2050_Eye_Blend", "em2050_Skin_Blend", "em2050_Skin_Evil", "em2050_Skin_Mia", "Eye_Shadow", "em2050_Hair", "eye_Tear" }
@@ -9948,7 +9882,7 @@ do
                         end
                         local chead = Obj.new("via.Joint", { get_Position = function() return vec(0, go.xf.m.get_Position().y + 1.5 * sc, 0) end,
                             get_LocalEulerAngle = function() return vec(0.1, 0.2, 0.3) end, set_LocalEulerAngle = function() end })
-                        local chip = Obj.new("via.Joint", { get_LocalEulerAngle = function() return vec(1.5, 0, 0) end, get_LocalPosition = function() return vec(0, 0.9, 0) end,
+                        local chip = Obj.new("via.Joint", { get_LocalEulerAngle = function() return vec(1.5 + (rec.motion_angle and rec.motion_angle() or 0), 0, 0) end, get_LocalPosition = function() return vec(0, 0.9, 0) end,
                             set_LocalPosition = function(_, v) rec.hip_pos = { v.x, v.y, v.z } end,
                             set_LocalEulerAngle = function()
                                 if opts.hip_fails then error("fake: joint write refused") end
@@ -9957,7 +9891,25 @@ do
                         go.xf.m.getJointByName = function(_, nm)
                             if not ready_now() then return nil end -- (9.32) a mesh that is not loaded has no joints, as in the real game (the 9.31 Clancy rest pose read 0 of 55)
                             if nm == "Head" then return chead elseif nm == "Hip" then return chip end
+                            if opts.game_motion and not opts.rig_missing and is_body and ({ Waist = 1, Stomach = 1, Chest = 1, Neck = 1, L_Shoulder = 1, L_UpperArm = 1, L_Forearm = 1, L_Hand = 1,
+                                R_Shoulder = 1, R_UpperArm = 1, R_Forearm = 1, R_Hand = 1, L_Thigh = 1, L_Shin = 1, L_Foot = 1, L_Toe = 1, R_Thigh = 1, R_Shin = 1, R_Foot = 1, R_Toe = 1 })[nm] then
+                                return Obj.new("via.Joint", { get_LocalEulerAngle = function() return vec(0, 0, 0) end, set_LocalEulerAngle = function() end, get_LocalPosition = function() return vec(0, 0, 0) end }) -- (10.4 rig)
+                            end
                             return nil
+                        end
+                        if is_body and opts.foot_rel then -- (10.10) the body's foot joints: R_Toe / L_Toe (and R_Foot / L_Foot with foot_names) at opts.foot_rel(name) metres above its own position
+                            local prev = go.xf.m.getJointByName
+                            go.xf.m.getJointByName = function(self, nm)
+                                if nm:find("_Toe", 1, true) or (opts.foot_names and nm:find("_Foot", 1, true)) then
+                                    if opts.foot_error and opts.foot_error() then error("fake: joint gone") end
+                                    return Obj.new("via.Joint", { get_Position = function()
+                                        if opts.foot_error and opts.foot_error() then error("fake: joint gone") end
+                                        local pp = go.xf.m.get_Position() return vec(pp.x, pp.y + opts.foot_rel(nm), pp.z)
+                                    end })
+                                end
+                                if prev then return prev(self, nm) end
+                                return nil
+                            end
                         end
                         go.xf.m.set_LocalScale = function(_, v)
                             if opts.scale_fails then error("fake: scale refused") end
@@ -9992,6 +9944,11 @@ do
         host_role_files(env, opts.role or "host", "tcp")
         for _ = 1, 40 do run_frames(env, 0.05) bump_remote(env) end
         if not opts.no_lab then env.check_override["Switch the body lab on"] = true end
+        -- (10.21) the stand-in models are OFF by default now: a world that has fake enemy models opts in the way a player does, by ticking the box (default_pup: it does not)
+        if (opts.enemy_models or (opts.no_lab and (opts.role or "host") == "join")) and not opts.default_pup then env.check_override["Show the host's enemies as their real models (EXPERIMENTAL; the red box is the fallback)"] = true end
+        -- (10.22) mode 3 is the default now, and in mode 3 the joiner's own enemy IS the picture (no stand-in over it: see enemy.real_body). These worlds are about the stand-ins, which are for the
+        -- host's enemies that the joiner's game has no body for, or the ghosts-only mode: they choose mode 2 as a player of the old default did (opts.mode3 keeps the new default)
+        if not opts.mode3 then env.combo_override["Enemy sync"] = 2 end
         run_ui(env)
         return env, rec
     end
@@ -10147,7 +10104,7 @@ do
     check(rbk.rest_pose and rbk.rest_pose.joints.Hip[1] == 1500 and rbk.rest_pose.hip[2] == 900 and #rbk.rest_pose.missing == 52, "(9.29) ...with the hip's position, and the 52 joints the fake lacks listed as missing")
     check(rbk.rest_pose and rbk.rest_pose.head_height == 1.5, "(9.29) ...and the head height at size 1")
     local rf = envr.files["re7mp/rest_Pl0000_Chapter1.json"]
-    check(rf and rf.n == 2 and rf.build == "9.44", "(9.29) ...and written to re7mp/rest_Pl0000_Chapter1.json")
+    check(rf and rf.n == 2 and rf.build == "10.27", "(9.29) ...and written to re7mp/rest_Pl0000_Chapter1.json")
     check(envr.files["re7mp/settings.json"] and envr.files["re7mp/settings.json"].real_body == true and envr.files["re7mp/settings.json"].real_body_set == true,
         "(9.29) ticking the box is remembered (and marked as the player's own choice)")
     -- the debug model can be put back next to it
@@ -10348,7 +10305,7 @@ do
     run_ui(envp)
     for _ = 1, 20 do run_frames(envp, 0.25) phase(envp, "UpdateBehavior") end
     run_ui(envp)
-    check(#recp.made == 0 and ui_has(envp, "no other player (or loopback bot) yet"), "(9.29) nobody to follow: nothing is made, and the panel says why")
+    check(#recp.made == 0 and ui_has(envp, "no other player (or Ethan's friend) yet"), "(9.29) nobody to follow: nothing is made, and the panel says why")
     local saved_scene = envp.scene
     envp.scene = nil
     drive(envp, 8)
@@ -10410,10 +10367,10 @@ do
     run_ui(envo)
     drive(envo, 30)
     check(rb(envo).stage == "running" and drawn(envo, 1) == 0, "(9.29) setup: running, with the lab open as well")
-    envo.check_override["It follows the other player (the loopback bot does)"] = false
+    envo.check_override["It follows the other player (Ethan's friend does)"] = false
     run_ui(envo)
     check(drawn(envo, 1) > 0 and rb(envo).stage == "running", "(9.29) the lab's 'It follows' unticked: the body no longer stands in, so the green man is drawn (and the box does not fight the lab)")
-    envo.check_override["It follows the other player (the loopback bot does)"] = true
+    envo.check_override["It follows the other player (Ethan's friend does)"] = true
     run_ui(envo)
     check(drawn(envo, 1) == 0, "(9.29) ...and ticked again it stands in again")
     envo.check_override["Switch the clip recorder on (F10 records)"] = true
@@ -10465,12 +10422,129 @@ do
     envh.files["re7mp_in.json"].flags = 256
     drive(envh, 30)
     local _, yh1 = last_pos("re7mp_body")
-    check(yh1 and math.abs(yh1 - 0.58) < 0.05 and math.abs(rb(envh).crouch_lift_m - 0.58) < 0.03, -- (9.38: the camera's drop 0.5 m plus 0.08 m)
+    check(yh1 and math.abs(yh1 - 0.70) < 0.05 and math.abs(rb(envh).crouch_lift_m - 0.70) < 0.03, -- (9.38: the camera's drop 0.5 m plus 0.08 m; 10.8: plus 0.20 m)
         "(9.30) crouching with a clip that lowers the hips: the body object is stood up by the camera's drop (0.5 m) so the hips are not lowered twice: " .. tostring(yh1))
+    -- (r2) 10.8: a crouched block (or inventory) shows the crouch clip with the ARMS of the saved block (inventory) clip over it
+    do
+        local function armclip(label, names, v)
+            local f = {}
+            for i = 1, 5 do
+                local fr = {}
+                for j = 1, 3 * #names do fr[j] = v end
+                f[i] = fr
+            end
+            return { format = 1, label = label, rate = 20, dur = 1.0, speed = 0, build = "10.9", body = { names = names, na = 3 * #names, frames = f } }
+        end
+        local enva = setup({ ["re7mp/clips/idle.json"] = clipfile("idle"), ["re7mp/clips/crouch.json"] = armclip("crouch", { "Hip", "L_UpperArm", "R_UpperArm" }, 0),
+            ["re7mp/clips/guard.json"] = armclip("guard", { "Hip", "L_UpperArm", "R_UpperArm" }, 1000) }, { no_lab = true })
+        enva.check_override[BOX] = true
+        run_ui(enva)
+        drive(enva, 40)
+        enva.files["re7mp_in.json"].flags = 256 + 64
+        drive(enva, 30)
+        enva.ui_press["Clear the debug log"] = true
+        run_ui(enva)
+        drive(enva, 6)
+        local hc = enva.files["re7mp/debug.json"].health.clips
+        local ao = hc and hc.arms_over_the_crouch
+        check(ao and ao.now and ao.now.label == "guard" and ao.now.joints == 2 and ao.now.weight >= 0.9 and ao.ticks > 0,
+            "(10.8 arms) a crouched block plays the crouch with the saved block's two arms over it: " .. tostring(ao and ao.now and ao.now.label) .. " / " .. tostring(ao and ao.now and ao.now.weight))
+        enva.files["re7mp_in.json"].flags = 64
+        drive(enva, 30)
+        enva.ui_press["Clear the debug log"] = true
+        run_ui(enva)
+        drive(enva, 6)
+        local ao2 = enva.files["re7mp/debug.json"].health.clips.arms_over_the_crouch
+        check(ao2 and ao2.now == nil, "(10.8 arms) a block while standing is the saved block clip as it is: nothing over it")
+    end
     envh.files["re7mp_in.json"].flags = 0
     drive(envh, 30)
     local _, yh2 = last_pos("re7mp_body")
     check(yh2 and math.abs(yh2) < 0.15, "(9.30) ...and standing up again puts it back: " .. tostring(yh2))
+
+    -- (s) 10.10 "the crouch is in the ground again": Ethan's friend measures its own feet while it crouches and stands its body up until its toes are where they were standing
+    do
+        local down = false
+        local toe_low = -0.42 -- the crouch clip puts the toes this far below the object's own position (standing: 0.03 above it)
+        local foot_opts = { no_lab = true, foot_rel = function() return down and toe_low or 0.03 end }
+        local envg = setup({ ["re7mp/clips/idle.json"] = hipclip("idle", 985), ["re7mp/clips/crouch.json"] = hipclip("crouch", 381) }, foot_opts)
+        envg.files["re7mp_in.json"].name = "Ethan's friend"
+        envg.check_override[BOX] = true
+        envg.camera_pos.y = 1.6
+        run_ui(envg)
+        drive(envg, 60)
+        local gg = function() return rb(envg) end
+        local fh = function() return envg.files["re7mp/debug.json"] and envg.files["re7mp/debug.json"].health and envg.files["re7mp/debug.json"].health.friend and envg.files["re7mp/debug.json"].health.friend.body end
+        envg.ui_press["Clear the debug log"] = true
+        run_ui(envg)
+        drive(envg, 6)
+        local fb0 = fh()
+        check(fb0 and fb0.crouch and fb0.crouch.feet and fb0.crouch.feet.on == true and fb0.crouch.feet.joints == "toes" and (fb0.crouch.feet.standing_readings or 0) >= 3
+            and math.abs((fb0.crouch.feet.standing_value_m or 9) - 0.03) < 0.01, "(10.10) standing: its feet are read (toes, 0.03 m above the body's own place): " .. tostring(fb0 and fb0.crouch and fb0.crouch.feet and fb0.crouch.feet.standing_value_m))
+        local _, ys = last_pos("re7mp_body")
+        envg.camera_pos.y = 1.05 -- I crouch: it crouches
+        down = true
+        drive(envg, 40)
+        local _, yc = last_pos("re7mp_body")
+        envg.ui_press["Clear the debug log"] = true
+        run_ui(envg)
+        drive(envg, 6)
+        local fb1 = fh()
+        check(yc and ys and math.abs((yc - ys) - 0.45) < 0.08, "(10.10) crouching: the body is stood up until the toes are where they were standing (0.45 m here): " .. tostring(yc) .. " vs " .. tostring(ys))
+        check(fb1 and fb1.crouch.feet.wanted_lift_m and math.abs(fb1.crouch.feet.wanted_lift_m - 0.45) < 0.02 and math.abs((fb1.crouch.feet.lift_m or 0) - 0.45) < 0.03
+            and math.abs((fb1.crouch.body_lift_m or 0) - 0.45) < 0.03, "(10.10) ...and the report says so: " .. tostring(fb1 and fb1.crouch.feet.lift_m) .. " / " .. tostring(fb1 and fb1.crouch.body_lift_m))
+        check(log_has(envg, "Friend crouch: its lowest toes is -0.42 m above the body's origin"), "(10.10) ...and the log says what was measured")
+        -- a deeper clip: the lift follows (it is measured, not a fixed number)
+        toe_low = -0.20
+        drive(envg, 30)
+        local _, yc2 = last_pos("re7mp_body")
+        check(yc2 and math.abs((yc2 - ys) - 0.23) < 0.08, "(10.10) a crouch that puts the toes less deep is lifted less (0.23 m): " .. tostring(yc2))
+        -- the slider is added on top
+        envg.slider_override["Crouch: stand its body this much higher on top of that (m; negative = lower; if its crouch floats, drag it down, if it sinks, up)##friendcrouch"] = 0.1
+        run_ui(envg)
+        drive(envg, 30)
+        local _, yc3 = last_pos("re7mp_body")
+        check(yc3 and math.abs((yc3 - yc2) - 0.1) < 0.05, "(10.10) ...and the slider is added on top: " .. tostring(yc3 and yc2 and (yc3 - yc2)))
+        -- standing up puts it back
+        down = false
+        envg.camera_pos.y = 1.6
+        drive(envg, 40)
+        local _, yu = last_pos("re7mp_body")
+        check(yu and ys and math.abs(yu - ys) < 0.08, "(10.10) standing up again puts it back: " .. tostring(yu) .. " vs " .. tostring(ys))
+        -- switched off: the old way (the slider alone)
+        envg.check_override["Its crouch measures its own feet and keeps them on the floor (the slider below is added on top)##friendground"] = false
+        run_ui(envg)
+        envg.camera_pos.y = 1.05
+        down = true
+        toe_low = -0.42
+        drive(envg, 40)
+        local _, yo = last_pos("re7mp_body")
+        check(yo and ys and math.abs((yo - ys) - 0.1) < 0.06, "(10.10) with the box unticked the crouch is the slider alone again (0.1 m): " .. tostring(yo and ys and (yo - ys)))
+        check(envg.files["re7mp/settings.json"].friend_ground_feet == false, "(10.10) ...and that is saved")
+    end
+    -- (s2) the toes cannot be read: it does not fall over, and does not lift by a guess
+    do
+        local down, broken = false, false
+        local envg2 = setup({ ["re7mp/clips/idle.json"] = hipclip("idle", 985), ["re7mp/clips/crouch.json"] = hipclip("crouch", 381) },
+            { no_lab = true, foot_rel = function() return down and -0.42 or 0.03 end, foot_error = function() return broken end })
+        envg2.files["re7mp_in.json"].name = "Ethan's friend"
+        envg2.check_override[BOX] = true
+        envg2.camera_pos.y = 1.6
+        run_ui(envg2)
+        drive(envg2, 60)
+        local _, ys2 = last_pos("re7mp_body")
+        broken = true
+        envg2.camera_pos.y = 1.05
+        down = true
+        drive(envg2, 40)
+        local _, yc2b = last_pos("re7mp_body")
+        envg2.ui_press["Clear the debug log"] = true
+        run_ui(envg2)
+        drive(envg2, 6)
+        local fbb = envg2.files["re7mp/debug.json"].health.friend.body
+        check(yc2b and ys2 and math.abs(yc2b - ys2) < 0.08 and rb(envg2).stage == "running", "(10.10) the toes cannot be read: the body is not lifted by a guess and the box keeps running: " .. tostring(yc2b and ys2 and (yc2b - ys2)))
+        check(fbb and fbb.crouch.feet.failures >= 1 and fbb.crouch.feet.last_error ~= nil, "(10.10) ...and the report counts the failures")
+    end
     -- a clip without the hip's position does not lower the hips, so the body follows the camera down as before
     local envh2 = setup({ ["re7mp/clips/idle.json"] = clipfile("idle"), ["re7mp/clips/crouch.json"] = clipfile("crouch") }, { no_lab = true })
     envh2.check_override[BOX] = true
@@ -10559,15 +10633,48 @@ do
         env.root.m.get_Name = function() return "Pl0000" end
         live(env, 1)
 
-        -- (a2) the game swaps the player object for another one and the old one stays in the scene: found within 10 s (a lone player object is otherwise looked for once a minute)
+        -- (a2) the game swaps the player object for another one and the old one stays in the scene (away from the camera, which is on the new one): found within 10 s
+        -- (10.11: the scene is walked only when the remembered object is not where the camera is; it was walked every 10 s, a 30 ms hitch)
         do
             local envr = setup(nil, { no_lab = true })
+            envr.camera_pos.z = 10 -- (the harness's player object stands at z = 10: the camera is on it)
             live(envr, 1)
             check(whod(envr).i_play == "ethan", "(9.31) (rescan) the start: Ethan")
-            envr.scene_objects[#envr.scene_objects + 1] = make_go("Pl3000", vec(0, 1.6, 0), {})
+            envr.camera_pos.x = 50 -- the camera goes with the NEW player object; the old one stays where it was, 50 m away
+            envr.scene_objects[#envr.scene_objects + 1] = make_go("Pl3000", vec(50, 0, 10), {})
             envr.scene = make_scene(envr.scene_objects)
             live(envr, 13)
-            check(whod(envr).i_play == "clancy", "(9.31) the player object was swapped and the old one stayed: the scene is looked at again within 10 s and Clancy is found: " .. tostring(whod(envr).i_play))
+            check(whod(envr).i_play == "clancy", "(9.31) the player object was swapped and the old one stayed away from the camera: the scene is looked at again within 10 s and Clancy is found: " .. tostring(whod(envr).i_play))
+        end
+
+        -- (a3) (10.11) "every 10 seconds there is a 10 fps frame dip": with the player object where the camera is, the scene is NOT walked again (it was, every 10 s)
+        do
+            local envq = setup(nil, { no_lab = true })
+            envq.camera_pos.z = 10 -- (the harness's player object stands at z = 10: the camera is on it)
+            live(envq, 3)
+            local w0 = whod(envq).player_search
+            check(w0 ~= nil and w0.scene_walks <= 3, "(10.11) the player object is found with at most a few walks at the start: " .. tostring(w0 and w0.scene_walks))
+            live(envq, 125)
+            local w1 = whod(envq).player_search
+            check(w1.scene_walks == w0.scene_walks, "(10.11) 125 s later (12 ten-second looks, two minutes) the scene has not been walked again: " .. tostring(w0.scene_walks) .. " -> " .. tostring(w1.scene_walks))
+            check(w1.kept_without_a_walk >= 1, "(10.11) ...the one-minute look kept the object without a walk: " .. tostring(w1.kept_without_a_walk))
+            -- the camera leaves the player (a cutscene camera): one walk, then at most one every 30 s
+            envq.camera_pos.x = 80
+            live(envq, 12)
+            local w2 = whod(envq).player_search
+            check(w2.scene_walks == w1.scene_walks + 1, "(10.11) a camera far from the player object makes one walk within 10 s: " .. tostring(w1.scene_walks) .. " -> " .. tostring(w2.scene_walks))
+            live(envq, 8)
+            check(whod(envq).player_search.scene_walks == w2.scene_walks, "(10.11) ...and not another one within 30 s of it: " .. tostring(whod(envq).player_search.scene_walks))
+            live(envq, 25)
+            local w3 = whod(envq).player_search
+            check(w3.scene_walks == w2.scene_walks and w3.next_walk_wait_s == 60, "(10.11) the first walk found the same object, so the wait for the next one doubled (30 -> 60 s): " .. tostring(w3.scene_walks) .. " / " .. tostring(w3.next_walk_wait_s))
+            live(envq, 25)
+            local w3b = whod(envq).player_search
+            check(w3b.scene_walks == w2.scene_walks + 1 and w3b.next_walk_wait_s == 120, "(10.11) ...one more walk after that, and the wait grows again (120 s): " .. tostring(w3b.scene_walks) .. " / " .. tostring(w3b.next_walk_wait_s))
+            envq.camera_pos.x = 0 -- the camera is back on the player: no more walks, and the wait is back to 30 s at the next look
+            live(envq, 70)
+            local w4 = whod(envq).player_search
+            check(w4.scene_walks == w3b.scene_walks and w4.next_walk_wait_s == 30, "(10.11) back on the camera: no more walks, the wait is 30 s again: " .. tostring(w4.scene_walks) .. " / " .. tostring(w4.next_walk_wait_s))
         end
 
         -- (b) the choice: the combo, remembered, wins over the player object; back to Automatic follows the object again
@@ -11154,57 +11261,22 @@ do
             end
         end
 
-        -- (n) (9.35) MIA'S HAIR PHYSICS (EXPERIMENTAL, ships unticked): a via.motion.Chain is created on the copy of her chain hair and the original's properties are
-        --     copied onto it, when the scene has the corrupted Mia. Every native call is announced in lastcall.json first; a session that ended inside one switches
-        --     hair physics off and skips that call; a component standing when a session ended switches it off too.
+        -- (n) (10.23) MIA'S HAIR PHYSICS WAS REMOVED (it was an experiment that shipped unticked: a via.motion.Chain copied onto the copy of her chain hair). The ~25 checks
+        --     that were here (the component, its properties, the crash markers, the debug file) went with it. What is checked now is that nothing of it is left to act:
+        --     an old settings file that says hair_physics = true, a scene that HAS a chain to copy and an old crash marker change nothing, and her head parts (kept) work.
         do
-            local DONOR_BOX = "Mia: put the corrupted Mia's head and chain hair on her playable body (Pl2000; press Rebuild)"
             local HAIR_BOX = "Mia: hair physics (EXPERIMENTAL: copies the corrupted Mia's chain component when she is in the scene; it could close the game, so it is switched off after a crash)"
             local PROBE = "Read her hair components (needs a corrupted Mia in the scene; for the developer)##hair"
-            local REBUILD = "Rebuild the body##realretry"
-            -- the type of the fake chain component: seven getters that may be read (one of them fails), four that must never be called, one field
-            local CHAIN_DEF = { methods = {
-                get_Damping = { ret = "System.Single" }, get_Gravity = { ret = "System.Single" }, get_CollisionRadius = { ret = "System.Single" },
-                get_Enabled = { ret = "System.Boolean" }, get_UpdateMode = { ret = "System.Int32" }, get_Label = { ret = "System.String" }, get_Broken = { ret = "System.Single" },
-                get_Name = { ret = "System.String" }, get_GameObject = { ret = "via.GameObject" },
-                get_Static = { ret = "System.Single", static = true }, get_Indexed = { ret = "System.Single", params = { "System.Int32" } },
-            }, fields = { { "_Weight", "System.Single" } } }
-            -- the scene's chain (the original) and the one the script creates (the copy). The copy keeps what is set on it (store) and every set call (sets);
-            -- set_Gravity is taken and keeps nothing; set_CollisionRadius fails
-            local function chains()
-                local seen = { forbidden = 0 }
-                local orig = Obj.new("via.motion.Chain", {
-                    get_Damping = function() return 0.35 end, get_Gravity = function() return 9.8 end, get_CollisionRadius = function() return 0.05 end,
-                    get_Enabled = function() return true end, get_UpdateMode = function() return 2 end, get_Label = function() return "hair" end,
-                    get_Broken = function() error("fake: this getter fails") end,
-                    get_Name = function() seen.forbidden = seen.forbidden + 1 return "n" end, get_GameObject = function() seen.forbidden = seen.forbidden + 1 return nil end,
-                    get_Static = function() seen.forbidden = seen.forbidden + 1 return 1 end, get_Indexed = function() seen.forbidden = seen.forbidden + 1 return 1 end,
-                }, { _Weight = 1.5 })
-                local store, sets = {}, {}
-                local copy = Obj.new("via.motion.Chain", {})
-                for _, n in ipairs({ "Damping", "CollisionRadius", "UpdateMode", "Label", "Enabled" }) do
-                    copy.m["get_" .. n] = function() return store[n] end
-                    copy.m["set_" .. n] = function(_, v)
-                        if n == "CollisionRadius" then error("fake: this setter fails") end
-                        sets[#sets + 1] = n
-                        store[n] = v
-                    end
-                end
-                copy.m.get_Gravity = function() return store.Gravity end
-                copy.m.set_Gravity = function() sets[#sets + 1] = "Gravity" end
-                return orig, copy, store, sets, seen
-            end
-            local function has_set(list, n) for _, x in ipairs(list or {}) do if x == n then return true end end return false end
-            local function dparts(env) return section(env, "body_lab").mia_head_parts end
-            local function crumbs_have(env, needle) for _, c in ipairs(env.crumb_log or {}) do if c:find(needle, 1, true) then return true end end return false end
-            local function hair(env) return section(env, "hair") end
-            local function miaH(opts, settings, files)
+            local CHAIN_DEF = { methods = { get_Damping = { ret = "System.Single" }, get_Enabled = { ret = "System.Boolean" } }, fields = { { "_Weight", "System.Single" } } }
+            local function miaH(settings, files)
                 local s = { real_body_model = "Pl2000" }
                 for k, v in pairs(settings or {}) do s[k] = v end
                 local f = { ["re7mp/clips/idle.json"] = clipfile("idle"), ["re7mp/settings.json"] = s }
                 for k, v in pairs(files or {}) do f[k] = v end
-                local o = { no_lab = true, mia = true, mia_head = true, pl2000 = true, chain_types = CHAIN_DEF }
-                for k, v in pairs(opts or {}) do o[k] = v end
+                -- the scene's own chain (the original), and the one a copy would get: if the script still tried, rec.chain_made would count it
+                local orig = Obj.new("via.motion.Chain", { get_Damping = function() return 0.35 end, get_Enabled = function() return true end }, { _Weight = 1.5 })
+                local copy = Obj.new("via.motion.Chain", {})
+                local o = { no_lab = true, mia = true, mia_head = true, pl2000 = true, chain_types = CHAIN_DEF, chain = orig, chain_copy = copy }
                 local env, rec = setup(f, o)
                 env.resources = { made = {}, refuse = {} }
                 env.check_override[BOX] = true
@@ -11213,152 +11285,36 @@ do
                 return env, rec
             end
 
-            -- (n1) the box off (the start): the scene's chain is read by nobody and no component is made
+            -- (n1) an old settings file with hair_physics = true, and a scene that has a chain to copy
             do
-                local orig, copy, store, sets = chains()
-                local env, rec = miaH({ chain = orig, chain_copy = copy })
-                local h = hair(env)
-                check(h.on == false and h.tried == 0 and rec.chain_made == nil and #sets == 0, "(9.35 hair) the box off (the start): no component is made and nothing is set: tried " .. tostring(h.tried))
-                check(env.files["re7mp/hairstate.json"] == nil or env.files["re7mp/hairstate.json"].standing ~= true, "(9.35 hair) ...and hairstate.json does not say a component is standing")
-                check(h.probes ~= nil and #h.probes == 0, "(9.35 hair) ...and the chain is not read either (the probe runs only when the box is ticked or the button is pressed)")
-            end
-
-            -- (n2) the box ticked and a corrupted Mia in the scene: the copy gets a via.motion.Chain with the original's numbers, booleans and text
-            do
-                local orig, copy, store, sets, seen = chains()
-                local env, rec = miaH({ chain = orig, chain_copy = copy }, { hair_physics = true })
-                local h = hair(env)
-                check(rec.chain_made == 1 and rec.chain_on == "re7mp_body_Em2000ChainHair", "(9.35 hair) with the box ticked a via.motion.Chain is created on the copy of the chain hair, once: " .. tostring(rec.chain_made) .. " on " .. tostring(rec.chain_on))
-                check(h.on == true and h.tried == 1 and h.copied == 1 and h.failed == 0 and h.errors == 0, "(9.35 hair) ...the debug file counts it: tried " .. tostring(h.tried) .. ", copied " .. tostring(h.copied))
-                local lc = h.last_copy or {}
-                check(lc.part == "Em2000ChainHair" and lc.properties_set == 4 and lc.set_calls_that_failed == 1 and lc.left_alone == 2 and lc.read_back_differs == 2,
-                    "(9.35 hair) ...4 properties set, 1 set call that failed, 2 left alone (Enabled, and the getter that failed), 2 read back differently: " .. tostring(lc.properties_set) .. "/" .. tostring(lc.set_calls_that_failed) .. "/" .. tostring(lc.left_alone) .. "/" .. tostring(lc.read_back_differs))
-                check(store.Damping == 0.35 and store.UpdateMode == 2 and store.Label == "hair" and store.Enabled == true and store.Gravity == nil and store.CollisionRadius == nil,
-                    "(9.35 hair) ...the copy holds the original's number, whole number and text, is switched on, and what the engine did not keep is not there")
-                check(has_set(sets, "Damping") and has_set(sets, "UpdateMode") and has_set(sets, "Label") and has_set(sets, "Gravity") and has_set(sets, "Enabled") and #sets == 5, "(9.35 hair) ...with one set call each (Enabled last): " .. table.concat(sets, ","))
-                check(seen.forbidden == 0, "(9.35 hair) ...the getters that are never read (Name, GameObject), the static one and the one that takes an argument were not called: " .. seen.forbidden)
-                local names = {}
-                for _, d in ipairs(lc.differing or {}) do names[d.name] = d end
-                check(names.Gravity ~= nil and names.CollisionRadius ~= nil and names.Gravity.original == 9.8 and names.Gravity.copy == "nil", "(9.35 hair) ...and the file lists what read back differently (Gravity, CollisionRadius)")
-                local p1 = h.probes and h.probes[1]
-                check(p1 ~= nil and p1.type == "via.motion.Chain" and #p1.props == 7 and #p1.fields == 1 and p1.fields[1].name == "_Weight" and p1.fields[1].value == 1.5,
-                    "(9.35 hair) the original's getters and fields are written to the debug file (health.hair.probes): " .. tostring(p1 and #p1.props) .. " getters")
-                local broken
-                for _, pr in ipairs(p1 and p1.props or {}) do if pr.name == "Broken" then broken = pr.value end end
-                check(broken == "(error)", "(9.35 hair) ...a getter that fails is listed as an error, nothing more")
-                check(h.component_standing_now == true and env.files["re7mp/hairstate.json"] and env.files["re7mp/hairstate.json"].standing == true, "(9.35 hair) while the component is new hairstate.json says one is standing")
-                check(crumbs_have(env, "hair: createComponent via.motion.Chain") and crumbs_have(env, "hair: via.motion.Chain.set_Damping") and crumbs_have(env, "hair: via.motion.Chain.get_Damping"),
-                    "(9.35 hair) ...and every native call was announced in lastcall.json first")
-                check(env.files["re7mp/lastcall.json"].stage == "clean", "(9.35 hair) ...and the last crumb says clean: " .. tostring(env.files["re7mp/lastcall.json"].stage))
-                run_ui(env)
-                check(ui_has(env, "Hair physics: on. Em2000ChainHair: via.motion.Chain created on the copy; 4 properties copied"), "(9.35 hair) the panel says what happened")
-                -- it runs fine for 30 s: trusted, and the state file is cleared
-                drive(env, 160)
-                local h2 = hair(env)
-                check(h2.component_standing_now == false and h2.components_trusted == 1 and env.files["re7mp/hairstate.json"].standing == false, "(9.35 hair) after 30 s without a crash the component is trusted and the state file is cleared")
-                -- unticking it: the component is switched off
-                env.check_override[HAIR_BOX] = false
-                run_ui(env)
-                drive(env, 20)
-                check(store.Enabled == false and env.files["re7mp/settings.json"].hair_physics == false, "(9.35 hair) unticking the box switches the component off and is remembered")
-            end
-
-            -- (n3) the same from the panel: ticking the box on a running body attaches it, and the box is saved
-            do
-                local orig, copy, store, sets = chains()
-                local env, rec = miaH({ chain = orig, chain_copy = copy })
-                env.check_override[HAIR_BOX] = true
-                run_ui(env)
-                drive(env, 20)
-                check(rec.chain_made == 1 and store.Damping == 0.35 and env.files["re7mp/settings.json"].hair_physics == true, "(9.35 hair) ticking the box in the panel attaches the component to the running body and is remembered")
-            end
-
-            -- (n4) nothing to copy from: the parts come from files (no corrupted Mia in the scene), or the scene's chain hair has no chain
-            do
-                local env, rec = miaH({ mia = false, mia_head = false }, { hair_physics = true })
-                local h = hair(env)
-                check(rec.chain_made == nil and h.tried == 1 and h.copied == 0 and tostring(h.last):find("there is no corrupted Mia in the scene to copy its chain physics from", 1, true) ~= nil,
-                    "(9.35 hair) the chain hair was made from its file: nothing to copy from, so the hair hangs still, and the file says so: " .. tostring(h.last))
-                check(section(env, "real_body").stage == "running", "(9.35 hair) ...and the body runs")
-                local env2, rec2 = miaH({}, { hair_physics = true })
-                local h2 = hair(env2)
-                check(rec2.chain_made == nil and h2.copied == 0 and tostring(h2.last):find("the original has no via.motion.Chain to copy", 1, true) ~= nil, "(9.35 hair) the scene's chain hair has no chain component: nothing is made: " .. tostring(h2.last))
-            end
-
-            -- (n5) the game will not create the component: counted, the body runs, nothing is standing, no second try
-            do
-                local orig, copy = chains()
-                local env, rec = miaH({ chain = orig, chain_copy = copy, chain_create_fails = true }, { hair_physics = true })
-                local h = hair(env)
-                check(rec.chain_made == nil and h.tried == 1 and h.failed == 1 and h.copied == 0 and tostring(h.last):find("the game would not create a via.motion.Chain on the copy", 1, true) ~= nil,
-                    "(9.35 hair) createComponent refused: counted once and explained: " .. tostring(h.last))
-                check(h.component_standing_now == false and (env.files["re7mp/hairstate.json"] == nil or env.files["re7mp/hairstate.json"].standing ~= true) and section(env, "real_body").stage == "running",
-                    "(9.35 hair) ...nothing is standing, and the body runs")
-                drive(env, 40)
-                check(hair(env).tried == 1, "(9.35 hair) ...and it is not tried again every frame")
-            end
-
-            -- (n6) the last session ended inside a hair call (lastcall.json says "hair"): hair physics is off now, the call is skipped from now on
-            do
-                local orig, copy, store, sets = chains()
-                local files = { ["re7mp/lastcall.json"] = { stage = "hair", call = "via.motion.Chain.set_Gravity", session = 1699990000, time = 1700000000 } }
-                local env, rec = miaH({ chain = orig, chain_copy = copy }, { hair_physics = true }, files)
-                local h = hair(env)
-                check(h.on == false and tostring(h.switched_off_because):find("the last session ended while the script was working on Mia's hair physics (via.motion.Chain.set_Gravity)", 1, true) ~= nil and h.previous_session_ended_inside == true,
-                    "(9.35 hair) the last session ended inside a hair call: hair physics is off this time: " .. tostring(h.switched_off_because))
-                check(rec.chain_made == nil and #sets == 0, "(9.35 hair) ...and no component is made")
-                check(has_set(h.calls_skipped_after_a_crash, "via.motion.Chain.set_Gravity"), "(9.35 hair) ...and the call that ended it is on the skip list")
-                check(env.files["re7mp/hairstate.json"] and has_set(env.files["re7mp/hairstate.json"].skip, "via.motion.Chain.set_Gravity"), "(9.35 hair) ...which is saved for the next start too")
-                check(log_has(env, "previous session: The last session ended while the script was working on Mia's hair physics"), "(9.35 hair) ...and the journal says so")
-                -- ticking the box again tries once more, WITHOUT the call that ended the session
-                env.check_override[HAIR_BOX] = true
-                run_ui(env)
-                drive(env, 20)
-                local h2 = hair(env)
-                check(rec.chain_made == 1 and h2.on == true and h2.switched_off_because == nil, "(9.35 hair) ticking the box again tries again")
-                check(not has_set(sets, "Gravity") and store.Gravity == nil and has_set(sets, "Damping") and h2.last_copy and h2.last_copy.left_alone == 3,
-                    "(9.35 hair) ...without the call that ended the session (set_Gravity is skipped: 3 left alone): " .. table.concat(sets, ","))
-            end
-
-            -- (n7) the last session ended with a component standing (no crumb): hair physics is off now, and the file is cleared
-            do
-                local orig, copy = chains()
-                local files = { ["re7mp/hairstate.json"] = { session = 12345, standing = true, skip = { "via.motion.Chain.set_Label", 5, string.rep("x", 200) }, at = 1 } }
-                local env, rec = miaH({ chain = orig, chain_copy = copy }, { hair_physics = true }, files)
-                local h = hair(env)
-                check(h.on == false and tostring(h.switched_off_because):find("a hair physics component was standing on Mia's copy", 1, true) ~= nil and rec.chain_made == nil,
-                    "(9.35 hair) the last session ended with a component standing: hair physics is off this time: " .. tostring(h.switched_off_because))
-                check(env.files["re7mp/hairstate.json"].standing == false, "(9.35 hair) ...and the state file is cleared at once")
-                local skip = h.calls_skipped_after_a_crash or {}
-                check(#skip == 1 and skip[1] == "via.motion.Chain.set_Label", "(9.35 hair) ...the skip list keeps the valid entry and ignores a number and a 200-character text: " .. #skip)
-                -- a cleared file (the last session ended well) changes nothing
-                local orig2, copy2, store2 = chains()
-                local env2, rec2 = miaH({ chain = orig2, chain_copy = copy2 }, { hair_physics = true }, { ["re7mp/hairstate.json"] = { session = 12345, standing = false, skip = {}, at = 1 } })
-                check(rec2.chain_made == 1 and hair(env2).on == true, "(9.35 hair) a cleared state file changes nothing")
-            end
-
-            -- (n8) the developer's button reads the scene's hair components (read-only), box ticked or not
-            do
-                local orig, copy, store, sets = chains()
-                local env, rec = miaH({ chain = orig, chain_copy = copy })
+                local env, rec = miaH({ hair_physics = true })
+                check(made_has(rec, "re7mp_body_Em2000ChainHair") and made_has(rec, "re7mp_body_Em2000Head"), "(10.23 hair) her head and chain hair are still parts of her body (the head parts are kept)")
+                check(rec.chain_made == nil, "(10.23 hair) ...but no via.motion.Chain is created on the chain hair, though the scene has one to copy and the old file says hair_physics = true")
+                check(env.seen_checks[HAIR_BOX] == nil, "(10.23 hair) the box of the hair physics is not drawn")
                 env.ui_press[PROBE] = true
                 run_ui(env)
-                local h = hair(env)
-                local last = h.probes and h.probes[#h.probes]
-                check(#h.probes == 1 and last.label == "Em2000ChainHair / via.motion.Chain" and #last.props == 7 and tostring(h.last):find("1 component(s) of the scene's own Mia read", 1, true) ~= nil and rec.chain_made == nil and #sets == 0,
-                    "(9.35 hair) the button reads the scene's chain (7 getters) and creates and sets nothing: " .. tostring(h.last))
-                local env2 = miaH({}, nil)
-                env2.ui_press[PROBE] = true
-                run_ui(env2)
-                check(tostring(hair(env2).last):find("the scene has no Em2000ChainHair / hair objects with such components", 1, true) ~= nil, "(9.35 hair) with a scene whose chain hair has no such component the button says so")
+                check(env.ui_press[PROBE] == true, "(10.23 hair) ...nor the button that read her hair components")
+                check(not ui_has(env, "Hair physics:"), "(10.23 hair) ...nor its status line")
+                check(section(env, "hair") == nil and section(env, "body_lab") ~= nil, "(10.23 hair) the debug file has no hair section (and the body lab section is still there)")
+                local f = env.files["re7mp/settings.json"] or {}
+                check(f.real_body == true and f.hair_physics == nil, "(10.23 hair) the settings file is written without hair_physics (real_body " .. tostring(f.real_body) .. ")")
+                check(env.files["re7mp/hairstate.json"] == nil, "(10.23 hair) ...and no hairstate.json is written")
             end
 
-            -- (n9) the reset button: the shipped defaults win over what the player had (hair physics off, the head parts on); the player's own choices win otherwise
+            -- (n2) the crash marker of the removed hair physics (lastcall.json, stage "hair") is passed over without a word
+            do
+                local files = { ["re7mp/lastcall.json"] = { stage = "hair", call = "via.motion.Chain.set_Gravity", session = 1699990000, time = 1700000000 } }
+                local env, rec = miaH({}, files)
+                check(not log_has(env, "previous session"), "(10.23 hair) an old crash marker of the hair physics says nothing")
+                check(rec.chain_made == nil and not log_has(env, "script error"), "(10.23 hair) ...and nothing is made and nothing breaks")
+            end
+
+            -- (n3) the reset button: the shipped defaults win over what the player had (the head parts on); the player's own choices win otherwise
             do
                 local ARM, YES = "Reset to defaults", "Yes, reset everything to the defaults"
-                local shipped = { format = 1, build = "9.35", clips = {}, settings = { hair_physics = false, mia_head_parts = true, real_body = true, real_body_set = true } }
-                local env = miaH({}, { hair_physics = true, mia_head_parts = false }, { ["re7mp/defaults.json"] = shipped })
-                check(hair(env).on == true and dparts(env).on == false, "(9.35 hair) (setup) the player's own choices win over the shipped file: hair physics on, the head parts off")
+                local shipped = { format = 1, build = "10.23", clips = {}, settings = { mia_head_parts = true, real_body = true, real_body_set = true } }
+                local env = miaH({ mia_head_parts = false }, { ["re7mp/defaults.json"] = shipped })
+                check(section(env, "body_lab").mia_head_parts.on == false, "(10.23 hair) (setup) the player's own choice wins over the shipped file: the head parts off")
                 env.ui_press[ARM] = true
                 run_ui(env)
                 run_ui(env)
@@ -11366,17 +11322,16 @@ do
                 run_ui(env)
                 drive(env, 20)
                 local f = env.files["re7mp/settings.json"]
-                check(f.hair_physics == false and f.mia_head_parts == true and hair(env).on == false and dparts(env).on == true, "(9.35 hair) 'Reset to defaults' puts the shipped values back: hair physics off, her head parts on")
-                -- with no shipped file the code's own defaults are used: hair physics off, head parts on
-                local env2 = miaH({}, { hair_physics = true, mia_head_parts = false })
+                check(f.mia_head_parts == true and section(env, "body_lab").mia_head_parts.on == true, "(10.23 hair) 'Reset to defaults' puts the shipped value back: her head parts on")
+                -- with no shipped file the code's own default is used: head parts on
+                local env2 = miaH({ mia_head_parts = false })
                 env2.ui_press[ARM] = true
                 run_ui(env2)
                 run_ui(env2)
                 env2.ui_press[YES] = true
                 run_ui(env2)
                 drive(env2, 20)
-                local f2 = env2.files["re7mp/settings.json"]
-                check(f2.hair_physics == false and f2.mia_head_parts == true, "(9.35 hair) ...and with no shipped file the code's own defaults: hair physics off, her head parts on")
+                check(env2.files["re7mp/settings.json"].mia_head_parts == true, "(10.23 hair) ...and with no shipped file the code's own default: her head parts on")
             end
         end
 
@@ -11513,7 +11468,7 @@ do
             -- (h10) 9.33: the start with nothing set: her own pl2050 head is NOT loaded (it drew black), the scene's head is copied and its layers are
             --       switched by name: the corrupted skin and the blend off, her own skin on, nothing else touched
             do
-                local LAYERS = "Mia: switch the layers of her head (the corrupted Mia's skin off, her own on; press Rebuild)"
+                local LAYERS = "Switch the layers (materials) of the body and its parts: Mia's head skins (the corrupted skin off, her own on) and the VR hands (press Rebuild)"
                 local function layered(opts, files)
                     local f = { ["re7mp/clips/idle.json"] = clipfile("idle"), ["re7mp/settings.json"] = { real_body_model = "Em2000" } }
                     for k, v in pairs(files or {}) do f[k] = v end
@@ -11605,6 +11560,947 @@ do
                 check(#section(envE, "body_lab").face.heads_in_the_scene == 0, "(9.32 face) ...and no head scan is run for him")
             end
         end
+
+        -- ===== 10.1: the full character models (Nexus mod 86) as the other player's body, and the check 4 s after a switch or a load-in =====
+        do
+            local FLAG = { models = "coop", pack = "Third Person Full Model Placeholders", author = "AfroJackX" }
+            local function made_text(env) return table.concat(env.resources.made, "|") end
+            -- (10.10) how many parts of this name were made once Joe's own parts had started (the body of Ethan the test begins with makes pl0010 / pl0020 too)
+            local function made_after_joe(rec, name)
+                local started, n = false, 0
+                for _, m in ipairs(rec.made) do
+                    if m:find("^re7mp_body_pl90") then started = true end
+                    if started and m == name then n = n + 1 end
+                end
+                return n
+            end
+            local function asked_after_joe(env, path)
+                local started, n = false, 0
+                for _, m in ipairs(env.resources.made) do
+                    if m:find("ch9/Character/Player/pl9000/", 1, true) then started = true end
+                    if started and m == "via.render.MeshResource " .. path then n = n + 1 end
+                end
+                return n
+            end
+            local function chat_has(env, needle) for _, t in ipairs(env.texts or {}) do if t:find(needle, 1, true) then return true end end return false end
+            local function with_flag(extra) local f = { ["re7mp/clips/idle.json"] = clipfile("idle"), ["re7mp/modpack.json"] = FLAG } for k, v in pairs(extra or {}) do f[k] = v end return f end
+
+            -- (a) no flag file: the game's own files, as before (the pack is not looked for)
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 })
+                drive_them(env, "clancy", 80)
+                local m = made_text(env)
+                check(m:find("MeshResource Character/Player/pl3000/pl3001/pl3001.mesh", 1, true) and not m:find("coop/", 1, true), "(10.1) without the pack's flag file Clancy comes from the game's own files: " .. m)
+                local pk = section(env, "model_pack")
+                check(pk and pk.installed_note_found == false and next(pk.made_from_the_pack or {}) == nil, "(10.1) ...and the debug file says the pack is not there")
+            end
+
+            -- (b) with the flag file: Clancy's body and head come from the pack's coop/ paths; his hands (not in the pack) from the game
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 }, with_flag())
+                drive_them(env, "clancy", 80)
+                local m = made_text(env)
+                check(m:find("via.render.MeshResource coop/Character/Player/pl3000/pl3001/pl3001.mesh", 1, true), "(10.1) with the flag file Clancy's body is the pack's pl3001: " .. m)
+                check(m:find("via.render.MeshResource coop/Character/Player/pl3000/pl3002/pl3002.mesh", 1, true), "(10.1) ...with the pack's head part pl3002")
+                check(m:find("MeshResource Character/Player/pl3000/pl3000/pl3010.mesh", 1, true) and not m:find("coop/Character/Player/pl3000/pl3000/", 1, true), "(10.1) ...and the hands the pack does not have come from the game's files")
+                local r = section(env, "real_body")
+                check(r.stage == "running" and r.built_model == "Pl3000", "(10.1) ...and the body runs: " .. tostring(r.stage))
+                local pk = section(env, "model_pack")
+                check(pk and pk.installed_note_found == true and next(pk.made_from_the_pack or {}) ~= nil and pk.failures == 0, "(10.1) ...the debug file says the pack is used: " .. tostring(pk and pk.last))
+            end
+
+            -- (c) the pack's body never loads: the family is marked, the body is made again from the game's files, and the top left says so
+            do
+                local env, rec = start({ no_lab = true, mesh_never_ready = true }, with_flag())
+                drive_them(env, "clancy", 160)
+                local pk = section(env, "model_pack")
+                check(pk and pk.failures >= 1 and pk.characters_using_the_game_models_now.pl3000 ~= nil, "(10.1) the pack's body never loads: the family is marked as failed: " .. tostring(pk and pk.last))
+                check(log_has(env, "model pack:") and (chat_has(env, "not usable") or chat_has(env, "Model:")), "(10.1) ...and it is said: journal and top left")
+            end
+
+            -- (d) the check 4 s after a body is up: a fine body: nothing is said and nothing is rebuilt
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 })
+                drive_them(env, "clancy", 60)
+                local st = section(env, "model_settle")
+                check(st and st.bodies_started >= 1 and st.looks >= 1 and st.found_fine >= 1, "(10.1) a fine body is looked at and found fine: " .. tostring(st and st.last))
+                check(st.rebuilds_made == 0 and st.told_you == 0, "(10.1) ...nothing is rebuilt and nothing is announced")
+                check(not chat_has(env, "Model:"), "(10.1) ...and nothing appears at the top left")
+                check(log_has(env, "looking at it in 3 s"), "(10.4) ...the first look is 3 s after the body is up (it was 4 s)")
+            end
+
+            -- (e) a body broken once (a head part's materials not ready the first time): made again, looked at 2 s after, fine: still nothing announced
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, mat_not_ready = "re7mp_body_pl3010", mat_first_only = true })
+                drive_them(env, "clancy", 100)
+                local st = section(env, "model_settle")
+                check(st and st.rebuilds_made >= 1, "(10.1) a broken body is made again: " .. tostring(st and st.rebuilds_made) .. " / " .. tostring(st and st.last))
+                check(st.found_fine >= 1 and st.told_you == 0, "(10.1) ...the second look finds it fine, so nothing is announced: " .. tostring(st.told_you))
+                check(not chat_has(env, "Model:"), "(10.1) ...and the top left stays quiet")
+                check(log_has(env, "looking at it in 1 s"), "(10.4) ...the look after a rebuild is 1 s after the new body is up (it was 2 s)")
+            end
+
+            -- (e2) 10.13: the MAIN body has no materials at all (Mia's, Clancy's in the 17 Nov file: no verdict for 12+ s because a part was still loading): it is made again
+            -- within BODY_WAIT s of the first look instead of after the 14 s a part is given, and the second look finds it fine
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 8, body_no_mats_first = true })
+                drive_them(env, "clancy", 100)
+                local st = section(env, "model_settle")
+                check(st and st.body_materials_wait_s == 5, "(10.13 body) the debug file says how long the body's materials are waited for: " .. tostring(st and st.body_materials_wait_s))
+                check(st and st.rebuilds_made >= 1 and st.found_fine >= 1 and st.told_you == 0, "(10.13 body) a main body with no materials is made again and then fine, nothing announced: " .. tostring(st and st.last))
+                local up_at, again_at
+                for _, l in ipairs(env.log) do
+                    local t = l:match("^%[?(%d+)") -- (the journal lines carry no clock here: the timing is read from the settle log below)
+                end
+                local lg = env.files["re7mp/debug.json"] and env.files["re7mp/debug.json"].health.model_settle and env.files["re7mp/debug.json"].health.model_settle.log
+                if lg then
+                    for _, l in ipairs(lg) do
+                        local secs, what = l:match("^(%d+) s: (.*)$")
+                        secs = tonumber(secs)
+                        if secs and what:find("is up; looking at it in 3 s", 1, true) and not up_at then up_at = secs end
+                        if secs and what:find("making it again (rebuild 1 of", 1, true) and not again_at then again_at = secs end
+                    end
+                end
+                check(up_at and again_at and again_at - up_at <= 10, "(10.13 body) ...within 10 s of the body coming up (it took 17 s with the 14 s wait): " .. tostring(up_at) .. " -> " .. tostring(again_at))
+            end
+
+            -- (f) a body that stays broken (a texture slot empty every time): made again twice, then the top left says so
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, tex_missing = "re7mp_body_pl3010" })
+                drive_them(env, "clancy", 200)
+                local st = section(env, "model_settle")
+                check(st and st.rebuilds_made == 2, "(10.1) a body that stays broken is made again twice, not more: " .. tostring(st and st.rebuilds_made))
+                check(st.told_you == 1, "(10.1) ...and then you are told once: " .. tostring(st.told_you))
+                check(chat_has(env, "Model:") or chat_has(env, "still broken"), "(10.1) ...at the top left")
+            end
+
+            -- (f2) a body from the pack that loads but stays broken (the head part has no textures): after the two rebuilds the game's own model takes over, and you are told
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, tex_missing = "re7mp_body_pl3002" }, with_flag())
+                drive_them(env, "clancy", 260)
+                local m = made_text(env)
+                local pk = section(env, "model_pack")
+                check(m:find("MeshResource coop/Character/Player/pl3000/pl3001/pl3001.mesh", 1, true) ~= nil, "(10.1) setup: the pack's body was made first")
+                check(pk and pk.failures >= 1 and pk.characters_using_the_game_models_now.pl3000 ~= nil, "(10.1) a pack body that stays broken is given up: " .. tostring(pk and pk.last))
+                check(m:find("MeshResource Character/Player/pl3000/pl3001/pl3001.mesh", 1, true) ~= nil, "(10.1) ...and the game's own Clancy is made instead")
+                check(section(env, "model_settle").told_you >= 1 and chat_has(env, "Model:"), "(10.1) ...and the top left says so")
+            end
+
+            -- (f2b) 10.7: a pack body whose only fault is a hand that is not from the pack (Clancy's pl3010: the game's own file, no textures every time): the hand is left out,
+            -- the pack's body STAYS (10.5: the whole pack was thrown out and Clancy came from the game's own models), and nothing is announced
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, tex_missing = "re7mp_body_pl3010" }, with_flag())
+                drive_them(env, "clancy", 300)
+                local pk = section(env, "model_pack")
+                check(pk and pk.failures == 0 and next(pk.characters_using_the_game_models_now or {}) == nil, "(10.7 hands) a broken hand does not make the pack fail: " .. tostring(pk and pk.last))
+                check(pk and pk.parts_left_out and #pk.parts_left_out >= 1 and pk.parts_left_out[1]:find("pl3010", 1, true) ~= nil, "(10.7 hands) ...the hand is left out and the debug file says so: " .. tostring(pk and pk.parts_left_out and pk.parts_left_out[1]))
+                local r = section(env, "real_body")
+                check(r.stage == "running" and r.built_model == "Pl3000", "(10.7 hands) ...the pack's Clancy runs: " .. tostring(r.stage))
+                local st = section(env, "model_settle")
+                check(st.told_you == 0 and not chat_has(env, "Model:"), "(10.7 hands) ...and nothing is announced: " .. tostring(st.told_you))
+                local m = made_text(env)
+                check(m:find("via.render.MeshResource coop/Character/Player/pl3000/pl3001/pl3001.mesh", 1, true) ~= nil and not m:find("MeshResource Character/Player/pl3000/pl3001/pl3001.mesh", 1, true),
+                    "(10.7 hands) ...and the game's own Clancy was never made")
+            end
+            -- (f2e) 10.8: Clancy's head from the pack is slow to load (no materials at the first look): the SAME file gets a second look before another is tried, and the
+            -- body's own material file is never taken for the head (10.7 did, and the head drew black); when the pack's file never gives materials, the game's pl3050 is next
+            do
+                local HEAD = "coop/Character/Player/pl3000/pl3002/pl3002.mesh"
+                local PL3050 = "Character/Player/pl3000/pl3050/pl3050.mdf2"
+                local function asked(env, path) for _, g in ipairs(env.resources.made) do if g == "via.render.MeshMaterialResource " .. path then return true end end return false end
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, mat_not_ready = "re7mp_body_pl3002", mat_first_only = true }, with_flag())
+                drive_them(env, "clancy", 300)
+                local st = env.files["re7mp/model_status.json"]
+                check(not (st and st.material_files and st.material_files[HEAD]), "(10.8 head) a slow first look does not change (or keep) the head's material file: " .. tostring(st and st.material_files and st.material_files[HEAD]))
+                check(not asked(env, PL3050), "(10.8 head) ...the game's pl3050 file was not needed")
+                local env2 = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, mdf_needed = { part = "pl3002", needs = "pl3050/pl3050.mdf2" } }, with_flag())
+                drive_them(env2, "clancy", 500)
+                local st2 = env2.files["re7mp/model_status.json"]
+                check(asked(env2, PL3050), "(10.8 head) when the pack's file never gives materials the game's own pl3050 head file is tried")
+                check(st2 and st2.material_files and st2.material_files[HEAD] == PL3050, "(10.8 head) ...and kept for the next start: " .. tostring(st2 and st2.material_files and st2.material_files[HEAD]))
+                local poisoned = { build = "10.7", models = {}, material_files = { [HEAD] = "coop/Character/Player/pl3000/pl3001/pl3001.mdf2" } }
+                local env3 = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 }, with_flag({ ["re7mp/model_status.json"] = poisoned }))
+                drive_them(env3, "clancy", 150)
+                local st3 = env3.files["re7mp/model_status.json"]
+                check(not (st3 and st3.material_files and st3.material_files[HEAD]), "(10.8 head) the body's file kept for the head by 10.7 is ignored and not written back: " .. tostring(st3 and st3.material_files and st3.material_files[HEAD]))
+            end
+            -- (f2f) 10.8: Clancy's hands (the game's own pl3010 / pl3020) take the game's em3010 / em3020 material files first with the pack on; a body file kept for them by 10.7 is forgotten
+            do
+                local HAND = "Character/Player/pl3000/pl3000/pl3010.mesh"
+                local function asked(env, path) for _, g in ipairs(env.resources.made) do if g == "via.render.MeshMaterialResource " .. path then return true end end return false end
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, mdf_needed = { part = "pl30[12]0", needs = "/em30" } }, with_flag())
+                drive_them(env, "clancy", 120)
+                check(asked(env, "Character/Player/pl3000/pl3000/em3010.mdf2") and asked(env, "Character/Player/pl3000/pl3000/em3020.mdf2"), "(10.8 hands) the hands' material files are em3010 / em3020 at the first try")
+                check(not asked(env, "Character/Player/pl3000/pl3000/pl3010.mdf2"), "(10.8 hands) ...not the guess from the mesh's name")
+                local poisoned = { build = "10.7", models = {}, material_files = { [HAND] = "Character/Player/pl3000/pl3001/pl3001.mdf2" } }
+                local env2 = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, mdf_needed = { part = "pl30[12]0", needs = "/em30" } }, with_flag({ ["re7mp/model_status.json"] = poisoned }))
+                drive_them(env2, "clancy", 120)
+                check(asked(env2, "Character/Player/pl3000/pl3000/em3010.mdf2"), "(10.8 hands) the body's file kept for the hands by 10.7 is not used: em3010 is asked for")
+            end
+
+            -- (f2c) 10.10: Joe's hands: the other developer's guessed files (CFG.pack.GUESSES) are all asked for; when none of a side's guesses loads, that side wears Ethan's hand (the game's own pl0010 / pl0020)
+            local GUESS_NAMES = { "pl9010", "pl9011", "pl9003", "pl9030", "pl9030_b", "pl9020", "pl9021", "pl9004", "pl9040", "pl9040_b" }
+            local function never_for(keep)
+                local out = {}
+                for _, n in ipairs(GUESS_NAMES) do
+                    local k = false
+                    for _, w in ipairs(keep or {}) do if w == n then k = true end end
+                    if not k then out[#out + 1] = "re7mp_body_" .. n end
+                end
+                return out
+            end
+            do
+                -- (a) all of them are asked for, and with every one loading they are all parts of his body; Ethan's hands are not borrowed then
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 }, with_flag())
+                drive_them(env, "joe", 100)
+                local m = made_text(env)
+                local want = { "pl9000/pl9010/pl9010.mesh", "pl9000/pl9000/pl9011.mesh", "pl9000/pl9003/pl9003.mesh", "pl9000/pl9000/pl9030.mesh", "pl9000/pl9030/pl9030.mesh",
+                    "pl9000/pl9020/pl9020.mesh", "pl9000/pl9000/pl9021.mesh", "pl9000/pl9004/pl9004.mesh", "pl9000/pl9000/pl9040.mesh", "pl9000/pl9040/pl9040.mesh" }
+                local miss = {}
+                for _, w in ipairs(want) do if m:find("via.render.MeshResource ch9/Character/Player/" .. w, 1, true) == nil then miss[#miss + 1] = w end end
+                check(#miss == 0, "(10.10 hands) the other developer's ten guessed hand files are asked for: missing " .. table.concat(miss, ","))
+                local made_all = true
+                for _, n in ipairs(GUESS_NAMES) do if count_made(rec, "re7mp_body_" .. n) < 1 then made_all = false end end
+                check(made_all, "(10.10 hands) ...each as a part of his body: " .. table.concat(rec.made, ","))
+                check(made_after_joe(rec, "re7mp_body_pl0010") == 0 and made_after_joe(rec, "re7mp_body_pl0020") == 0 and asked_after_joe(env, "Character/Player/pl0000/pl0000/pl0010.mesh") == 0,
+                    "(10.10 hands) ...and Ethan's hands are not borrowed while guesses load: " .. table.concat(rec.made, ","))
+                local pk = section(env, "model_pack")
+                check(pk.failures == 0 and #(pk.parts_left_out or {}) == 0 and section(env, "real_body").stage == "running", "(10.10 hands) ...nothing is left out: " .. tostring(pk.last))
+                -- (10.10) "the constant model check even when the model is loaded is causing an fps dip, if it completes or fails once, just leave it as is": one verdict for the body, then no more reads
+                drive_them(env, "joe", 60)
+                local mc1 = section(env, "model_check")
+                local row1 = mc1.models and mc1.models[1]
+                check(mc1.models_with_their_verdict >= 1 and mc1.models_looked_at >= 1 and row1 and row1.settled ~= nil, "(10.10 check) the body got its one verdict: " .. tostring(mc1.models_with_their_verdict) .. " / " .. tostring(mc1.last))
+                drive_them(env, "joe", 400)
+                local mc2 = section(env, "model_check")
+                check(mc2.models_looked_at == mc1.models_looked_at and mc2.looks_with_nothing_left_to_read > mc1.looks_with_nothing_left_to_read,
+                    "(10.10 check) ...and it is not read again while it stands: " .. mc1.models_looked_at .. " -> " .. mc2.models_looked_at .. " / " .. tostring(mc2.last))
+            end
+            do
+                -- (b) only pl9011 (right) and pl9021 (left) exist: they stay, the other eight are left out, Ethan's are not borrowed and the body is not made again
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, part_never_ready_for = never_for({ "pl9011", "pl9021" }) }, with_flag())
+                drive_them(env, "joe", 300)
+                local pk = section(env, "model_pack")
+                local gone = table.concat(pk.parts_left_out or {}, "|")
+                check(count_made(rec, "re7mp_body_pl9011") >= 1 and count_made(rec, "re7mp_body_pl9021") >= 1, "(10.10 hands) the guesses that exist stay parts of the body")
+                check(gone:find("pl9010", 1, true) ~= nil and gone:find("pl9040_b", 1, true) ~= nil and gone:find("pl9011", 1, true) == nil and gone:find("pl9021", 1, true) == nil,
+                    "(10.10 hands) ...and the ones that do not load are left out: " .. gone)
+                check(made_after_joe(rec, "re7mp_body_pl0010") == 0 and made_after_joe(rec, "re7mp_body_pl0020") == 0, "(10.10 hands) ...with Ethan's hands not borrowed")
+                check(pk.failures == 0 and section(env, "real_body").stage == "running" and section(env, "who").body_is == "joe", "(10.10 hands) ...and Joe's body runs: " .. tostring(pk.last))
+            end
+            do
+                -- (c) none of them loads: they are all left out, the body is made again once and wears Ethan's hands (the game's own files) for both sides
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, part_never_ready_for = never_for({}) }, with_flag())
+                drive_them(env, "joe", 400)
+                local m = made_text(env)
+                check(made_after_joe(rec, "re7mp_body_pl0010") >= 1 and made_after_joe(rec, "re7mp_body_pl0020") >= 1, "(10.10 hands) when none of a side's guesses loads, Ethan's hand is made as a part of Joe's body: stage " .. tostring(section(env, "real_body").stage) .. " / " .. table.concat(rec.made, ","))
+                local pk = section(env, "model_pack")
+                check(pk and pk.failures == 0 and pk.made_from_the_pack.pl9000 ~= nil, "(10.10 hands) Joe stays from the pack when his hands do not load: " .. tostring(pk and pk.last))
+                local r = section(env, "real_body")
+                check(r.stage == "running" and r.built_model == "Pl9000" and section(env, "who").body_is == "joe", "(10.10 hands) ...and Joe's body runs: " .. tostring(r.stage))
+                local before = count_made(rec, "re7mp_body_pl9010")
+                drive_them(env, "joe", 100)
+                check(count_made(rec, "re7mp_body_pl9010") == before, "(10.10 hands) a guess that was left out is not asked for again at every make: " .. before .. " -> " .. count_made(rec, "re7mp_body_pl9010"))
+                -- and when Ethan's hands do not load either they are left out too and Joe stays from the pack
+                local never = never_for({})
+                never[#never + 1] = "re7mp_body_pl0010"
+                never[#never + 1] = "re7mp_body_pl0020"
+                local env2, rec2 = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, part_never_ready_for = never }, with_flag())
+                drive_them(env2, "joe", 600)
+                local pk2 = section(env2, "model_pack")
+                local gone2 = table.concat(pk2.parts_left_out or {}, "|")
+                check(pk2.failures == 0 and gone2:find("pl0010", 1, true) ~= nil and gone2:find("pl0020", 1, true) ~= nil and section(env2, "real_body").stage == "running",
+                    "(10.10 hands) ...Ethan's hands that do not load either are left out and the pack's Joe stays: " .. gone2 .. " / " .. tostring(pk2.last))
+            end
+
+            -- (f2g) 10.10: Mia's left arm. The pack has only the codex hand (pl2023); the game's own left hand (pl2020, Pl2000HandL: the arm that goes with her right one, pl2010) is
+            -- added under the name pl2020_hand, because the pack's hair has the stem pl2020 too. It is optional: when it does not load only it is left out.
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 }, with_flag())
+                drive_them(env, "mia", 120)
+                local m = made_text(env)
+                check(m:find("via.render.MeshResource Character/Player/pl2000/pl2000/pl2020.mesh", 1, true) ~= nil, "(10.10 mia) the game's own left hand (pl2020) is asked for: " .. m)
+                check(m:find("via.render.MeshResource coop/Character/Player/pl2000/pl2000/pl2020.mesh", 1, true) ~= nil and m:find("via.render.MeshResource coop/Character/Player/pl2000/pl2023/pl2023.mesh", 1, true) ~= nil,
+                    "(10.10 mia) ...and the pack's hair (pl2020) and chest/codex hand (pl2023) are still asked for")
+                check(count_made(rec, "re7mp_body_pl2020_hand") >= 1 and count_made(rec, "re7mp_body_pl2020") >= 1 and count_made(rec, "re7mp_body_pl2010") >= 1,
+                    "(10.10 mia) ...as two parts with their own names (pl2020_hand and the hair pl2020) beside the right hand: " .. table.concat(rec.made, ","))
+                local pk = section(env, "model_pack")
+                check(pk.failures == 0 and #(pk.parts_left_out or {}) == 0 and section(env, "real_body").stage == "running", "(10.10 mia) ...and nothing is left out: " .. tostring(pk.last))
+            end
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, part_never_ready_for = { "re7mp_body_pl2020_hand" } }, with_flag())
+                drive_them(env, "mia", 260)
+                local pk = section(env, "model_pack")
+                local gone = table.concat(pk.parts_left_out or {}, "|")
+                check(pk.failures == 0 and gone:find("pl2020_hand", 1, true) ~= nil and section(env, "real_body").stage == "running",
+                    "(10.10 mia) a left hand that does not load is left out and Mia stays from the pack: " .. gone .. " / " .. tostring(pk.last))
+                check(count_made(rec, "re7mp_body_pl2020") >= 1, "(10.10 mia) ...the hair with the same stem is not taken away with it")
+            end
+            -- (f2h) 10.10: Joe's own hands are learned from the models.json the Model collection wrote (a mesh of his folder numbered 10 to 49); Ethan's hands are only the fallback
+            do
+                local learned = { build = "10.9", models = {
+                    { mesh = "ch9/Character/Player/pl9000/pl9000/pl9010.mesh", names = { "Pl9000HandR", "ShadowHandR" }, seen = 3 },
+                    { mesh = "ch9/Character/Player/pl9000/pl9000/pl9020.mesh", names = { "Pl9000HandL" }, seen = 3 },
+                    { mesh = "ch9/Character/Player/pl9000/pl9001/pl9001.mesh", names = { "Pl9000", "ShadowBody" }, seen = 3 },
+                    { mesh = "ch9/Character/Player/pl9000/pl9050/pl9050.mesh", names = { "ShadowHead" }, seen = 3 } } }
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 }, with_flag({ ["re7mp/models.json"] = learned }))
+                drive_them(env, "joe", 120)
+                local m = made_text(env)
+                check(m:find("via.render.MeshResource ch9/Character/Player/pl9000/pl9000/pl9010.mesh", 1, true) ~= nil and m:find("via.render.MeshResource ch9/Character/Player/pl9000/pl9000/pl9020.mesh", 1, true) ~= nil,
+                    "(10.10 hands) Joe's hands that the game was seen to use are asked for: " .. m)
+                check(asked_after_joe(env, "Character/Player/pl0000/pl0000/pl0010.mesh") == 0 and asked_after_joe(env, "Character/Player/pl0000/pl0000/pl0020.mesh") == 0, "(10.10 hands) ...and Ethan's are not borrowed then")
+                check(m:find("pl9000/pl9010/pl9010.mesh", 1, true) == nil and m:find("pl9020/pl9020.mesh", 1, true) == nil, "(10.10 hands) ...nor the guessed files tried: learned hands replace the guesses")
+                check(count_made(rec, "re7mp_body_pl9010") >= 1 and count_made(rec, "re7mp_body_pl9020") >= 1, "(10.10 hands) ...and they are parts of his body: " .. table.concat(rec.made, ","))
+                check(count_made(rec, "re7mp_body_pl9001") == 0 and count_made(rec, "re7mp_body_pl9050") == 0 and m:find("pl9050/pl9050.mesh", 1, true) == nil,
+                    "(10.10 hands) ...his body and head files in that list are not taken for hands")
+                local pk = section(env, "model_pack")
+                check(pk.failures == 0 and #(pk.parts_left_out or {}) == 0 and section(env, "real_body").stage == "running", "(10.10 hands) ...nothing is left out: " .. tostring(pk.last))
+                -- and when those do not load, they are left out and the pack's Joe stays
+                local env2, rec2 = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, part_never_ready_for = { "re7mp_body_pl9010", "re7mp_body_pl9020" } }, with_flag({ ["re7mp/models.json"] = learned }))
+                drive_them(env2, "joe", 260)
+                local pk2 = section(env2, "model_pack")
+                local gone = table.concat(pk2.parts_left_out or {}, "|")
+                check(pk2.failures == 0 and gone:find("pl9010", 1, true) ~= nil and gone:find("pl9020", 1, true) ~= nil and section(env2, "real_body").stage == "running",
+                    "(10.10 hands) learned hands that do not load are left out and Joe stays from the pack: " .. gone)
+            end
+
+            -- (f3) 10.4: Zoe, Chris and Joe from the pack (the DLC characters; ch8 / ch9 files sit under coop/ch8 and coop/ch9)
+            do
+                local CHARS = {
+                    { "zoe", "Pl3400", "pl3400", { "coop/Character/Player/pl3400/pl3401/pl3401.mesh", "coop/Character/Player/pl3400/pl3402/pl3402.mesh",
+                        "coop/Character/Player/pl3400/pl3400/pl3410.mesh", "coop/Character/Player/pl3400/pl3400/pl3420.mesh" } },
+                    { "chris", "Pl1000", "pl1000", { "coop/ch8/Character/Player/pl1000/pl1001/pl1001.mesh", "coop/ch8/Character/Player/pl1000/pl1002/pl1002.mesh" } },
+                    { "joe", "Pl9000", "pl9000", { "coop/ch9/Character/Player/pl9000/pl9001/pl9001.mesh", "coop/ch9/Character/Player/pl9000/pl9002/pl9002.mesh" } },
+                }
+                for _, c in ipairs(CHARS) do
+                    local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 }, with_flag())
+                    drive_them(env, c[1], 100)
+                    local m = made_text(env)
+                    for _, path in ipairs(c[4]) do
+                        check(m:find("via.render.MeshResource " .. path, 1, true) ~= nil, "(10.4 pack) " .. c[1] .. ": " .. path .. " is loaded from the pack")
+                    end
+                    local r = section(env, "real_body")
+                    check(r.stage == "running" and r.built_model == c[2], "(10.4 pack) " .. c[1] .. "'s body runs as " .. c[2] .. ": " .. tostring(r.stage) .. " / " .. tostring(r.built_model))
+                    local pk = section(env, "model_pack")
+                    check(pk.made_from_the_pack[c[3]] ~= nil and pk.failures == 0 and section(env, "who").body_is == c[1], "(10.4 pack) ...counted as made from the pack, no failure: " .. tostring(pk.last))
+                end
+                -- without the pack there is no file for them and nothing in the scene: Ethan stays
+                do
+                    local env = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 })
+                    drive_them(env, "zoe", 100)
+                    check(section(env, "who").unavailable == "zoe", "(10.4 pack) without the pack Zoe is not available and the body stays Ethan's: " .. tostring(section(env, "who").unavailable))
+                end
+            end
+
+            -- (f4) 10.4: the VR hands layer of a body mesh is switched off while the body has hands of its own (Clancy's pl3010 / pl3020), and back with the box
+            do
+                local VRBOX = "Hide the VR hands layer (a material named ..._VR) on a body that has its own hands, e.g. Clancy's"
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, vr_layers = true }, with_flag())
+                drive_them(env, "clancy", 120)
+                check(rec.vr_on ~= nil and rec.vr_on[1] == true and rec.vr_on[2] == false, "(10.4 layers) Clancy's VR hands layer is off, his body layer untouched: " .. tostring(rec.vr_on and rec.vr_on[1]) .. " / " .. tostring(rec.vr_on and rec.vr_on[2]))
+                check(#rec.vr_writes == 1 and rec.vr_writes[1].i == 1 and rec.vr_writes[1].v == false, "(10.4 layers) ...with one write, not one every pass: " .. #rec.vr_writes .. " (" .. tostring(rec.vr_writes[1] and rec.vr_writes[1].i) .. "=" .. tostring(rec.vr_writes[1] and rec.vr_writes[1].v) .. ", " .. tostring(rec.vr_writes[2] and rec.vr_writes[2].i) .. "=" .. tostring(rec.vr_writes[2] and rec.vr_writes[2].v) .. "), bodies made " .. tostring(rec.body_made))
+                local bl = section(env, "body_lab").face.layers
+                check(bl.seen and bl.seen.pl3000_VR == false or (bl.seen and bl.seen.pl3000_VR ~= nil), "(10.4 layers) ...and the debug file lists the layers of the parts it read: " .. tostring(bl.seen and bl.seen.pl3000_VR))
+                run_ui(env)
+                check((env.seen_checks or {})["VR hands layer: pl3000_VR"] == false, "(10.4 layers) the panel has a box for the VR layer, showing it switched off: " .. tostring((env.seen_checks or {})["VR hands layer: pl3000_VR"]))
+                env.check_override[VRBOX] = false
+                run_ui(env)
+                drive(env, 40)
+                check(rec.vr_on[2] == true, "(10.4 layers) unticking the VR rule puts the layer back")
+                env.check_override[VRBOX] = true
+                run_ui(env)
+                drive(env, 40)
+                check(rec.vr_on[2] == false, "(10.4 layers) ...ticking it switches it off again")
+                -- a body with no hands of its own keeps its VR hands (they are the only hands it has)
+                local env2, rec2 = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, vr_layers = true }, with_flag())
+                drive_them(env2, "chris", 120)
+                check(rec2.vr_on ~= nil and rec2.vr_on[2] == true and #rec2.vr_writes == 0, "(10.4 layers) Chris has no hand parts: his VR hands layer is left on: " .. tostring(rec2.vr_on and rec2.vr_on[2]) .. " writes " .. tostring(rec2.vr_writes and #rec2.vr_writes))
+            end
+
+            -- (f4b) 10.9: a layer named ..._VR that is not a pair of VR hands stays on even while the body has hands of its own: Mia's pl2000_VR holds her CHEST (the 10.8 rule
+            -- hid it: "a hole in her chest"), Joe's pl9002_Leg_VR_m holds his LEGS. Clancy's pl3000_VR is still hidden (checked above). A saved "pl2000_VR hidden" is dropped once.
+            do
+                -- Joe: legs layer next to a (borrowed) pair of hands: the legs stay
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, vr_layers = true, vr_names = { "pl9001_body", "pl9002_Leg_VR_m" } }, with_flag())
+                drive_them(env, "joe", 120)
+                check(rec.vr_on ~= nil and rec.vr_on[1] == true and rec.vr_on[2] == true and #rec.vr_writes == 0, "(10.9 layers) Joe's legs layer (pl9002_Leg_VR_m) is not hidden by the VR rule: " .. tostring(rec.vr_on and rec.vr_on[2]) .. " writes " .. tostring(rec.vr_writes and #rec.vr_writes))
+                -- a layer that really is VR hands (Clancy's) is still hidden next to the same hands
+                local envc, recc = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, vr_layers = true, vr_names = { "pl3000_body", "pl3000_VR" } }, with_flag())
+                drive_them(envc, "clancy", 120)
+                check(recc.vr_on ~= nil and recc.vr_on[2] == false, "(10.9 layers) ...while Clancy's VR hands layer is still hidden")
+                -- your own box for a kept layer still works: ticking "hide" for the legs hides them
+            end
+            do
+                -- Mia: pl2000_VR is her chest. Built from the settings of 10.8 (pl2000_VR hidden, no vr_chest_10_9): the old choice is not applied
+                local function mia(files)
+                    local f = with_flag()
+                    for k, v in pairs(files or {}) do f[k] = v end
+                    return start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, vr_layers = true, vr_names = { "pl2000_body", "pl2000_VR" } }, f)
+                end
+                local env, rec = mia({ ["re7mp/settings.json"] = { mia_layers = { pl2000_VR = false } } })
+                drive_them(env, "mia", 120)
+                check(rec.vr_on ~= nil and rec.vr_on[2] == true, "(10.9 layers) a saved 'pl2000_VR hidden' from 10.8 is dropped: Mia's chest layer stays on: " .. tostring(rec.vr_on and rec.vr_on[2]))
+                -- a settings file written by 10.9 (vr_chest_10_9 = true) with that layer hidden is a real choice and is kept
+                local env2, rec2 = mia({ ["re7mp/settings.json"] = { mia_layers = { pl2000_VR = false }, vr_chest_10_9 = true } })
+                drive_them(env2, "mia", 120)
+                check(rec2.vr_on ~= nil and rec2.vr_on[2] == false, "(10.9 layers) ...but when it was chosen in 10.9 (vr_chest_10_9) it is kept: " .. tostring(rec2.vr_on and rec2.vr_on[2]))
+                -- the settings written by 10.9 carry the marker
+                run_ui(env)
+                run_frames(env, 3)
+                local st = env.files["re7mp/settings.json"]
+                check(st and st.vr_chest_10_9 == true, "(10.9 layers) the settings file carries vr_chest_10_9: " .. tostring(st and st.vr_chest_10_9))
+            end
+
+            -- (f4c) 10.9: a mesh that streams in slowly is waited for up to 30 s (10.8: 10 s; Pete Walken's took longer the first time and "failed, then loaded"), and
+            -- a body that did not make it is tried again 6 s later (not 25)
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 22, part_ready_after = 0.5 }, with_flag())
+                drive_them(env, "clancy", 160)
+                local r = section(env, "real_body")
+                local pk = section(env, "model_pack")
+                check(r.stage == "running" and r.built_model == "Pl3000" and pk.failures == 0, "(10.9 slow mesh) a mesh that is ready after 22 s is waited for: " .. tostring(r.stage) .. " / " .. tostring(r.built_model) .. " / failures " .. tostring(pk.failures))
+                -- one that never comes: given up after 30 s (not 10), and said so with the number
+                local env2 = start({ no_lab = true, mesh_never_ready = true, part_ready_after = 0.5 }, with_flag())
+                drive_them(env2, "clancy", 60) -- 15 s after it was asked for: still waiting (10.8 gave up at 10 s)
+                check(section(env2, "real_body").stage == "make" and section(env2, "model_pack").failures == 0, "(10.9 slow mesh) 15 s with no mesh is not yet a failure (still waiting): " .. tostring(section(env2, "real_body").stage) .. " failures " .. tostring(section(env2, "model_pack").failures) .. " last " .. tostring(section(env2, "model_pack").last) .. " | " .. tostring(section(env2, "real_body").last))
+                drive_them(env2, "clancy", 80) -- 35 s after it was asked for: past the 30 s
+                check(section(env2, "real_body").stage ~= "make" or section(env2, "model_pack").failures >= 1, "(10.9 slow mesh) ...and after 30 s it is given up: " .. tostring(section(env2, "real_body").stage) .. " / failures " .. tostring(section(env2, "model_pack").failures))
+            end
+
+            -- (g) the other player's "mot" event: a reload clip pair they play is shown here as the reload clip, for as long as it is fresh
+            do
+                local env, rec = start({ no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5 }, { ["re7mp/clips/idle.json"] = clipfile("idle"), ["re7mp/clips/gun_reload.json"] = clipfile("gun_reload") })
+                drive_them(env, "clancy", 40)
+                local function plays(label) local n = 0 for _, l in ipairs(env.log) do if l:find("Play: " .. label, 1, true) then n = n + 1 end end return n end
+                check(plays("idle") >= 1 and plays("gun_reload") == 0, "(10.1) setup: the other player's body idles")
+                local function tick(env, mot) -- (one message list: a new push replaces what is queued; they say who they are and what they play)
+                    push_msgs(env, { { 7, "e|char|clancy|0.00|0.00|0.00" }, mot and { 7, mot } or nil })
+                    live(env, 0.3)
+                    drive(env, 1)
+                end
+                for i = 1, 12 do tick(env, i % 4 == 1 and "e|mot|5_21_gun_reload|0.00|0.00|0.00" or nil) end
+                check(plays("gun_reload") >= 1, "(10.1) their reload clip pair (event mot) plays the reload clip on their body")
+                local mb = section(env, "motion_banks")
+                check(mb and mb.received >= 3 and mb.used_for_their_body >= 1, "(10.1) ...and the debug file counts it: " .. tostring(mb and mb.received) .. " / " .. tostring(mb and mb.used_for_their_body))
+                for _ = 1, 30 do tick(env) end -- (no more events: after 3.5 s the flags decide again)
+                check(plays("idle") >= 2, "(10.1) ...and when no more come the body goes back to what the pose flags say: idle played " .. plays("idle") .. " times")
+                -- a label the flags can say (walk) is NOT taken from the event: the pose flags and the speed are measured
+                local walks = plays("walk")
+                for i = 1, 8 do tick(env, i % 4 == 1 and "e|mot|2_7_walk|0.00|0.00|0.00" or nil) end
+                check(plays("walk") == walks, "(10.1) a walk label in the event does not make the body walk: the speed decides")
+                tick(env, "e|mot|bogus|0.00|0.00|0.00")
+                tick(env)
+                local mb2 = section(env, "motion_banks")
+                check(mb2.ignored >= 1, "(10.1) a malformed mot event is ignored and counted: " .. tostring(mb2.ignored))
+            end
+
+            -- ===== 10.2: the other player's body plays the game's own clips (the motion bank); the recorded ones when that cannot be =====
+            do
+                local BOX2 = "Animate it with the game's own clips (the motion bank) instead of my recorded ones"
+                local CLIPS = {
+                    { bank = 0, id = 1, name = "pl0000_Hands_Walk_Loop", frames = 30 }, { bank = 0, id = 2, name = "pl0000_Hands_Jog_Loop", frames = 24 },
+                    { bank = 0, id = 3, name = "pl0000_Hands_StandDamage_Loop", frames = 60 }, { bank = 0, id = 4, name = "pl0000_Hands_WalkCrouch_Loop", frames = 30 },
+                    { bank = 0, id = 10, name = "pl0000_Foo_Bar", frames = 5 },
+                    { bank = 7, id = 21, name = "pl0000_Hands_Reload_00", frames = 90, type = 2 },
+                }
+                local function gworld(gm, files, extra)
+                    gm = gm or {}
+                    gm.clips = gm.clips or CLIPS
+                    local f = { ["re7mp/clips/idle.json"] = clipfile("idle"), ["re7mp/clips/walk.json"] = clipfile("walk"), ["re7mp/clips/gun_reload.json"] = clipfile("gun_reload") }
+                    for k, v in pairs(files or {}) do f[k] = v end
+                    local o = { no_lab = true, mesh_ready_after = 1, part_ready_after = 0.5, game_motion = gm }
+                    for k, v in pairs(extra or {}) do o[k] = v end
+                    local env, rec = start(o, f)
+                    env.gm_info_cur = {}
+                    local real_create = env.G.sdk.create_instance
+                    env.G.sdk.create_instance = function(name, simplified)
+                        if name == "via.motion.MotionInfo" then
+                            local i = Obj.new(name, { get_MotionName = function() return env.gm_info_cur.c and env.gm_info_cur.c.name end,
+                                get_MotionID = function() return env.gm_info_cur.c and env.gm_info_cur.c.id end,
+                                get_MotionEndFrame = function() return env.gm_info_cur.c and env.gm_info_cur.c.frames end })
+                            i.add_ref = function(self) return self end
+                            return i
+                        elseif name == "via.motion.TreeLayer" and rec.motion then
+                            return rec.motion.make_layer()
+                        elseif name == "via.motion.DynamicMotionBank" then -- (10.14) a bank object that remembers what it was given
+                            local db
+                            db = Obj.new(name, { [".ctor"] = function() end, set_MotionList = function(_, h) db.path = h:call("get_ResourcePath") end,
+                                set_OverwriteBankID = function(_, v) db.ow = v end, set_BankID = function(_, b) db.bank = b end, get_BankID = function() return db.bank end })
+                            db.add_ref = function(self) return self end
+                            return db
+                        end
+                        return real_create(name, simplified)
+                    end
+                    env.gm_add_player_motion = function()
+                        local ba = Obj.new("via.motion.MotionBankAsset", { get_ResourcePath = function() return "Character/Player/pl0000/motion/pl0000.mot" end })
+                        ba.add_ref = function(self) return self end
+                        local jm = Obj.new("via.motion.JointMap", { get_ResourcePath = function() return "Character/Player/pl0000/pl0000.jmap" end })
+                        jm.add_ref = function(self) return self end
+                        local pm = Obj.new("via.motion.Motion", { get_MotionBankAsset = function() return ba end, get_JointMap = function() return jm end })
+                        for _, who in ipairs({ env.root, env.player }) do -- (the scene's Ethan object is the one this world plays; the default player too)
+                            local pcomps = who.m.get_Components().get_elements()
+                            pcomps[#pcomps + 1] = pm
+                        end
+                    end
+                    if not gm.no_player_motion then env.gm_add_player_motion() end
+                    return env, rec
+                end
+                local function tick(env, mot) -- (a new push replaces the queue: they say who they are and what they play, together)
+                    push_msgs(env, { { 7, "e|char|clancy|0.00|0.00|0.00" }, mot and { 7, mot } or nil })
+                    live(env, 0.3)
+                    drive(env, 1)
+                end
+                local function last_play(rec) return rec.motion and rec.motion.plays[#rec.motion.plays] end
+                local function recorded_plays(env, label) local n = 0 for _, l in ipairs(env.log) do if l:find("Play: " .. label, 1, true) then n = n + 1 end end return n end
+
+                -- (a) it sets up, passes its self-test, and the game's clips animate the body
+                do
+                    local env, rec = gworld()
+                    drive_them(env, "clancy", 80)
+                    local g = section(env, "game_motion")
+                    check(rec.motion_made == 1, "(10.2) the body gets one Motion component of its own: " .. tostring(rec.motion_made))
+                    check(g and g.source and g.source.bank_asset and g.source.bank_asset:find("pl0000.mot", 1, true), "(10.2) the bank asset and joint map are taken from my player's Motion: " .. tostring(g and g.source and g.source.bank_asset))
+                    check(rec.motion.bank_asset ~= nil and rec.motion.jmap ~= nil and (rec.motion.setup or 0) >= 1, "(10.2) ...and given to the body's Motion (bank asset, joint map, setupMotionBank)")
+                    check(g.clips_listed == 5 and g.clips_found.Hands_Walk_Loop == "0/1" and g.clips_found.Hands_StandDamage_Loop == "0/3", "(10.2) the clips of the bank (the bare-hands set) are listed by name: " .. tostring(g.clips_listed))
+                    check(g.counts.tests_passed == 1 and g.body.self_test and g.body.self_test.joints_moved >= 0.04 and g.body.joints_bound == true, "(10.2) the self-test passed: the frame advanced and the joints moved: " .. tostring(g.why))
+                    check(g.state == "playing" and g.playing_now and g.playing_now.pair == "0/3/0" and g.playing_now.how:find("^clip name"), "(10.2) they stand still: the idle clip of that name plays: " .. tostring(g.state) .. " " .. tostring(g.playing_now and g.playing_now.pair))
+                    check(rec.motion.enabled == true and rec.motion.layers == 1, "(10.2) ...the Motion is on and has its layer")
+                    local before = rec.hip_sets
+                    check(before > 0, "(10.2) setup: the recorded clip had been writing joints before")
+                    drive(env, 8)
+                    check(rec.hip_sets == before, "(10.2) while the game's clip plays the recorded clip does not touch the joints: " .. before .. " -> " .. rec.hip_sets)
+
+                    -- their own pair, with their weapon set
+                    for i = 1, 8 do tick(env, i % 3 == 1 and "e|mot|7_21_gun_reload.2|0.00|0.00|0.00" or nil) end
+                    check(last_play(rec) == "7/21" and rec.motion.type == 2, "(10.2) the pair they play is played, after asking for their weapon set: " .. tostring(last_play(rec)) .. " set " .. tostring(rec.motion.type))
+                    local g2 = section(env, "game_motion")
+                    check(g2.counts.their_clip >= 1 and g2.playing_now and g2.playing_now.how == "their clip", "(10.2) ...and the debug file says it came from them: " .. tostring(g2.playing_now and g2.playing_now.how))
+                    check(section(env, "motion_banks").their_last.type == 2, "(10.2) ...the event carries their weapon set")
+                    for _ = 1, 14 do tick(env) end
+                    check(last_play(rec) == "0/3" and rec.motion.type == 0, "(10.2) when they stop sending it the clip of what they do plays again, in the bare-hands set: " .. tostring(last_play(rec)) .. " set " .. tostring(rec.motion.type))
+
+                    -- a pair this Motion does not have: counted, not played, the clip by name plays
+                    for i = 1, 8 do tick(env, i % 3 == 1 and "e|mot|9_99_walk|0.00|0.00|0.00" or nil) end
+                    local g3 = section(env, "game_motion")
+                    check(g3.counts.missing >= 1 and g3.their_pairs_not_in_my_banks["9/99/0"] ~= nil and last_play(rec) == "0/3", "(10.2) a pair that is not in my banks is counted and not played: " .. tostring(g3.counts.missing))
+
+                    -- something the bank has no clip for (the reload, in a weapon set this Motion does not have): the recorded clip plays, the Motion is off
+                    local rel = recorded_plays(env, "gun_reload")
+                    for i = 1, 10 do tick(env, i % 3 == 1 and "e|mot|7_21_gun_reload.5|0.00|0.00|0.00" or nil) end
+                    check(recorded_plays(env, "gun_reload") > rel and rec.motion.enabled == false, "(10.2) a label with no game clip is played from the recorded clip, and the Motion is switched off meanwhile")
+                    check(section(env, "game_motion").counts.hand_backs >= 1, "(10.2) ...and the debug file counts the hand-back")
+                    for _ = 1, 20 do tick(env) end
+                    check(rec.motion.enabled == true and last_play(rec) == "0/3", "(10.2) ...and the game's clip takes over again when there is one")
+                    check(g3.errors == 0 and g3.fails == 0, "(10.2) no errors and no failures")
+                end
+
+                -- (b) the clip runs but the body does not move: the recorded clips are put back and the top left says so
+                do
+                    local env, rec = gworld({ joints_stuck = true })
+                    drive_them(env, "clancy", 80)
+                    local g = section(env, "game_motion")
+                    check(g.state == "failed" and g.why:find("joints did not move", 1, true), "(10.2) joints that do not move fail the self-test: " .. tostring(g.state) .. " / " .. tostring(g.why))
+                    check(chat_has(env, "Motion:") and chat_has(env, "recorded ones are used instead"), "(10.2) ...and the top left says so")
+                    check(rec.motion.enabled == false, "(10.2) ...the Motion is switched off")
+                    local before = rec.hip_sets
+                    drive(env, 8)
+                    check(rec.hip_sets > before, "(10.2) ...and the recorded clip animates the body: " .. before .. " -> " .. rec.hip_sets)
+                    -- the box tried again (the same fault: it fails again, once)
+                    env.check_override[BOX2] = false
+                    run_ui(env)
+                    env.check_override[BOX2] = true
+                    run_ui(env)
+                    drive_them(env, "clancy", 60)
+                    check(section(env, "game_motion").state == "failed", "(10.2) ticking the box again tries again (and a fault that is still there fails again)")
+                end
+
+                -- (c) a layer that does not advance
+                do
+                    local env, rec = gworld({ frozen = true })
+                    drive_them(env, "clancy", 80)
+                    local g = section(env, "game_motion")
+                    check(g.state == "failed" and g.why:find("did not advance", 1, true), "(10.2) a layer that does not advance fails the self-test: " .. tostring(g.why))
+                end
+
+                -- (d) the component cannot be made / the clip cannot be played
+                do
+                    local env, rec = gworld({ create_fails = true })
+                    drive_them(env, "clancy", 40)
+                    local g = section(env, "game_motion")
+                    check(g.state == "failed" and g.why:find("createComponent(via.motion.Motion)", 1, true) and recorded_plays(env, "idle") >= 1, "(10.2) a Motion component that cannot be made falls back to the recorded clips: " .. tostring(g.why))
+                    local env2, rec2 = gworld({ change_fails = true })
+                    drive_them(env2, "clancy", 80)
+                    local g2 = section(env2, "game_motion")
+                    check(g2.state == "failed" and g2.why:find("changeMotion", 1, true), "(10.2) a changeMotion that keeps failing falls back too: " .. tostring(g2.why))
+                end
+
+                -- (e) the last session ended inside it: off, nothing made; the box brings it back
+                do
+                    local env, rec = gworld(nil, { ["re7mp/lastcall.json"] = { stage = "gmot", call = "createComponent via.motion.Motion", session = 1699990000, time = 1700000000 } })
+                    drive_them(env, "clancy", 40)
+                    local g = section(env, "game_motion")
+                    check(g.on == false and rec.motion_made == nil and recorded_plays(env, "idle") >= 1, "(10.2) after a crash inside it nothing is made and the recorded clips play: on=" .. tostring(g.on))
+                    check(log_has(env, "setting up or playing the game's own animations"), "(10.2) ...and the journal names it")
+                    env.check_override[BOX2] = true
+                    run_ui(env)
+                    drive_them(env, "clancy", 80)
+                    local g2 = section(env, "game_motion")
+                    check(g2.on == true and rec.motion_made == 1 and g2.state == "playing", "(10.2) ...ticking the box tries it again: " .. tostring(g2.state))
+                    check(env.files["re7mp/game_motion.json"] and env.files["re7mp/game_motion.json"].on == true, "(10.2) ...and the choice is kept in re7mp/game_motion.json")
+                end
+
+                -- (f) switched off in the file, and the box
+                do
+                    local env, rec = gworld(nil, { ["re7mp/game_motion.json"] = { on = false } })
+                    drive_them(env, "clancy", 40)
+                    local g = section(env, "game_motion")
+                    check(g.on == false and rec.motion_made == nil, "(10.2) switched off in re7mp/game_motion.json: nothing is made")
+                    check(ui_has(env, "off ("), "(10.2) ...and the panel says it is off")
+                end
+
+                -- (g) my player has no Motion to take the bank from: the recorded clips play until it does
+                do
+                    local env, rec = gworld({ no_player_motion = true })
+                    drive_them(env, "clancy", 30)
+                    local g = section(env, "game_motion")
+                    check(g.state == "waiting" and rec.motion_made == nil and recorded_plays(env, "idle") >= 1, "(10.2) with no bank asset to take, it waits and the recorded clips play: " .. tostring(g.state))
+                    env.gm_add_player_motion()
+                    drive_them(env, "clancy", 80)
+                    check(section(env, "game_motion").state == "playing", "(10.2) ...and starts once there is one")
+                end
+
+                -- (h) a body that is made again gets its own Motion
+                do
+                    local env, rec = gworld()
+                    drive_them(env, "clancy", 80)
+                    local first = rec.motion_made
+                    push_msgs(env, { { 7, "e|char|mia|0.00|0.00|0.00" } })
+                    drive_them(env, "mia", 120)
+                    check(first == 1 and rec.motion_made >= 2 and section(env, "game_motion").state == "playing", "(10.2) a body made again (they switched character) gets its own Motion and plays: " .. tostring(rec.motion_made))
+                end
+
+                -- (i) 10.4: the Motion is switched OFF right after it is set up (no arms-out pose while it scans) and on by the first clip
+                do
+                    local env, rec = gworld()
+                    drive_them(env, "clancy", 80)
+                    local off, on
+                    for i, c in ipairs(rec.motion.calls) do
+                        if c == "off" and not off then off = i end
+                        if c == "on" and not on then on = i end
+                    end
+                    check(off ~= nil and on ~= nil and off < on and rec.motion.enabled == true, "(10.4) the Motion is switched off before any clip plays and on with the first: off at " .. tostring(off) .. ", on at " .. tostring(on))
+                    check(section(env, "game_motion").body.rig and section(env, "game_motion").body.rig.have == 22, "(10.4) the rig check counts the joints the clips drive: " .. tostring(section(env, "game_motion").body.rig and section(env, "game_motion").body.rig.have))
+                end
+
+                -- (j) 10.4: the active banks repeat the ids 0, 1, 2 (one set per weapon type): each id is listed once, and a body made again does not list them again
+                do
+                    local env, rec = gworld({ repeated_banks = 6 })
+                    drive_them(env, "clancy", 80)
+                    local g = section(env, "game_motion")
+                    local joined = table.concat(g.lines, "\n")
+                    check(g.clips_listed == 5 and joined:find("5 repeated ids skipped", 1, true) ~= nil, "(10.4) six active banks with the same id are listed once: " .. tostring(g.clips_listed))
+                    check(g.state == "playing", "(10.4) ...and it plays")
+                    push_msgs(env, { { 7, "e|char|mia|0.00|0.00|0.00" } })
+                    drive_them(env, "mia", 120)
+                    local g2 = section(env, "game_motion")
+                    check(g2.counts.bodies >= 2 and g2.counts.scans_skipped >= 1 and g2.state == "playing", "(10.4) a body made again does not list the clips again: bodies " .. tostring(g2.counts.bodies) .. ", scans skipped " .. tostring(g2.counts.scans_skipped))
+                end
+
+                -- (k) 10.4: a body that lacks the joints the clips drive is left to the recorded clips, without failing the whole thing
+                do
+                    local env, rec = gworld({}, nil, { rig_missing = true })
+                    drive_them(env, "clancy", 80)
+                    local g = section(env, "game_motion")
+                    check(g.state:find("rig does not fit", 1, true) ~= nil and g.fails == 0 and rec.motion.enabled == false, "(10.4) a body with the wrong rig is left to the recorded clips: " .. tostring(g.state))
+                    check(recorded_plays(env, "idle") >= 1 and g.body.rig and g.body.rig.have < 14, "(10.4) ...they play, and the file says how many joints it has: " .. tostring(g.body.rig and g.body.rig.have))
+                end
+
+                -- (l) 10.4: the clip on THEIR overlay layer (a block) plays on their body; "none" puts the locomotion clip back
+                do
+                    local GCLIPS = {}
+                    for _, c in ipairs(CLIPS) do GCLIPS[#GCLIPS + 1] = c end
+                    GCLIPS[#GCLIPS + 1] = { bank = 0, id = 20, name = "pl0000_Hands_Guard_Loop", frames = 60 }
+                    local env, rec = gworld({ clips = GCLIPS })
+                    drive_them(env, "clancy", 80)
+                    check(last_play(rec) == "0/3", "(10.4 overlay) setup: they stand, the idle clip plays: " .. tostring(last_play(rec)))
+                    for i = 1, 8 do tick(env, i % 3 == 1 and "e|mol|0_20_guard|0.00|0.00|0.00" or nil) end
+                    local g = section(env, "game_motion")
+                    check(last_play(rec) == "0/20" and g.playing_now and g.playing_now.how == "their layer clip" and g.playing_now.label == "guard", "(10.4 overlay) their block clip plays on their body: " .. tostring(last_play(rec)) .. " " .. tostring(g.playing_now and g.playing_now.how))
+                    check(g.counts.their_layer >= 1 and section(env, "motion_banks").other_layers.received >= 1, "(10.4 overlay) ...and the debug file counts it")
+                    tick(env, "e|mol|0_0_none|0.00|0.00|0.00")
+                    for _ = 1, 6 do tick(env) end
+                    check(last_play(rec) == "0/3", "(10.4 overlay) when the overlay ends the locomotion clip plays again: " .. tostring(last_play(rec)))
+                    for i = 1, 8 do tick(env, i % 3 == 1 and "e|mol|9_99_guard|0.00|0.00|0.00" or nil) end
+                    local g3 = section(env, "game_motion")
+                    check(g3.their_pairs_not_in_my_banks["9/99/0"] ~= nil and last_play(rec) == "0/3", "(10.4 overlay) an overlay pair that is not in my banks is counted and not played: " .. tostring(last_play(rec)))
+                end
+
+                -- (m) 10.10: a small action (touching a door ...) of their Ethan plays on a SECOND layer of their body's Motion, with their joint mask and blend mode, over the walk
+                do
+                    local ACLIPS = {}
+                    for _, c in ipairs(CLIPS) do ACLIPS[#ACLIPS + 1] = c end
+                    ACLIPS[#ACLIPS + 1] = { bank = 0, id = 9012, name = "pl0000_Hands_DoorPush_00", frames = 50 }
+                    ACLIPS[#ACLIPS + 1] = { bank = 0, id = 2300, name = "pl0000_Hands_Guard_Loop", frames = 50 }
+                    local env, rec = gworld({ clips = ACLIPS })
+                    drive_them(env, "clancy", 80)
+                    check(last_play(rec) == "0/3", "(10.10 act) setup: they stand, the idle clip plays on layer 0: " .. tostring(last_play(rec)))
+                    check(#rec.motion.act_plays == 0 and rec.motion.layers == 1, "(10.10 act) ...and no second layer yet: " .. tostring(rec.motion.layers))
+                    for i = 1, 8 do tick(env, i % 3 == 1 and "e|act|4_0_9012_3_1|0.00|0.00|0.00" or nil) end
+                    local L1 = rec.motion.lay[1]
+                    check(L1 ~= nil and rec.motion.layers == 2 and rec.motion.act_plays[1] == "0/9012", "(10.10 act) their small action is played on a second layer: " .. tostring(rec.motion.act_plays[1]) .. " layers " .. tostring(rec.motion.layers))
+                    check(L1 and L1.R.mask == 3 and L1.R.blend == 1 and L1.R.rate == 1, "(10.10 act) ...with their joint mask and blend mode, at full blend: " .. tostring(L1 and L1.R.mask) .. " " .. tostring(L1 and L1.R.blend) .. " " .. tostring(L1 and L1.R.rate))
+                    check(last_play(rec) == "0/3" and #rec.motion.act_plays == 1, "(10.10 act) ...layer 0 keeps the walk / idle clip, and the action is started once, not at every event: " .. tostring(last_play(rec)) .. " plays " .. #rec.motion.act_plays)
+                    local sa = section(env, "game_motion").small_action
+                    check(sa.playing == "0/0/9012/1" or (sa.playing and sa.playing:find("9012", 1, true)), "(10.10 act) ...and the debug file says what plays: " .. tostring(sa.playing))
+                    -- it ended
+                    tick(env, "e|act|0_0_0_0_0|0.00|0.00|0.00")
+                    for _ = 1, 3 do tick(env) end
+                    check(L1.R.rate == 0 and section(env, "game_motion").small_action.playing == nil, "(10.10 act) when it ends the second layer is faded out (rate 0): " .. tostring(L1.R.rate))
+                    -- a second one, then no more events: it stops by itself after the time to live
+                    for i = 1, 6 do tick(env, i % 3 == 1 and "e|act|2_0_9012_5_0|0.00|0.00|0.00" or nil) end
+                    check(L1.R.rate == 1 and L1.R.mask == 5 and L1.R.blend == 0 and #rec.motion.act_plays == 2, "(10.10 act) another action plays again with its own mask: " .. tostring(L1.R.mask) .. " plays " .. #rec.motion.act_plays)
+                    for _ = 1, 20 do tick(env) end
+                    check(L1.R.rate == 0, "(10.10 act) ...and one that is not sent any more stops after a few seconds: " .. tostring(L1.R.rate))
+                    -- a clip that is not in this Motion's banks is not played (it would show the T pose), and is counted
+                    local before = #rec.motion.act_plays
+                    for i = 1, 8 do tick(env, i % 3 == 1 and "e|act|4_0_9999_3_1|0.00|0.00|0.00" or nil) end
+                    check(#rec.motion.act_plays == before and (section(env, "game_motion").counts.act_missing or 0) >= 1, "(10.10 act) an action that is not in my banks is not played and is counted: " .. tostring(section(env, "game_motion").counts.act_missing))
+                    -- bad text is ignored and counted
+                    tick(env, "e|act|junk|0.00|0.00|0.00")
+                    tick(env)
+                    check(section(env, "motion_banks").small_actions.ignored >= 1, "(10.10 act) a malformed act event is ignored and counted")
+                    check(section(env, "game_motion").errors == 0 and section(env, "game_motion").fails == 0, "(10.10 act) no errors and no failures")
+                end
+                -- (n) 10.10: a healing clip (2790) is in none of the weapon sets they hold but in the item set (200): it is played from there, and the set goes back after
+                do
+                    local HCLIPS = {}
+                    for _, c in ipairs(CLIPS) do HCLIPS[#HCLIPS + 1] = c end
+                    HCLIPS[#HCLIPS + 1] = { bank = 0, id = 2790, name = "pl0000_Hands_Recovery", frames = 238, type = 200 }
+                    local env, rec = gworld({ clips = HCLIPS })
+                    drive_them(env, "clancy", 80)
+                    check(last_play(rec) == "0/3" and rec.motion.type == 0, "(10.10 item set) setup: they stand in the bare-hands set: " .. tostring(last_play(rec)) .. " set " .. tostring(rec.motion.type))
+                    for i = 1, 8 do tick(env, i % 3 == 1 and "e|mol|0_2790_heal.30|0.00|0.00|0.00" or nil) end
+                    check(last_play(rec) == "0/2790" and rec.motion.type == 200, "(10.10 item set) their heal clip is played from the item set (200), not given up: " .. tostring(last_play(rec)) .. " set " .. tostring(rec.motion.type))
+                    check((section(env, "game_motion").counts.item_set or 0) >= 1 and section(env, "game_motion").counts.missing == 0, "(10.10 item set) ...and the debug file counts it: " .. tostring(section(env, "game_motion").counts.item_set))
+                    tick(env, "e|mol|0_0_none|0.00|0.00|0.00")
+                    for _ = 1, 10 do tick(env) end
+                    check(last_play(rec) == "0/3" and rec.motion.type == 0, "(10.10 item set) when the heal ends the idle clip plays again in the bare-hands set: " .. tostring(last_play(rec)) .. " set " .. tostring(rec.motion.type))
+                end
+                -- (o) 10.14: their SCRIPTED MOVE (the van door, a ladder ...): the list of the move goes onto the body as its bank 30 and its clip plays; an entry that is not a character's
+                -- clip plays as the clip of the same name; their layer-0 pair is not read as an Ethan clip meanwhile. The banks their game adds (3 and up) go on too, and a small action of such a bank plays.
+                do
+                    local LADDER, VAN, BK = "Animation/Props/Ladder/motlist/Ladder.motlist", "Animation/SetModel/sm0003/motlist/sm0003.motlist", "Animation/Enemy/Grab/motlist/Grab.motlist"
+                    local DYN = {
+                        [LADDER] = { { id = 5, name = "LadderUpL", frames = 20 }, { id = 6, name = "pl0000_Hands_Ladder-Up_L", frames = 40 },
+                            { id = 7, name = "pl0000_Interact_Direct", frames = 30 }, { id = 8, name = "SomePropTree", frames = 20 } },
+                        [VAN] = { { id = 2, name = "pl0000_Interact_RemoveTotan", frames = 90 } },
+                        [BK] = { { id = 3, name = "pl0000_Hands_Grab_Start", frames = 30 } },
+                    }
+                    local JCLIPS = {}
+                    for _, c in ipairs(CLIPS) do JCLIPS[#JCLIPS + 1] = c end
+                    JCLIPS[#JCLIPS + 1] = { bank = 0, id = 9012, name = "pl0000_Hands_DoorPush_00", frames = 50 }
+                    JCLIPS[#JCLIPS + 1] = { bank = 0, id = 2300, name = "pl0000_Hands_Guard_Loop", frames = 50 }
+                    local env, rec = gworld({ clips = JCLIPS, dyn_lists = DYN })
+                    drive_them(env, "clancy", 80)
+                    local function jtick(env, jmsg, ...) -- (kind 16 is their scripted move / banks; the other arguments are events of kind 7)
+                        local q = { { 7, "e|char|clancy|0.00|0.00|0.00" } }
+                        for i = 1, select("#", ...) do local e = select(i, ...) if e then q[#q + 1] = { 7, e .. "|0.00|0.00|0.00" } end end
+                        if jmsg then q[#q + 1] = { 16, jmsg } end
+                        push_msgs(env, q)
+                        live(env, 0.3)
+                        drive(env, 1)
+                    end
+                    local function sm() return section(env, "motion_banks").scripted_moves end
+                    check(last_play(rec) == "0/3" and #rec.motion.dyn == 0, "(10.14 jack) setup: they stand, the idle clip plays and the body has no added bank: " .. tostring(last_play(rec)))
+                    -- the list arrives first (clip -1: no clip yet) and is added as bank 30 (overwrite), then setupMotionBank
+                    local setup0 = rec.motion.setup
+                    for i = 1, 3 do jtick(env, i == 1 and "j|-1|" .. LADDER or nil) end
+                    check(#rec.motion.dyn == 1 and rec.motion.dyn[1].bank == 30 and rec.motion.dyn[1].path == LADDER and rec.motion.dyn[1].ow == true,
+                        "(10.14 jack) their move's list is added to the body as bank 30, overwriting the id: " .. tostring(rec.motion.dyn[1] and rec.motion.dyn[1].path))
+                    check(rec.motion.dyn_log[1] == "count 0" and rec.motion.dyn_log[2] == "count 1" and rec.motion.dyn_log[3] == "bank 0 30 ow true" and rec.motion.setup == setup0 + 1,
+                        "(10.14 jack) ...by resetting the count, adding it and setting the banks up once: " .. table.concat(rec.motion.dyn_log, ",") .. " setups " .. tostring(rec.motion.setup) .. "/" .. tostring(setup0))
+                    check(sm().theirs and sm().theirs.path == LADDER and sm().on_the_body and sm().on_the_body[30] == LADDER and sm().counts.added == 1, "(10.14 jack) ...and the debug file says so")
+                    check(last_play(rec) == "0/3", "(10.14 jack) no clip told yet: layer 0 keeps its idle clip: " .. tostring(last_play(rec)))
+                    -- a number of the list that is a tree node of the prop plays as the character's clip of the same name
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|5|" .. LADDER or nil) end
+                    check(last_play(rec) == "30/6", "(10.14 jack) their entry 5 (LadderUpL) plays as the clip of that name in the list (30/6, pl0000_Hands_Ladder-Up_L): " .. tostring(last_play(rec)))
+                    local g = section(env, "game_motion")
+                    check(g.counts.scripted >= 1 and g.playing_now and g.playing_now.how == "scripted move" and g.by_state.scripted and g.by_state.scripted.now:find("30/6", 1, true),
+                        "(10.14 jack) ...and the debug file says it came from their scripted move: " .. tostring(g.playing_now and g.playing_now.how))
+                    check(sm().counts.mapped == 1 and sm().counts.unmappable == 0, "(10.14 jack) ...counted as mapped: " .. tostring(sm().counts.mapped))
+                    -- an entry that is a character's clip plays as it is
+                    for i = 1, 4 do jtick(env, i == 1 and "j|7|" .. LADDER or nil) end
+                    check(last_play(rec) == "30/7", "(10.14 jack) an entry named pl... plays as it is: " .. tostring(last_play(rec)))
+                    -- an entry that maps to nothing is not played (the T pose): the body keeps its own idle, and their layer-0 pair is NOT read as an Ethan clip meanwhile
+                    for i = 1, 6 do jtick(env, i % 3 == 1 and "j|8|" .. LADDER or nil, i % 3 == 1 and "e|mot|7_21_gun_reload.2" or nil) end
+                    check(last_play(rec) == "0/3" and rec.motion.type == 0, "(10.14 jack) an entry that maps to nothing is not played; their 'mot' pair is ignored while the move lasts: " .. tostring(last_play(rec)) .. " set " .. tostring(rec.motion.type))
+                    check(sm().counts.unmappable == 1 and sm().counts.held >= 1, "(10.14 jack) ...and counted: " .. tostring(sm().counts.unmappable))
+                    -- it is over: their pair plays again
+                    jtick(env, "j|-")
+                    for i = 1, 6 do jtick(env, nil, i % 3 == 1 and "e|mot|7_21_gun_reload.2" or nil) end
+                    check(last_play(rec) == "7/21" and sm().theirs == nil, "(10.14 jack) when the move is over their own pair plays again: " .. tostring(last_play(rec)))
+                    for _ = 1, 14 do jtick(env) end
+                    check(last_play(rec) == "0/3", "(10.14 jack) ...and then the idle clip: " .. tostring(last_play(rec)))
+                    -- no news for a few seconds (a lost 'over' message): taken as over by itself
+                    for i = 1, 3 do jtick(env, i == 1 and "j|6|" .. LADDER or nil) end
+                    check(last_play(rec) == "30/6", "(10.14 jack) a clip that is a character's plays: " .. tostring(last_play(rec)))
+                    for _ = 1, 20 do jtick(env) end
+                    check(last_play(rec) == "0/3" and sm().theirs == nil, "(10.14 jack) with no news for 4 s the move is taken as over: " .. tostring(last_play(rec)))
+                    -- another move's list replaces it: the count is reset and the bank added again, once
+                    jtick(env, "j|-1|" .. VAN)
+                    check(#rec.motion.dyn == 1 and rec.motion.dyn[1].path == VAN and sm().counts.rebuilds == 2, "(10.14 jack) another move's list replaces the first (bank 30 again): " .. tostring(rec.motion.dyn[1] and rec.motion.dyn[1].path) .. " rebuilds " .. tostring(sm().counts.rebuilds))
+                    for i = 1, 6 do jtick(env, i % 3 == 1 and "j|2|" .. VAN or nil) end
+                    check(last_play(rec) == "30/2" and sm().counts.rebuilds == 2, "(10.14 jack) ...its clip plays (the sheet metal: 30/2) and the same list again changes nothing: " .. tostring(last_play(rec)) .. " rebuilds " .. tostring(sm().counts.rebuilds))
+                    jtick(env, "j|-")
+                    -- messages that are not understood are counted and change nothing
+                    local bad0 = sm().counts.bad
+                    for _, t in ipairs({ "j|x|" .. VAN, "j|3|../../etc/passwd.motlist", "j|3|bad path.motlist", "j|99999|" .. VAN, "b|99|1|" .. VAN, "b|30|1|" .. VAN, "b|9|2|" .. VAN, "b|9|1|C:/x.motlist" }) do jtick(env, t) end
+                    check(sm().counts.bad == bad0 + 8 and sm().theirs == nil and #rec.motion.dyn == 1, "(10.14 jack) bad lists, ids and numbers are counted and ignored: " .. tostring(sm().counts.bad - bad0) .. " of 8")
+                    -- the banks their game added (3 and up): their small action of one of them waits for the bank (it is not failed), and plays once it is here
+                    local ap0 = #rec.motion.act_plays
+                    for i = 1, 4 do jtick(env, nil, i % 3 == 1 and "e|act|4_9_3_3_1" or nil) end
+                    local g2 = section(env, "game_motion")
+                    check(#rec.motion.act_plays == ap0 and (g2.counts.act_missing or 0) == 0 and (g2.small_action.last or ""):find("waiting for their bank 9", 1, true),
+                        "(10.14 bank) a small action of a bank that is not here yet waits, and is not marked as failed: " .. tostring(g2.small_action.last))
+                    for i = 1, 4 do jtick(env, i == 1 and "b|9|1|" .. BK or nil, "e|act|4_9_3_3_1") end
+                    local a1 = rec.motion.act_by[1] or {}
+                    check(a1[#a1] == "9/3" and #rec.motion.dyn == 2 and rec.motion.dyn[1].bank == 9 and rec.motion.dyn[2].bank == 30,
+                        "(10.14 bank) their added bank 9 goes on the body (with the last move's list), and the action plays from it: " .. tostring(a1[#a1]) .. " banks " .. #rec.motion.dyn)
+                    check(sm().counts.banks_got == 1 and sm().their_banks[9] and sm().their_banks[9].path == BK, "(10.14 bank) ...the debug file lists their banks")
+                    jtick(env, nil, "e|act|0_0_0_0_0")
+                    -- the SECOND small action goes on the third layer with its own mask, the first on the second layer
+                    for i = 1, 8 do jtick(env, nil, "e|act|4_0_9012_3_1", "e|actb|2_0_9012_5_0") end
+                    local a2 = rec.motion.act_by[2] or {}
+                    a1 = rec.motion.act_by[1] or {}
+                    check(a1[#a1] == "0/9012" and a2[#a2] == "0/9012" and rec.motion.layers == 3, "(10.14 act2) the first action plays on layer 1 and the second on layer 2 (three layers): " .. tostring(a1[#a1]) .. " / " .. tostring(a2[#a2]) .. " layers " .. tostring(rec.motion.layers))
+                    check(rec.motion.lay[1].R.mask == 3 and rec.motion.lay[2].R.mask == 5 and rec.motion.lay[2].R.blend == 0 and rec.motion.lay[2].R.rate == 1, "(10.14 act2) ...each with its own mask and blend mode: " .. tostring(rec.motion.lay[1].R.mask) .. " / " .. tostring(rec.motion.lay[2].R.mask))
+                    jtick(env, nil, "e|act|4_0_9012_3_1", "e|actb|0_0_0_0_0")
+                    jtick(env, nil, "e|act|4_0_9012_3_1")
+                    check(rec.motion.lay[2].R.rate == 0 and rec.motion.lay[1].R.rate == 1, "(10.14 act2) when the second one ends only its layer is faded out: " .. tostring(rec.motion.lay[2].R.rate) .. " / " .. tostring(rec.motion.lay[1].R.rate))
+                    local sa = section(env, "motion_banks").small_actions
+                    check(sa.second and sa.second.received >= 2 and sa.second.theirs_now == nil, "(10.14 act2) ...and the debug file counts the second action's events: " .. tostring(sa.second and sa.second.received))
+                    local ign0 = sa.ignored
+                    jtick(env, nil, "e|actb|junk")
+                    check(section(env, "motion_banks").small_actions.ignored == ign0 + 1, "(10.14 act2) a malformed actb event is ignored and counted")
+                    jtick(env, nil, "e|act|0_0_0_0_0")
+                    for _ = 1, 3 do jtick(env) end
+                    -- their BLOCK plays on the arms (their mask: the legs keep walking) when the small-action layer can play it ...
+                    local before_g = (section(env, "game_motion").small_action.their_block_by_the_arms.times) or 0
+                    for i = 1, 8 do jtick(env, nil, "e|mol|0_2300_guard", "e|act|1_0_2300_120_1") end
+                    a1 = rec.motion.act_by[1] or {}
+                    check(a1[#a1] == "0/2300" and last_play(rec) == "0/3", "(10.14 guard) their block plays on the arm layer; layer 0 keeps the walk / idle clip: " .. tostring(a1[#a1]) .. " / layer 0 " .. tostring(last_play(rec)))
+                    check(section(env, "game_motion").small_action.their_block_by_the_arms.times > before_g, "(10.14 guard) ...and the debug file counts it")
+                    jtick(env, nil, "e|mol|0_0_none", "e|act|0_0_0_0_0")
+                    for _ = 1, 3 do jtick(env) end
+                    -- ... and by the whole body (as in 10.4) when it cannot: no mask, so the arms would not be only the arms
+                    for i = 1, 8 do jtick(env, nil, "e|mol|0_2300_guard", "e|act|1_0_2300_0_1") end
+                    check(last_play(rec) == "0/2300", "(10.14 guard) a block with no joint mask plays on layer 0 as before: " .. tostring(last_play(rec)))
+                    jtick(env, nil, "e|mol|0_0_none", "e|act|0_0_0_0_0")
+                    for _ = 1, 3 do jtick(env) end
+                    local gz = section(env, "game_motion")
+                    check(gz.errors == 0 and gz.fails == 0 and sm().last_error == nil, "(10.14 jack) no errors and no failures: " .. tostring(gz.last_error) .. " / " .. tostring(sm().last_error))
+                    -- the panel: a box for it (drawn ticked) and a line saying what is going on; unticking it switches the sharing off
+                    local BOXJ = "Scripted moves: show their van door, ladder, kicks ... (the move's own animation list is added to the body)##jack"
+                    run_ui(env)
+                    check((env.seen_checks or {})[BOXJ] == true, "(10.14 jack) the panel has the box, ticked: " .. tostring((env.seen_checks or {})[BOXJ]))
+                    for _, t in ipairs(env.ui_texts) do check(not t:find("UI error", 1, true), "(10.14 jack) no UI error: " .. t) end
+                    env.check_override[BOXJ] = false
+                    run_ui(env)
+                    check(sm().on == false and sm().last == "switched off in the panel", "(10.14 jack) unticking the box switches the sharing off: " .. tostring(sm().on))
+                end
+                -- (o3) 10.17: a CUTSCENE's list ("c03e20_00_pl0000.motlist": its entry is "c03e20_00_pl0000_000", the 20 Nov files had every cutscene refused) plays as it is; so does the
+                -- player's side of a clip made for two ("..._PL"); a prop's or a weapon's own clip still does not
+                do
+                    local CUT = "Animation/Ingame/c03/c03e20_00/motlist/c03e20_00_pl0000.motlist"
+                    local PROP = "Animation/SetModel/sm0316/motlist/sm0316.motlist"
+                    local TWO = "Animation/Enemy/Grab/motlist/GrabTwo.motlist"
+                    local TAG = "Animation/Ingame/c05/c05e01_00/motlist/c05e01_00.motlist"
+                    local DYN = {
+                        [TAG] = { { id = 0, name = "c05e01_00_pl0000_000", frames = 200 }, { id = 1, name = "c05e01_00_door_pl0000", frames = 80 }, { id = 2, name = "c05e01_00_door", frames = 80 } },
+                        [CUT] = { { id = 0, name = "c03e20_00_pl0000_000", frames = 360 }, { id = 2, name = "em2000_Common_TakeAx_Stand_PL", frames = 120 }, { id = 3, name = "c03e20_00_door", frames = 60 } },
+                        [PROP] = { { id = 0, name = "sm0316_Interact_ChainCut", frames = 90 }, { id = 1, name = "wp1100_Interact_ChainCut", frames = 90 } },
+                        [TWO] = { { id = 4, name = "em5500_SweptBug_PL", frames = 100 }, { id = 5, name = "em5500_SweptBug_EM", frames = 100 } },
+                    }
+                    local env, rec = gworld({ clips = CLIPS, dyn_lists = DYN })
+                    drive_them(env, "clancy", 80)
+                    local function jtick(env, jmsg)
+                        push_msgs(env, { { 7, "e|char|clancy|0.00|0.00|0.00" }, jmsg and { 16, jmsg } or nil })
+                        live(env, 0.3)
+                        drive(env, 1)
+                    end
+                    local function sm() return section(env, "motion_banks").scripted_moves end
+                    for i = 1, 3 do jtick(env, i == 1 and "j|-1|" .. CUT or nil) end
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|0|" .. CUT or nil) end
+                    check(last_play(rec) == "30/0", "(10.17 cutscene) the cutscene's own clip (c03e20_00_pl0000_000) plays as it is: " .. tostring(last_play(rec)))
+                    check(sm().counts.unmappable == 0 and sm().counts.own_other >= 1 and sm().counts.played >= 1, "(10.17 cutscene) ...counted, and not as unmappable: " .. tostring(sm().counts.own_other) .. "/" .. tostring(sm().counts.unmappable))
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|2|" .. CUT or nil) end
+                    check(last_play(rec) == "30/2", "(10.17 cutscene) the player's side of a clip made for two (..._PL) plays as it is: " .. tostring(last_play(rec)))
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|3|" .. CUT or nil) end
+                    check(last_play(rec) == "30/3", "(10.17 cutscene) any entry of the character's own cutscene list plays (the list file ends in _pl0000.motlist): " .. tostring(last_play(rec)))
+                    jtick(env, "j|-")
+                    for _ = 1, 14 do jtick(env) end
+                    -- the actor's tag in the NAME alone (the list file is not the character's own): in the middle and at the end of the name
+                    for i = 1, 3 do jtick(env, i == 1 and "j|-1|" .. TAG or nil) end
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|0|" .. TAG or nil) end
+                    check(last_play(rec) == "30/0", "(10.17 cutscene) an entry with the actor's tag in its name (c05e01_00_pl0000_000) plays in any list: " .. tostring(last_play(rec)))
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|1|" .. TAG or nil) end
+                    check(last_play(rec) == "30/1", "(10.17 cutscene) ...also with the tag at the end of the name: " .. tostring(last_play(rec)))
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|2|" .. TAG or nil) end
+                    check(last_play(rec) == "0/3", "(10.17 cutscene) ...but an entry of that list with no tag (c05e01_00_door) does not: " .. tostring(last_play(rec)))
+                    jtick(env, "j|-")
+                    for _ = 1, 14 do jtick(env) end
+                    -- a prop's list: its own clips do not play (the body keeps its own idle)
+                    for i = 1, 3 do jtick(env, i == 1 and "j|-1|" .. PROP or nil) end
+                    local un0 = sm().counts.unmappable
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|0|" .. PROP or nil) end
+                    check(last_play(rec) == "0/3", "(10.17 cutscene) a prop's own clip (sm0316_Interact_ChainCut) is still not played: " .. tostring(last_play(rec)))
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|1|" .. PROP or nil) end
+                    check(last_play(rec) == "0/3" and sm().counts.unmappable >= un0 + 2, "(10.17 cutscene) ...nor a weapon's (wp1100_Interact_ChainCut): " .. tostring(last_play(rec)) .. " unmappable " .. tostring(sm().counts.unmappable))
+                    jtick(env, "j|-")
+                    for _ = 1, 14 do jtick(env) end
+                    -- the two sides of one clip made for two: only the player's plays
+                    for i = 1, 3 do jtick(env, i == 1 and "j|-1|" .. TWO or nil) end
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|5|" .. TWO or nil) end
+                    check(last_play(rec) == "0/3", "(10.17 cutscene) the enemy's side of a clip made for two (..._EM) is not played: " .. tostring(last_play(rec)))
+                    for i = 1, 8 do jtick(env, i % 3 == 1 and "j|4|" .. TWO or nil) end
+                    check(last_play(rec) == "30/4", "(10.17 cutscene) ...the player's side is (..._PL): " .. tostring(last_play(rec)))
+                    local gz = section(env, "game_motion")
+                    check(gz.errors == 0 and gz.fails == 0 and sm().last_error == nil, "(10.17 cutscene) no errors and no failures")
+                end
+                -- (o2) 10.14: a session that ended inside the scripted-move code switches it off (nothing is added, nothing is played), and the rest of the animation is not touched
+                do
+                    local LADDER = "Animation/Props/Ladder/motlist/Ladder.motlist"
+                    local env, rec = gworld({ dyn_lists = { [LADDER] = { { id = 6, name = "pl0000_Hands_Ladder-Up_L", frames = 40 } } } },
+                        { ["re7mp/lastcall.json"] = { stage = "jack", call = "read the list of my scripted move", session = 1699990000, time = 1700000000 } })
+                    drive_them(env, "clancy", 80)
+                    for i = 1, 6 do
+                        push_msgs(env, { { 7, "e|char|clancy|0.00|0.00|0.00" }, { 16, i == 1 and "j|6|" .. LADDER or nil } })
+                        live(env, 0.3)
+                        drive(env, 1)
+                    end
+                    local sm = section(env, "motion_banks").scripted_moves
+                    check(sm.on == false and #rec.motion.dyn == 0 and last_play(rec) == "0/3" and sm.counts.ignored_off >= 1, "(10.14 jack) after a session that ended inside it nothing of it runs: on=" .. tostring(sm.on) .. " banks " .. #rec.motion.dyn)
+                    local found = false
+                    for _, l in ipairs(env.log) do if l:find("sharing a scripted move", 1, true) then found = true end end
+                    check(found, "(10.14 jack) ...and the journal names what the last session was doing")
+                    check(section(env, "game_motion").state == "playing" or section(env, "game_motion").state == "ready", "(10.14 jack) ...while the game's own clips keep animating the body: " .. tostring(section(env, "game_motion").state))
+                end
+                -- ...not while the game's clips are not driving layer 0 (their body would hold the bind pose), and not when the box is off
+                do
+                    local ACLIPS = {}
+                    for _, c in ipairs(CLIPS) do ACLIPS[#ACLIPS + 1] = c end
+                    ACLIPS[#ACLIPS + 1] = { bank = 0, id = 9012, name = "pl0000_Hands_DoorPush_00", frames = 50 }
+                    local env, rec = gworld({ clips = ACLIPS }, { ["re7mp/settings.json"] = { act_layers = false } })
+                    drive_them(env, "clancy", 80)
+                    for i = 1, 8 do tick(env, i % 3 == 1 and "e|act|4_0_9012_3_1|0.00|0.00|0.00" or nil) end
+                    check(#rec.motion.act_plays == 0 and section(env, "motion_banks").small_actions.on == false, "(10.10 act) with the box off (act_layers false in the settings) nothing is played: " .. #rec.motion.act_plays)
+                    local env2, rec2 = gworld({ clips = ACLIPS }, { ["re7mp/game_motion.json"] = { on = false } })
+                    drive_them(env2, "clancy", 80)
+                    for i = 1, 8 do tick(env2, i % 3 == 1 and "e|act|4_0_9012_3_1|0.00|0.00|0.00" or nil) end
+                    check(rec2.motion_made == nil, "(10.10 act) with the game clips off no Motion is made for an action: " .. tostring(rec2.motion_made))
+                end
+            end
+        end
     end
 
     -- ===== 9.31: ENEMY MODELS (the host's enemies as their real models, red box as the fallback) and loading a model by its file path =====
@@ -11675,7 +12571,7 @@ do
         local nmade = #rec.made
         steps(env, { { "Em3000", 9, 6, 8200 } }, 12)
         check(#rec.made == nmade and pd(env).on == false, "(9.31) with the box unticked no model is made")
-        check(env.files["re7mp/settings.json"].pup_on == false, "(9.31) ...and the choice is remembered")
+        check(env.files["re7mp/settings.json"].pup_on2 == false, "(9.31) ...and the choice is remembered (10.21: under the key pup_on2)")
         env.check_override[EM_BOX] = true
         run_ui(env)
         steps(env, { { "Em3000", 9, 6, 8200 } }, 16)
@@ -11698,6 +12594,51 @@ do
             check(not made_has(recp, "re7mp_pup_Em3000"), "(9.31) a parked enemy (Em3000, flag 3) gets no model: " .. table.concat(recp.made, ","))
             steps(envp, { { "Em3000", 5, 6, 8200, 1 } }, 24)
             check(made_has(recp, "re7mp_pup_Em3000"), "(9.31) ...and once it is no longer parked it does")
+        end
+
+        -- (a5) 10.21 (the 22 Nov screenshot: the real Mia and a T-posed model of her side by side): the models are OFF until the box is ticked, an old saved "true" does not count,
+        -- and no model is ever made for an enemy whose real body this game has moved onto the host's (mode 3). The red box is not drawn over such a body either.
+        do
+            local env0, rec0 = setup(nil, { no_lab = true, role = "join", enemy_models = { "Em3000" }, default_pup = true })
+            env0.resources = { made = {}, refuse = {} }
+            steps(env0, { { "Em3000", 5, 6, 8200 } }, 24)
+            check(not made_has(rec0, "re7mp_pup_Em3000"), "(10.21) nothing ticked: no stand-in model is made: " .. table.concat(rec0.made, ","))
+            local p0 = pd(env0)
+            check(p0.on == false and #p0.models == 0, "(10.21) ...and the debug file says the models are off (on=" .. tostring(p0.on) .. ", " .. #p0.models .. " model rows)")
+            local l0 = env0.lines
+            steps(env0, { { "Em3000", 5, 6, 8200 } }, 4) -- (the host's list is fed again: with no data for 3 s nothing is drawn at all)
+            local box_lines = env0.lines - l0
+            check(box_lines > 0, "(10.21) ...and the red box is the picture (the fallback that was always there): " .. box_lines .. " lines in a second")
+            local envo, reco = setup({ ["re7mp/settings.json"] = { pup_on = true } }, { no_lab = true, role = "join", enemy_models = { "Em3000" }, default_pup = true })
+            envo.resources = { made = {}, refuse = {} }
+            steps(envo, { { "Em3000", 5, 6, 8200 } }, 24)
+            check(not made_has(reco, "re7mp_pup_Em3000"), "(10.21) the OLD saved key (pup_on = true, saved for everybody by the old default) is not read: " .. table.concat(reco.made, ","))
+            envo.check_override[EM_BOX] = true
+            run_ui(envo)
+            steps(envo, { { "Em3000", 5, 6, 8200 } }, 24)
+            check(made_has(reco, "re7mp_pup_Em3000") and envo.files["re7mp/settings.json"].pup_on2 == true, "(10.21) ticking the box makes the model and saves the choice as pup_on2")
+
+            -- mode 3 with a real body of that name in this game: it is moved onto the host's, and no model is made beside it
+            local env3, rec3 = setup(nil, { no_lab = true, role = "join", enemy_models = { "Em3000" } }) -- (this world ticks the box)
+            env3.resources = { made = {}, refuse = {} }
+            env3.combo_override["Enemy sync"] = 3
+            run_ui(env3)
+            steps(env3, { { "Em3000", 5, 6, 8200 } }, 40)
+            check(log_has(env3, "enemy sync: now moving my Em3000 onto the host's"), "(10.21) mode 3: my own Em3000 is moved onto the host's")
+            check(not made_has(rec3, "re7mp_pup_Em3000"), "(10.21) ...and NO stand-in model is made beside it (the T-pose of the screenshot): " .. table.concat(rec3.made, ","))
+            local p3 = pd(env3)
+            local listed = false
+            for _, n in ipairs(p3.real_body_there_so_no_model or {}) do if n == "Em3000" then listed = true end end
+            check(listed, "(10.21) ...and the debug file names it as 'a real body is there, so no model'")
+            local l3 = env3.lines
+            steps(env3, { { "Em3000", 5, 6, 8200 } }, 4)
+            check(env3.lines - l3 < box_lines, "(10.21) ...and the red box is not drawn over the real body (" .. (env3.lines - l3) .. " lines, against " .. box_lines .. " with the box)")
+            check(texts_have(env3, "Em3000  HP 8200"), "(10.21) ...the label stays (it says what the enemy is and its health)")
+            -- the real body goes away (mode 3 lowered to 2): the model is allowed again, so the suppression is tied to the real body, not for good
+            env3.combo_override["Enemy sync"] = 2
+            run_ui(env3)
+            steps(env3, { { "Em3000", 5, 6, 8200 } }, 40)
+            check(made_has(rec3, "re7mp_pup_Em3000"), "(10.21) mode 3 off again: with no real body there the (ticked) model is made after all")
         end
 
         -- (a4) one model per step: two enemies that both need a model are made one after the other, never in the same frame
@@ -11890,22 +12831,40 @@ do
         check(#pd(envf).models == 0, "(9.31) an enemy 90 m away gets no model")
 
         -- (g) the last session ended inside a make / a load: both are switched off, the file says so
-        local envp = setup({ ["re7mp/lastcall.json"] = { stage = "puppet", call = "making Em3000", session = 1, time = os.time() } }, { no_lab = true, role = "join" })
+        -- (10.21) the player had the models ticked (remembered as pup_on2 = true): the crash marker still wins for this session
+        local envp = setup({ ["re7mp/lastcall.json"] = { stage = "puppet", call = "making Em3000", session = 1, time = os.time() }, ["re7mp/settings.json"] = { pup_on2 = true } }, { no_lab = true, role = "join", default_pup = true })
         local pp = pd(envp)
-        check(pp.on == false and pp.previous_session_ended_in_a_make == true and log_has(envp, "making an enemy model"), "(9.31) the last session ended while making an enemy model: switched off this time")
-        local envq2 = setup({ ["re7mp/lastcall.json"] = { stage = "loader", call = "mesh Character/Enemy/em3000/em3000/em3000.mesh", session = 1, time = os.time() } }, { no_lab = true, role = "join" })
+        check(pp.on == false and pp.remembered_choice == true and pp.off_by_the_crash_marker == true and pp.previous_session_ended_in_a_make == true and log_has(envp, "making an enemy model"), "(9.31) the last session ended while making an enemy model: switched off this time")
+        do -- (10.21) ticking the box by hand clears the marker: the models are allowed again
+            envp.check_override[EM_BOX] = true
+            run_ui(envp)
+            local pp2 = pd(envp)
+            check(pp2.on == true and pp2.off_by_the_crash_marker == nil, "(10.21) ...and ticking the box again clears the marker: the models are on again (" .. tostring(pp2.on) .. ")")
+        end
+        -- (10.21) the player had loading by path on (a settings file that already exists): the "off" of the marker must be written to it, or the next start has the loader on again
+        local envq2 = setup({ ["re7mp/lastcall.json"] = { stage = "loader", call = "mesh Character/Enemy/em3000/em3000/em3000.mesh", session = 1, time = os.time() }, ["re7mp/settings.json"] = { load_by_path = true } }, { no_lab = true, role = "join", default_pup = true })
         local _, lq = pd(envq2)
         check(lq.on == false and lq.previous_session_ended_in_a_load == true and log_has(envq2, "loader: switched off"), "(9.31) the last session ended while loading a file: the loader is switched off this time")
         check(envq2.files["re7mp/settings.json"].load_by_path == false, "(9.31) ...and it stays off until the player ticks the box")
-        -- fresh start: both on
+        do -- (10.21) the same from a COMPLETE settings file, the kind a first session writes (the world above changes some setting by itself, which writes the whole file anyway)
+            local env1 = setup(nil, { no_lab = true, role = "join" }) -- the models box is ticked here: the script saves its settings
+            for _ = 1, 60 do run_frames(env1, 0.05) bump_remote(env1) end
+            local saved = env1.files["re7mp/settings.json"]
+            check(saved ~= nil and saved.load_by_path == true and saved.pup_on2 == true, "(10.21) (set-up) a first session saved a complete settings file with the loader on")
+            local envq3 = setup({ ["re7mp/lastcall.json"] = { stage = "loader", call = "mesh Character/Enemy/em3000/em3000/em3000.mesh", session = 1, time = os.time() }, ["re7mp/settings.json"] = saved },
+                { no_lab = true, role = "join", default_pup = true })
+            local _, lq3 = pd(envq3)
+            check(lq3.on == false and envq3.files["re7mp/settings.json"].load_by_path == false, "(10.21) the loader switched off by a crash marker is written to a settings file that already existed (else the next start has it on again)")
+        end
+        -- fresh start: the loader is on by default; the models are off by default since 10.21 (this world ticks the box, as a player does)
         local pf, lf = pd(setup(nil, { no_lab = true, role = "join" }))
-        check(pf.on == true and lf.on == true, "(9.31) by default both are on (the red box is the fallback)")
+        check(pf.on == true and lf.on == true, "(9.31) the loader is on by default, and so are the models once the box is ticked (10.21: they are off until then)")
         -- saved choices
-        local pg, lg = pd(setup({ ["re7mp/settings.json"] = { pup_on = false, load_by_path = false, pup_box_too = true } }, { no_lab = true, role = "join" }))
+        local pg, lg = pd(setup({ ["re7mp/settings.json"] = { pup_on2 = false, load_by_path = false, pup_box_too = true } }, { no_lab = true, role = "join", default_pup = true }))
         check(pg.on == false and lg.on == false and pg.box_too == true, "(9.31) saved choices are used at the next start")
 
         ;(function(setup, steps, pd, made_has, destroyed_has, LOAD_BOX) -- (its own function: the main chunk is at the 200-locals limit)
-        -- ===== 9.36: the head comes after the body has loaded; slow and never-loading meshes; the every-5-seconds check; the loopback bot's enemy picker =====
+        -- ===== 9.36: the head comes after the body has loaded; slow and never-loading meshes; the every-5-seconds check; Ethan's friend's enemy picker =====
         local T9 = {
             mc = function(e) return e.files["re7mp/debug.json"].health.model_check end,
             mt = function(e) return e.files["re7mp/debug.json"].health.model_table end,
@@ -11992,18 +12951,18 @@ do
             local v = (function() pd(e9) return T9.mc(e9) end)()
             check(v.texture_check.works == false and v.findings == 0 and v.fixes == 0, "(9.36) an engine with no texture getters: the check stops asking and flags nothing")
         end
-        do -- (h) the interval: 5 s while an enemy is near, 10 s while none is (the loopback bot's do not count)
+        do -- (h) the interval: 5 s while an enemy is near, 10 s while none is (Ethan's friend's do not count)
             local e9, r9 = setup(nil, { no_lab = true, role = "join", enemy_models = { "Em3000" } })
             steps(e9, { { "Em3000", 5, 6, 8200 } }, 4 * 14)
             local v1 = (function() pd(e9) return T9.mc(e9) end)()
-            check(v1.interval_now_s == 5 and v1.quiet_now == false and v1.runs >= 2, "(9.36) an enemy near: checked every 5 s (runs " .. tostring(v1.runs) .. ")")
+            check(v1.interval_now_s == 3 and v1.quiet_now == false and v1.runs >= 2, "(9.36, 10.4: 3 s) an enemy near: checked every 3 s (runs " .. tostring(v1.runs) .. ")")
             steps(e9, {}, 4 * 12)
             local v2 = (function() pd(e9) return T9.mc(e9) end)()
-            check(v2.interval_now_s == 10 and v2.quiet_now == true, "(9.36) no enemy near: every 10 s")
-            e9.files["re7mp_in.json"].name = "Loopback Bot"
+            check(v2.interval_now_s == 8 and v2.quiet_now == true, "(9.36, 10.4: 8 s) no enemy near: every 8 s")
+            e9.files["re7mp_in.json"].name = "Ethan's friend"
             steps(e9, { { "Em3000", 5, 6, 8200 } }, 4 * 10)
             local v3 = (function() pd(e9) return T9.mc(e9) end)()
-            check(v3.interval_now_s == 10 and v3.quiet_now == true and v3.enemies_near_now == 0, "(9.36) the loopback bot's enemies do not count as enemies near: still every 10 s")
+            check(v3.interval_now_s == 8 and v3.quiet_now == true and v3.enemies_near_now == 0, "(9.36, 10.4: 8 s) Ethan's friend's enemies do not count as enemies near: still every 8 s")
         end
         do -- (i) the check can be switched off, and a session that ended inside a check starts with it off
             local e9 = setup({ ["re7mp/lastcall.json"] = { stage = "verify", call = "Em3000", session = 1, time = os.time() } }, { no_lab = true, role = "join", enemy_models = { "Em3000" } })
@@ -12011,9 +12970,9 @@ do
             local v = (function() pd(e9) return T9.mc(e9) end)()
             check(v.on == false and v.switched_off_because and v.runs == 0 and log_has(e9, "was checking a model it made"), "(9.36) the last session ended inside a check: it is off this time, and the journal says so")
         end
-        do -- (j) the picker: the loopback bot's circling Em3000 is drawn as the chosen model
+        do -- (j) the picker: Ethan's friend's circling Em3000 is drawn as the chosen model
             local e9, r9 = setup(nil, { no_lab = true, role = "join", enemy_models = { "Em3000", "Em2000" } })
-            e9.files["re7mp_in.json"].name = "Loopback Bot"
+            e9.files["re7mp_in.json"].name = "Ethan's friend"
             steps(e9, { { "Em3000", 5, 6, 8200 }, { "Em9998", 9, 9, 40 } }, 4 * 6)
             check(made_has(r9, "re7mp_pup_Em3000"), "(9.36) before any pick: the bot's circling Em3000 is Jack")
             local pick = "Model##botmodel"
@@ -12036,7 +12995,7 @@ do
             local r_unknown = T9.row_of(t2, "Em9900")
             check(r_unknown and r_unknown.verdict == "NOT COLLECTED yet" and #t2.still_to_collect > 0, "(9.36) a model with no meshes collected and no known files is listed as still to collect")
             check(T9.row_of(t2, "Em3200").files_known == true and T9.row_of(t2, "Em3200").verdict == "files known, not tried yet", "(9.36) a model with known files that was not tried says so")
-            -- it is not the loopback bot: the pick does not change a real enemy's model
+            -- it is not Ethan's friend: the pick does not change a real enemy's model
             local e10, r10 = setup(nil, { no_lab = true, role = "join", enemy_models = { "Em3000", "Em2000" } })
             e10.combo_override[pick] = idx
             e10.ui_press["Clear the debug log"] = true
@@ -12082,9 +13041,9 @@ do
             e9.resources = { made = {}, refuse = {} }
             e9.check_override[LOAD_BOX] = true
             run_ui(e9)
-            steps(e9, { { "Em3200", 5, 6, 9000 } }, 4 * 3)
+            steps(e9, { { "Em3200", 5, 6, 9000 } }, 4 * 2)
             local row = T9.row_of((function() pd(e9) return T9.mt(e9) end)(), "Em3200")
-            check(row == nil or row.check == nil or not tostring(row.check):find("MaterialReady", 1, true), "(9.37) 3 s after it was made, a model's missing materials are not yet in the table: " .. tostring(row and row.check))
+            check(row == nil or row.check == nil or not tostring(row.check):find("MaterialReady", 1, true), "(9.37, 10.4: grace 3 s) 2 s after it was made, a model's missing materials are not yet in the table: " .. tostring(row and row.check))
         end
         do -- (o) 9.37: Pete Walken and Andre Stickland are characters: the other player can say so, my choice reaches them, and the body is made from their files
             local envw = setup(nil, { no_lab = true })
@@ -12593,27 +13552,7 @@ do
 end
 
 
--- 9.28: the cutscene probe is remembered; damaged values in the settings file are ignored
-do
-    local function boot(settings)
-        local env = new_environment()
-        build_world(env)
-        env.files["re7mp/settings.json"] = settings
-        load_script(env)
-        host_role_files(env, "host", "tcp")
-        for _ = 1, 160 do run_frames(env, 0.05) bump_remote(env) end
-        env.ui_press["Clear the debug log"] = true
-        run_ui(env)
-        for _ = 1, 60 do run_frames(env, 0.05) bump_remote(env) end
-        return env, env.files["re7mp/debug.json"] and env.files["re7mp/debug.json"].health.cutscenes
-    end
-    local e1, c1 = boot({ cutscene_probe = true, cutscene_secs = 12 })
-    check(c1 and c1.on == true and c1.seconds == 12 and e1.hooks["app.GameManager.requestEvent"] ~= nil, "(9.28) a remembered cutscene probe is on at the next start, with its length, and hooks requestEvent")
-    local e2, c2 = boot({ cutscene_probe = "yes", cutscene_secs = 500 })
-    check(c2 and c2.on == false and c2.seconds == 25 and e2.hooks["app.GameManager.requestEvent"] == nil, "(9.28) a switch that is not true/false and a length outside 5..40 are ignored: nothing hooked")
-    local e3, c3 = boot({ cutscene_probe = false, cutscene_secs = 7.4 })
-    check(c3 and c3.on == false and c3.seconds == 7, "(9.28) a length with decimals is rounded")
-end
+-- (10.22) the 9.28 checks of the remembered cutscene probe went with the probe
 
 
 
@@ -13072,31 +14011,43 @@ do
     end
     local function dmg_of(m) return m and tonumber(m:match("^x|%w+|(%d+)|")) end
     local function press_hit(env) env.ui_press["Test: hit the red box I am aiming at"] = true run_ui(env) live(env, 0.3) end
-    -- off by default: the number stays what it was (210)
+    -- (10.21) ON by default: the held gun's table damage x the scale (M19: 120 x 2.1 = 252)
     local j0 = joiner("Handgun_M19")
     press_hit(j0)
-    check(dmg_of(xs(j0)[1]) == 210, "(9.31) 'by gun' is off at start: the hit does the old 210 whatever is held: " .. tostring(xs(j0)[1]))
+    check(dmg_of(xs(j0)[1]) == 252, "(10.21) 'by gun' is ON at start: the hit does the held gun's damage (M19 120 x 2.1 = 252): " .. tostring(xs(j0)[1]))
+    -- switched off in the settings (the new key hit_by_gun2): the number stays what it was (210) whatever is held
+    local j0b = joiner("Handgun_M19", { hit_by_gun2 = false })
+    press_hit(j0b)
+    check(dmg_of(xs(j0b)[1]) == 210, "(10.21) hit_by_gun2 = false: the flat 210 whatever is held: " .. tostring(xs(j0b)[1]))
+    -- the OLD key (hit_by_gun = false, saved for everybody by the old default) is not read: it must not switch the new default off
+    local j0c = joiner("Handgun_M19", { hit_by_gun = false })
+    press_hit(j0c)
+    check(dmg_of(xs(j0c)[1]) == 252, "(10.21) the old saved key hit_by_gun = false is ignored: " .. tostring(xs(j0c)[1]))
     -- on: table damage x 2.1 (M19 120 -> 252), the upgraded 360 -> 756, an unknown gun -> the old number
-    local j1 = joiner("Handgun_M19", { hit_by_gun = true })
+    local j1 = joiner("Handgun_M19", { hit_by_gun2 = true })
     press_hit(j1)
     check(dmg_of(xs(j1)[1]) == 252, "(9.31) 'by gun' on: Handgun_M19 (120) x 2.1 = 252: " .. tostring(xs(j1)[1]))
-    local j2 = joiner("Magnum", { hit_by_gun = true })
+    local j2 = joiner("Magnum", { hit_by_gun2 = true })
     press_hit(j2)
     check(dmg_of(xs(j2)[1]) == HITMAX, "(9.31) the Magnum (1200 x 2.1 = 2520) is kept to the hit limit (" .. HITMAX .. "): " .. tostring(xs(j2)[1]))
-    local j3 = joiner("Knife", { hit_by_gun = true })
+    local j3 = joiner("Knife", { hit_by_gun2 = true })
     press_hit(j3)
     check(dmg_of(xs(j3)[1]) == 210, "(9.31) a knife in hand has no gun damage: the old number: " .. tostring(xs(j3)[1]))
-    local j4 = joiner(nil, { hit_by_gun = true })
+    local j4 = joiner(nil, { hit_by_gun2 = true })
     press_hit(j4)
     check(dmg_of(xs(j4)[1]) == 210, "(9.31) no gun known: the old number: " .. tostring(xs(j4)[1]))
-    local j5 = joiner("Handgun_M19", { hit_by_gun = true, hit_gun_scale = 1.0 })
+    local j5 = joiner("Handgun_M19", { hit_by_gun2 = true, hit_gun_scale = 1.0 })
     press_hit(j5)
     check(dmg_of(xs(j5)[1]) == 120, "(9.31) a saved scale of 1.0 gives the table's 120: " .. tostring(xs(j5)[1]))
-    local j6 = joiner("Handgun_M19", { hit_by_gun = true, hit_gun_scale = 99 })
+    local j6 = joiner("Handgun_M19", { hit_by_gun2 = true, hit_gun_scale = 99 })
     press_hit(j6)
     check(dmg_of(xs(j6)[1]) == 252, "(9.31) a saved scale of 99 is out of range and ignored (2.1): " .. tostring(xs(j6)[1]))
     -- the panel's box and slider
     local j7 = joiner("Handgun_M19")
+    j7.check_override[GUNBOX] = false -- (10.21: it starts ticked, so the panel test unticks it first)
+    run_ui(j7)
+    press_hit(j7)
+    check(dmg_of(xs(j7)[#xs(j7)]) == 210, "(10.21) unticking the box in the panel gives the flat 210 again: " .. tostring(xs(j7)[#xs(j7)]))
     j7.check_override[GUNBOX] = true
     run_ui(j7)
     press_hit(j7)
@@ -13108,7 +14059,34 @@ do
     check(dmg_of(xs(j7)[#xs(j7)]) == 360, "(9.31) the slider at 3.0 gives 120 x 3 = 360: " .. tostring(xs(j7)[#xs(j7)]))
     live(j7, 6)
     local sj = j7.files["re7mp/settings.json"]
-    check(sj and sj.hit_by_gun == true and sj.hit_gun_scale == 3.0, "(9.31) ...and both are remembered: " .. tostring(sj and sj.hit_by_gun) .. " " .. tostring(sj and sj.hit_gun_scale))
+    check(sj and sj.hit_by_gun2 == true and sj.hit_gun_scale == 3.0, "(9.31) ...and both are remembered (10.21: the box under hit_by_gun2): " .. tostring(sj and sj.hit_by_gun2) .. " " .. tostring(sj and sj.hit_gun_scale))
+    -- (10.21) the debug file and the panel say which gun each shot used: three M19 shots and one Magnum shot
+    do
+        local jd = joiner("Handgun_M19")
+        press_hit(jd) press_hit(jd) press_hit(jd)
+        jd.ui_press["Clear the debug log"] = true
+        run_ui(jd)
+        live(jd, 1.5)
+        local g = jd.files["re7mp/debug.json"].health.enemy_hits.by_gun
+        local row
+        for _, r in ipairs(g.sent_by_gun or {}) do if r.gun == "Handgun_M19" then row = r end end
+        check(g.on == true and row and row.shots == 3 and row.damage_sent == 252, "(10.21) the debug file lists what each gun sent: " .. tostring(row and (row.shots .. " shots of " .. row.damage_sent)))
+        check(g.last_gun == "Handgun_M19" and g.flat_number_shots == 0 and g.by_gun_on_but_no_known_gun_shots == 0, "(10.21) ...the last gun, and no flat shots: " .. tostring(g.last_gun) .. " " .. tostring(g.flat_number_shots))
+        check(ui_has(jd, "Last shot used: Handgun_M19"), "(10.21) ...and the panel line names the gun of the last shot")
+        local jk = joiner("Knife", { hit_by_gun2 = true })
+        press_hit(jk)
+        jk.ui_press["Clear the debug log"] = true
+        run_ui(jk)
+        live(jk, 1.5)
+        local gk = jk.files["re7mp/debug.json"].health.enemy_hits.by_gun
+        check(gk.by_gun_on_but_no_known_gun_shots == 1 and #(gk.sent_by_gun or {}) == 0, "(10.21) a knife in hand counts as an unknown-gun shot (flat number sent): " .. tostring(gk.by_gun_on_but_no_known_gun_shots))
+        local jf = joiner("Handgun_M19", { hit_by_gun2 = false })
+        press_hit(jf)
+        jf.ui_press["Clear the debug log"] = true
+        run_ui(jf)
+        live(jf, 1.5)
+        check(jf.files["re7mp/debug.json"].health.enemy_hits.by_gun.flat_number_shots == 1, "(10.21) with the box off the shot counts as a flat-number shot")
+    end
     for k in pairs(weapons_by_type) do weapons_by_type[k] = nil end
 
     -- ---- friendly fire ----
@@ -14159,7 +15137,7 @@ do
     live(rx, 0.5)
     check((last_of(rx, 10) or ""):match("^d|Herb|1|") ~= nil and (last_of(rx, 10) or ""):find("too far", 1, true) == nil, "(9.32 3 m) a drop message is not a gift and is not refused for the distance: " .. tostring(last_of(rx, 10)))
 
-    -- ---- the panel's receive test is not held to the rule (the loopback bot is not next to me) ----
+    -- ---- the panel's receive test is not held to the rule (Ethan's friend is not next to me) ----
     local lt = world() -- (the test world's other player is 5 m away)
     check(stack_of(lt, "Herb") == 3, "(9.32 3 m) setup for the receive test: 3 Herb, the other player 5 m away")
     lt.ui_press["Test: receive 1 Herb as if Bob gave it"] = true
@@ -14953,6 +15931,122 @@ do
         for _, l in ipairs(e9.texts or {}) do if tostring(l):find("started the cutscene", 1, true) then shown9 = true end end
         check(not shown9 and log_has(e9, "started the cutscene c03e03_00"), "(9.33 story) the story messages are not shown at the top left by default (the journal has them)")
     end
+
+    -- ---- 10.13: cutscene MARKERS (Pos_<cutscene>_<actor>): looked up, told to the other player, checked before FORCE plays, listed ----
+    do
+        local function add_markers(env, list)
+            for _, m in ipairs(list) do env.scene_objects[#env.scene_objects + 1] = make_go(m[1], vec(m[2], m[3], m[4]), {}) end
+            env.scene = make_scene(env.scene_objects)
+        end
+        local function mworld(role, markers)
+            return fworld(role, { prep = function(env) add_markers(env, markers or {}) end })
+        end
+        local MIA = { { "Pos_c03e03_00_em2000", 10, 0, 10 }, { "Pos_c03e03_00_pl2000", 11, 0, 10 } }
+        local OTHER = { "Pos_c03e09_00_em3000", 40, 0, 0 }
+        local function mdbg(env) local _, st = fdbg(env) return st.markers end
+
+        -- a cutscene that starts HERE: its markers (and only its markers) are found, kept for the file, and told first (kind 15), then the story message
+        local es, rs = mworld("host", { MIA[1], MIA[2], OTHER })
+        tick(es, false)
+        es.hooks[HOOK](sargs("c03e03_00", 1, 0, 1))
+        live(es, 0.5)
+        local m15 = messages_of_kind(es, 15)
+        check(#m15 == 1 and m15[1]:find("^c03e03_00|2|em2000@10.0,0.0,10.0|pl2000@11.0,0.0,10.0$") ~= nil, "(10.13 markers) the markers of the cutscene are told to the other player (kind 15): " .. tostring(m15[1]))
+        check(#messages_of_kind(es, 12) == 1, "(10.13 markers) ...and the cutscene message itself still goes out")
+        local mk = mdbg(es)
+        local rec1 = mk and mk.per_cutscene and mk.per_cutscene[1]
+        check(mk and mk.scans == 1 and mk.sent == 1 and rec1 and rec1.id == "c03e03_00" and rec1.mine_n == 2 and rec1.mine[1].actor == "em2000" and rec1.mine[1].x == 10,
+            "(10.13 markers) the file lists them (the other cutscene's marker is not mixed in): " .. tostring(rec1 and rec1.mine_n))
+        check(rec1 and rec1.mine_scan and rec1.mine_scan.nodes and rec1.mine_scan.nodes > 5 and rec1.mine_scan.partial ~= true, "(10.13 markers) ...with how the scene walk went")
+        -- the same cutscene again within 20 s does not walk the scene again
+        es.hooks[HOOK](sargs("c03e03_00", 1, 0, 1))
+        live(es, 6)
+        es.hooks[HOOK](sargs("c03e03_00", 1, 0, 1))
+        live(es, 0.5)
+        check(mdbg(es).scans <= 2, "(10.13 markers) a repeat is not walked again at once: " .. mdbg(es).scans .. " scans")
+        -- a cutscene with no markers still says so
+        es.hooks[HOOK](sargs("c03e04_00", 2, 0, 2))
+        live(es, 0.5)
+        local m15b = messages_of_kind(es, 15)
+        check(m15b[#m15b] == "c03e04_00|0", "(10.13 markers) a cutscene with no markers is told as none: " .. tostring(m15b[#m15b]))
+
+        -- FORCE with the markers all here: played at once, and the file says so
+        local ej, rj = mworld("join", MIA)
+        tick(ej)
+        push_msgs(ej, { { 15, "c03e03_00|2|em2000@10.0,0.0,10.0|pl2000@11.0,0.0,10.0" } })
+        live(ej, 0.3)
+        hear(ej, PAY)
+        check(#rj.calls == 1, "(10.13 markers) with all of their markers here the cutscene is played at once: " .. #rj.calls)
+        local rj1 = mdbg(ej).per_cutscene[1]
+        check(rj1 and rj1.theirs_n == 2 and rj1.result == "all 2 marker(s) are here" and #(rj1.missing or {}) == 0, "(10.13 markers) ...and the file says all were here: " .. tostring(rj1 and rj1.result))
+
+        -- the area is not loaded yet: the play waits, then plays when the markers appear
+        local ew, rw = mworld("join", { OTHER })
+        tick(ew)
+        push_msgs(ew, { { 15, "c03e03_00|2|em2000@10.0,0.0,10.0|pl2000@11.0,0.0,10.0" } })
+        live(ew, 0.3)
+        hear(ew, PAY, 0.5)
+        check(#rw.calls == 0 and log_has(ew, "story: c03e03_00: 2 of Bob's 2 marker(s) are not in this game yet"), "(10.13 markers) markers missing here: the play waits and the journal says why")
+        live(ew, 2)
+        check(#rw.calls == 0, "(10.13 markers) ...still waiting 2 s later")
+        add_markers(ew, MIA)
+        live(ew, 1.5)
+        check(#rw.calls == 1 and rw.calls[1].id == "c03e03_00", "(10.13 markers) ...played once the markers are there: " .. #rw.calls)
+        local rw1 = mdbg(ew)
+        check(rw1.waits == 1 and rw1.played_without_markers == 0 and rw1.per_cutscene[1].result:find("the markers were here after waiting", 1, true) ~= nil and (rw1.per_cutscene[1].waited_s or 0) >= 2,
+            "(10.13 markers) ...and the file says it waited: " .. tostring(rw1.per_cutscene[1].result))
+
+        -- they never come: played anyway after 6 s, and said
+        local en, rn = mworld("join", { OTHER })
+        tick(en)
+        push_msgs(en, { { 15, "c03e03_00|1|em2000@10.0,0.0,10.0" } })
+        live(en, 0.3)
+        hear(en, PAY, 0.5)
+        check(#rn.calls == 0, "(10.13 markers) (setup: waiting)")
+        live(en, 7)
+        check(#rn.calls == 1, "(10.13 markers) markers that never come: played anyway after the wait: " .. #rn.calls)
+        local rn1 = mdbg(en)
+        check(rn1.played_without_markers == 1 and rn1.per_cutscene[1].result:find("played anyway: em2000 still missing after 6 s", 1, true) ~= nil,
+            "(10.13 markers) ...and the file says what was missing: " .. tostring(rn1.per_cutscene[1].result))
+
+        -- no marker list from the other player (an older script): played at once, as before
+        local eo, ro = mworld("join", {})
+        tick(eo)
+        hear(eo, PAY)
+        check(#ro.calls == 1 and mdbg(eo).per_cutscene[1].result:find("no marker list came", 1, true) ~= nil, "(10.13 markers) without a list from the other player it is played at once, as before")
+        -- the other game found none: nothing to check
+        local e0, r0 = mworld("join", {})
+        tick(e0)
+        push_msgs(e0, { { 15, "c03e03_00|0" } })
+        live(e0, 0.3)
+        hear(e0, PAY)
+        check(#r0.calls == 1 and mdbg(e0).per_cutscene[1].result:find("found no markers", 1, true) ~= nil, "(10.13 markers) a cutscene without markers there is played at once")
+        -- the check switched off: no scan, no wait
+        local ef, rf = mworld("join", { OTHER })
+        tick(ef)
+        ef.check_override["Check a cutscene's markers (Pos_...) before playing it here, and wait a few seconds for the area##markon"] = false
+        run_ui(ef)
+        push_msgs(ef, { { 15, "c03e03_00|1|em2000@10.0,0.0,10.0" } })
+        live(ef, 0.3)
+        hear(ef, PAY)
+        check(#rf.calls == 1 and mdbg(ef).scans == 0, "(10.13 markers) with the check off the cutscene is played at once and nothing is scanned")
+        -- damaged marker messages are ignored
+        local eb = mworld("join", {})
+        push_msgs(eb, { { 15, "garbage" }, { 15, "c03e03_00|999|x" }, { 15, "../x|1|em2000@1,2,3" } })
+        live(eb, 0.5)
+        check(mdbg(eb).received == 0 and not ui_has(eb, "UI error"), "(10.13 markers) damaged marker messages are ignored")
+
+        -- the panel's list of every Pos_ marker
+        local ea = mworld("host", { MIA[1], MIA[2], OTHER })
+        tick(ea, false)
+        ea.ui_press["List every Pos_ marker of this scene (stand in the room; it goes into the debug file)##markall"] = true
+        run_ui(ea)
+        live(ea, 0.3)
+        local all = mdbg(ea).all_pos_markers
+        check(all and all.count == 3 and all.list[1].name == "Pos_c03e03_00_em2000" and all.list[3].name == "Pos_c03e09_00_em3000" and all.list[1].x == 10,
+            "(10.13 markers) the button lists every Pos_ marker of the scene with its place: " .. tostring(all and all.count))
+        check(log_has(ea, "story: found 3 Pos_ marker(s) in the scene"), "(10.13 markers) ...and the journal says how many")
+    end
 end
 
 
@@ -15172,7 +16266,7 @@ do
         show_parked = false, face_me = false } }
     local mine = { ping_mode = 1, hit_damage = 99, drop_on_discard = false, show_parked = true, face_me = true, real_body = false, real_body_set = true,
         wall_skip = { "Cube_Collider" }, body_hidden = { "Em2000LeftHair" }, story_watch = { "c03e03_00" }, mia_layers = { em2050_Skin_Evil = false },
-        who_choice = "mia", item_mode = "both", hit_by_gun = true }
+        who_choice = "mia", item_mode = "both", hit_by_gun2 = false }
     local e = started({ ["re7mp/defaults.json"] = shipped, ["re7mp/settings.json"] = mine })
     check(ui_has(e, "Real body: off") and ui_has(e, "Real body") and e.ui_press[YES] == nil, "(9.33 reset) their own file is in force at the start (the real body is off)")
     -- the first click only arms it
@@ -15187,7 +16281,7 @@ do
     live(e, 2.5)
     local f = e.files["re7mp/settings.json"]
     check(f.ping_mode == 3 and f.hit_damage == 210 and f.drop_on_discard == true and f.show_parked == false and f.face_me == false, "(9.33 reset) the shipped values are back: ping " .. tostring(f.ping_mode) .. ", damage " .. tostring(f.hit_damage))
-    check(f.item_mode == "take" and f.hit_by_gun == false, "(9.33 reset) a setting the shipped file does not mention goes back to the code's default")
+    check(f.item_mode == "take" and f.hit_by_gun2 == true, "(9.33 reset) a setting the shipped file does not mention goes back to the code's default (10.21: by gun is ON)")
     check(#f.wall_skip == 0 and #f.body_hidden == 0 and #f.story_watch == 0 and next(f.mia_layers or {}) == nil, "(9.33 reset) the lists are emptied (not-a-wall names, hidden parts, watch-only cutscenes, head layers)")
     check(f.real_body == true and f.real_body_set == true, "(9.33 reset) the real body is on again, as shipped")
     run_ui(e)
@@ -15309,22 +16403,25 @@ do
         local settings = text:match('"settings":(%b{})') or ""
         check(#settings > 100, "(9.33 release defaults) the file has a settings block")
         -- (9.35) load_by_path ships ON now (Mia's Pl2000 and Clancy are made from files; Ethan never is: the script refuses it); the item journal, its scan and
-        -- the experimental hair physics ship OFF; giving the last item ships ON
-        for _, k in ipairs({ "cutscene_probe", "face_me", "occlude", "menu_hide", "item_journal", "item_scan", "hair_physics", "mia_own_head", "real_body_hair" }) do
+        -- (10.23: the hair physics is gone, so its key is not here but in the never-shipped list below) giving the last item ships ON
+        for _, k in ipairs({ "face_me", "occlude", "menu_hide", "item_journal", "item_scan", "mia_own_head", "real_body_hair" }) do
             check(settings:find('"' .. k .. '":false', 1, true) ~= nil, "(9.35 release defaults) " .. k .. " ships OFF")
         end
         for _, k in ipairs({ "load_by_path", "give_last", "mia_layers_on", "mia_head_parts" }) do
             check(settings:find('"' .. k .. '":true', 1, true) ~= nil, "(9.35 release defaults) " .. k .. " ships ON")
         end
-        for _, k in ipairs({ "who_choice", "who_follow", "story_callout", "story_watch", "tape_on", "tape_hide" }) do
-            check(settings:find('"' .. k .. '"', 1, true) == nil, "(9.33 release defaults) " .. k .. " is never shipped")
+        for _, k in ipairs({ "who_choice", "who_follow", "story_callout", "story_watch", "tape_on", "tape_hide",
+                "cutscene_probe", "cutscene_link", "cutscene_secs", "cutscene_stop_loco", "cutscene_loco_grace", "spawn_log", "spawn_focus", "door_sync", "enemy_mode",
+                "hair_physics" }) do
+            check(settings:find('"' .. k .. '"', 1, true) == nil, "(9.33 release defaults) " .. k .. " is never shipped (10.22/10.23: the last ten are keys of things that are gone or no longer read)")
         end
         local layers = settings:match('"mia_layers":(%b{})') or ""
         check(layers:find('"em2050_Skin_Mia":true', 1, true) and layers:find('"em2050_Skin_Evil":false', 1, true) and layers:find('"em2050_Skin_Blend":false', 1, true)
             and layers:find('"Eye_Shadow":true', 1, true) and layers:find('"em2050_Eye_Blend":true', 1, true) and layers:find('"em2050_Hair":true', 1, true) and layers:find('"eye_Tear":true', 1, true),
             "(9.35 release defaults) the Mia layers are the ones from the screenshots: her skin on, the corrupted skin and the blend off, the eyes, hair and tear on")
         check(settings:find('"body_hidden":["Em2000LeftHair","Em2000RightHair"]', 1, true) ~= nil, "(9.35 release defaults) the two side-lock hair meshes (flat white shards without the cloth) ship hidden")
-        check(text:find('"build":"9.44"', 1, true) ~= nil, "(9.35 release defaults) the file is the 9.44 build")
+        check(text:find('"build":"10.27"', 1, true) ~= nil, "(9.35 release defaults) the file is the 10.27 build")
+        check(settings:find('"enemy_mode2":3', 1, true) ~= nil, "(10.22 release defaults) Enemy sync mode 3 (ghosts, and my own enemies moved onto the host's) ships as the default, under the new key enemy_mode2")
         check(settings:find('"tape', 1, true) == nil, "(9.35 release defaults) there is no tape key in the shipped settings")
         check(settings:find('"real_body":true', 1, true) ~= nil, "(9.33 release defaults) the real body is on for a new install")
         check(text:find('"clips":{', 1, true) ~= nil and text:find('"idle":{', 1, true) ~= nil, "(9.33 release defaults) the clips are in, with an idle")
@@ -15415,13 +16512,14 @@ do
         local env = door_env({ {}, {} })
         check(env.hooks["app.DoorPush.setInteract"] ~= nil, "(9.40 doors) the setInteract hook is installed")
         run_ui(env)
-        check(ui_has(env, "Doors: shared with the other player"), "(9.40 doors) the panel has a Doors section")
+        check(not ui_has(env, "Doors: shared with the other player"), "(10.22 doors) the panel has no Doors section any more")
+        check(env.seen_checks == nil or env.seen_checks["Share doors with the other player (open, close, unlock and push; remembered)"] == nil, "(10.22 doors) ...and no box to switch the door sync off")
         for _, t in ipairs(env.ui_texts) do check(not t:find("UI error", 1, true), "(9.40 doors) no UI error: " .. t) end
         local r = env.report()
         check(r and r.on == true and r.hooked_setInteract == true and r.message_kind == 13 and r.doors_known == 2, "(9.40 doors) the report lists both doors and the hook")
         check(r and r.loading_gate and r.loading_gate.shut_now == false, "(9.40 doors) the report has the loading gate, open")
         check(#env.sent13() == 0, "(9.40 doors) doors that were already in the scene send nothing (that is how the scene was)")
-        check(env.files["re7mp/settings.json"] and env.files["re7mp/settings.json"].door_sync == true, "(9.40 doors) door_sync is remembered, on by default")
+        check(env.files["re7mp/settings.json"] == nil or env.files["re7mp/settings.json"].door_sync == nil, "(10.22 doors) door_sync is not saved any more (the sync is always on)")
     end
 
     -- 2. a door my player opens is sent once (it shows states 4 and 5), and shutting it is sent too
@@ -15459,6 +16557,7 @@ do
         check(#m == 1 and m[1] == "close|" .. env.doors[2].id .. "|0", "(9.40 doors) ...but one my player used is: " .. table.concat(m, " ; "))
         local r = env.report()
         check(r.counts.touches == 1, "(9.40 doors) the report counts my touch")
+        check(r.counts.hook_calls == 1 and (r.counts.hook_skipped or 0) == 0 and type(r.setInteract_hook_ms_total) == "number" and r.setInteract_hook_ms_total >= 0, "(10.9 doors) the report counts the hook's calls and its time: " .. tostring(r.counts.hook_calls) .. " / " .. tostring(r.setInteract_hook_ms_total))
     end
 
     -- 4. unlock: mine goes out, theirs is applied (and again if the door stays locked)
@@ -15530,7 +16629,7 @@ do
         check(env.report().counts.not_loaded == 2, "(9.40 doors) an open for a door that is not here is dropped and counted")
     end
 
-    -- 9. a pushed door: angles go out when it moves 3 degrees, and arrive as a glide of floats; nothing is echoed
+    -- 9. a pushed door: angles go out when it moves 5 degrees (10.9; 3 before), and arrive as a glide of floats; nothing is echoed
     do
         local env = door_env({ { x = 20 }, { x = 21 } })
         local d = env.doors[1]
@@ -15545,8 +16644,53 @@ do
         d.st, d.angle = 0, 0
         env.wait(0.5)
         local m = env.sent13()
-        check(#m == 4 and m[1] == "angle|" .. d.id .. "|10|0|0" and m[2] == "angle|" .. d.id .. "|25|0|0" and m[3] == "angle|" .. d.id .. "|0|0|0" and m[4] == "close|" .. d.id .. "|0",
-            "(9.40 doors) pushing sends the angle when it moved 3 degrees (not 11, not 25.5), then the last angle and the close when it is pushed shut: " .. table.concat(m, " ; "))
+        -- (10.12) angles go out when the door moved 2 degrees (5 in 10.9), and a door that STOPS short of the last angle sent tells its final one (11 and 25.5 were held 0.5 s)
+        check(#m == 6 and m[1] == "angle|" .. d.id .. "|10.0|0|0" and m[2] == "angle|" .. d.id .. "|11.0|0|0" and m[3] == "angle|" .. d.id .. "|25.0|0|0" and m[4] == "angle|" .. d.id .. "|25.5|0|0"
+            and m[5] == "angle|" .. d.id .. "|0.0|0|0" and m[6] == "close|" .. d.id .. "|0",
+            "(10.12 doors) pushing sends the angle when it moved 2 degrees, the final angle of a door that stopped, the last angle and the close when it is pushed shut: " .. table.concat(m, " ; "))
+        -- (10.12) a door that keeps moving is not told a settle angle in between, and one that moved less than 0.5 degree is never told
+        do
+            local e4 = door_env({ { x = 20 }, { x = 21 } })
+            local d4 = e4.doors[1]
+            d4.st, d4.angle = 3, 10
+            e4.wait(0.5)
+            d4.angle = 10.3
+            e4.wait(1.5)
+            local n4 = 0
+            for _, x in ipairs(e4.sent13()) do if x:find("^angle|") then n4 = n4 + 1 end end
+            check(n4 == 1, "(10.12 doors) 0.3 degrees of drift is not worth a message (one angle only): " .. n4)
+        end
+        -- (10.12) a door pushed open 8 degrees every 0.25 s sends an angle for every step, each 2 or more degrees past the last (every 0.1 s at most)
+        do
+            local e3 = door_env({ { x = 20 }, { x = 21 } })
+            local d3 = e3.doors[1]
+            d3.st = 3
+            for i = 1, 12 do d3.angle = i * 8 e3.wait(0.25) end -- (env.wait runs in steps of 0.25 s: the door moves 8 degrees every 0.25 s, 3 s in all)
+            local n3, last3 = 0, nil
+            for _, x in ipairs(e3.sent13()) do
+                if x:find("^angle|") then
+                    n3 = n3 + 1
+                    local a = tonumber(x:match("^angle|[^|]*|([^|]*)|"))
+                    check(last3 == nil or (a and a - last3 >= 2), "(10.12 doors) each angle is 2 or more degrees past the last: " .. tostring(last3) .. " -> " .. tostring(a))
+                    last3 = a
+                end
+            end
+            check(n3 >= 10 and n3 <= 13, "(10.12 doors) 12 steps of 8 degrees in 3 s go out as " .. n3 .. " angle messages (one for every step)")
+            local r3 = e3.report()
+            check(r3.angle_every_s == 0.1 and r3.angle_min_degrees == 2, "(10.12 doors) the report says how often and how far: " .. tostring(r3.angle_every_s) .. " s / " .. tostring(r3.angle_min_degrees) .. " degrees")
+        end
+        -- (10.12) an "open" that follows angles opens the door the rest of the way and ends the glide (it was "already open" at state 3, and the glide pulled it back)
+        do
+            local e5 = door_env({ {} })
+            local d5 = e5.doors[1]
+            e5.say13("angle|" .. d5.id .. "|20.0|0|0")
+            run_frames(e5, 0.3)
+            local n_push = #e5.dcalls("requestPush")
+            e5.say13("open|" .. d5.id .. "|0")
+            check(#e5.dcalls("requestAutoOpen") == 1, "(10.12 doors) an open for a door pushed to 20 degrees opens it the rest of the way: " .. #e5.dcalls("requestAutoOpen"))
+            run_frames(e5, 1.0)
+            check(#e5.dcalls("requestPush") == n_push, "(10.12 doors) ...and the glide does not pull it back to 20 degrees: " .. (#e5.dcalls("requestPush") - n_push) .. " pushes after the open")
+        end
         local e2 = door_env({ {} })
         local d2 = e2.doors[1]
         for _, a in ipairs({ 10, 20, 30, 40, 45 }) do
@@ -15621,21 +16765,21 @@ do
         check(env.door_calls > 0, "(9.40 doors) a flag that never clears is given up on after 3 minutes")
     end
 
-    -- 13. the switch: off, nothing is sent and nothing is applied
+    -- 13. (10.22) there is no switch: a "door_sync = false" that an old settings file still holds is not read, and the doors are shared as always
     do
         local env = door_env({ {} }, { door_sync = false })
         env.doors[1].st = 5
         env.wait(0.8)
+        check(#env.sent13() == 1, "(10.22 doors) an old settings file with door_sync = false does not switch the sync off: a door that is open is sent (" .. #env.sent13() .. ")")
         env.say13("open|" .. door_id(1) .. "|0")
-        check(#env.sent13() == 0 and #env.dcalls("") == 0, "(9.40 doors) with the switch off nothing is sent and nothing is applied")
+        env.wait(0.5)
         do
             local r13 = env.report()
-            check(r13.counts.ignored_off == 1 and r13.on == false, "(9.40 doors) ...and the report says why (ignored " .. tostring(r13.counts.ignored_off) .. ", on " .. tostring(r13.on) .. ")")
+            check(r13.on == true and r13.counts.ignored_off == 0, "(10.22 doors) ...the report says on, and nothing was ignored for being off (ignored " .. tostring(r13.counts.ignored_off) .. ", on " .. tostring(r13.on) .. ")")
         end
-        env.check_override["Share doors with the other player (open, close, unlock and push; remembered)"] = true
         run_ui(env)
         env.wait(1.5)
-        check(env.files["re7mp/settings.json"].door_sync == true, "(9.40 doors) the panel box switches it on and it is remembered")
+        check(env.files["re7mp/settings.json"] == nil or env.files["re7mp/settings.json"].door_sync == nil, "(10.22 doors) ...and it is not written back")
     end
 
     -- 14. an array without get_elements (about one read in 50) is read item by item
@@ -15811,11 +16955,11 @@ do
         local gm = Obj.new("app.GameManager", {}, { _CurrentChapter = 0, ["<IsSceneLoading>k__BackingField"] = false, RequestChapterJump = false, RequestPlayerChange = false })
         env.singletons["app.GameManager"] = gm
         env.gm = gm
-        env.files["re7mp/settings.json"] = { enemy_mode = role == "join" and 3 or 2, enemy_drive_ai = opts.drive_ai ~= false, enemy_clips = opts.clips ~= false }
+        env.files["re7mp/settings.json"] = { enemy_mode2 = role == "join" and 3 or 2, enemy_drive_ai = opts.drive_ai ~= false, enemy_clips = opts.clips ~= false }
         load_script(env)
         host_role_files(env, role, "tcp")
         env.files["re7mp_in.json"].x, env.files["re7mp_in.json"].z = 40, 40
-        if role == "join" then env.combo_override["Enemy sync"] = 3 run_ui(env) end -- (the experimental mode is never restored from the settings: it is chosen in the panel)
+        if role == "join" then env.combo_override["Enemy sync"] = 3 run_ui(env) end -- (10.22: the panel's choice is made here as the 10.19 tests always did; mode 3 is the default now anyway)
         -- what the (fake) game does when the script makes a bank: a bank object that remembers what it was given
         local real_create = env.G.sdk.create_instance
         env.G.sdk.create_instance = function(name, simplified)
@@ -15906,6 +17050,38 @@ do
         local f = env.files["re7mp/enemy_clips.json"]
         check(f and f.clips and f.clips.Em2000 and f.clips.Em2000.k["35/40"] and f.banks.Em2000.k["35"] and f.banks.Em2000.k["35"].path == PATH35 and next(f.banks.Em2000.k) ~= nil and type(next(f.banks.Em2000.k)) == "string", "(9.41 clips) the table is saved to re7mp/enemy_clips.json")
         check(#env.sent14() == 0, "(9.41 clips) recording sends nothing")
+    end
+
+    -- 2b. (10.17) a bank that is not on the enemy during the quick tries (a cutscene's or a gimmick's bank, only there while the event runs) is searched for again later, and the
+    -- debug file says what the Motion did hold while it was missing
+    do
+        local env = clip_env("host", { clips = false })
+        env.mot.active = { env.mot.bank_obj(0, PATH0, true), env.mot.bank_obj(35, PATH35, true) }
+        env.layer.bank, env.layer.mid, env.layer.frame = 1, 0, 3.0
+        env.wait(14.0)
+        local r = env.report()
+        local b = r.banks.Em2000 or {}
+        check(b["1"] and b["1"].path == "not found" and b["1"].tries == 3, "(10.17 late bank) after the quick tries the bank is 'not found' (3 tries): " .. tostring(b["1"] and b["1"].tries))
+        local sd = b["1"] and b["1"].search
+        check(sd and sd.wanted == 1 and sd.active == 2 and #sd.rows >= 2, "(10.17 late bank) ...and the file says what the Motion holds (2 active banks, their ids and paths): " .. tostring(sd and sd.active))
+        local has35 = false
+        for _, row in ipairs(sd and sd.rows or {}) do if row[3] == 35 and tostring(row[4]):find("em2000", 1, true) then has35 = true end end
+        check(has35, "(10.17 late bank) ...with bank 35 and its path in the rows")
+        env.wait(12.0)
+        check(env.report().banks.Em2000["1"].tries == 3, "(10.17 late bank) the later tries are 20 s apart, not 5 s (12 s after the quick tries: " .. tostring(env.report().banks.Em2000["1"].tries) .. " tries)")
+        -- the event's bank arrives on the enemy
+        local EV = "Animation/Enemy/em2000/motlist/Gimmick/em2000_Gimmick_ch01.motlist"
+        env.mot.active[#env.mot.active + 1] = env.mot.bank_obj(1, EV, true)
+        env.wait(25.0)
+        r = env.report()
+        b = r.banks.Em2000 or {}
+        check(b["1"] and b["1"].path == EV and r.counts.paths_found_late >= 1, "(10.17 late bank) the bank is found on a later try: " .. tostring(b["1"] and b["1"].path) .. " late " .. tostring(r.counts.paths_found_late))
+        -- a bank that never turns up is given up on after nine tries
+        env.layer.bank, env.layer.mid, env.layer.frame = 98, 1, 3.0
+        env.wait(200.0)
+        r = env.report()
+        check(r.banks.Em2000["98"] and r.banks.Em2000["98"].tries == 9, "(10.17 late bank) a bank that never turns up is given up after 9 tries: " .. tostring(r.banks.Em2000["98"] and r.banks.Em2000["98"].tries))
+        check(#env.sent14() == 0, "(10.17 late bank) searching sends nothing")
     end
 
     -- 3. the host answers a bank request (whether or not its own box is ticked), and ignores nonsense
@@ -16129,7 +17305,7 @@ do
         local cs = dbg_saves(env)
         check(cs and cs.account == 759758082 and cs.partner_account == 0, "(9.42 accounts) ...and the debug file says 0")
     end
-    -- the loopback bot, or one Steam account on both PCs
+    -- Ethan's friend, or one Steam account on both PCs
     do
         local env = acct_env({ account = 759758082, partner_account = 759758082 })
         check(ui_has(env, "the other player's account is the SAME"), "(9.42 accounts) the same account on both sides is called out")
@@ -16149,293 +17325,6 @@ do
     end
 end
 -- END accounts scenario
-
--- =============================================================================================
--- Scenario 25 (9.43): the spawn log: Mia's spawn, the methods the game calls, the files it asks for, her objects and files, what my copy lacks,
--- and the hair physics census.
--- BEGIN spawnlog scenario
--- =============================================================================================
-do
-    local BOX = "Spawn log on (hooks the game's spawn / load methods a few at a time; reads only; remembered)"
-    local FOCUS_IN = "Who to watch (words, separated by ;)"
-    local function str(s) return Obj.new("System.String", { ["ToString()"] = function() return s end }) end
-    local P = {
-        body = "Character/Enemy/em2000/em2000/em2000.mesh", hair = "Character/Enemy/em2000/em2070/em2070.mesh", head = "Character/Enemy/em2000/em2050/em2050.mesh",
-        chain = "Character/Enemy/em2000/em2070/em2070.chain", cloth = "Character/Enemy/em2000/em2070/em2070.cloth", herb = "Item/Herb/herb.mesh",
-        pfb = "ObjectScript/Em2000.pfb",
-    }
-    local function mesh_comp(path, mdf)
-        return Obj.new("via.render.Mesh", { getMesh = function() return Obj.new("via.render.MeshResource", { get_ResourcePath = function() return path end }) end,
-            get_Material = function() return Obj.new("via.render.MeshMaterialResource", { get_ResourcePath = function() return mdf end }) end,
-            get_Enabled = function() return true end })
-    end
-    local function node(name, pos, comps)
-        local c = comps or {}
-        local go = make_go(name, pos, c)
-        go.comps = c
-        return go
-    end
-    local function link(parent, kids)
-        parent.xf.m.get_Child = function() return kids[1].xf end
-        for i, k in ipairs(kids) do
-            k.xf._next = kids[i + 1] and kids[i + 1].xf or nil
-            k.xf.m.get_Parent = function() return parent.xf end
-        end
-    end
-    local function world(opts)
-        opts = opts or {}
-        local env = new_environment()
-        build_world(env)
-        if opts.on ~= false then env.files["re7mp/settings.json"] = { spawn_log = true } end
-        if opts.lastcall then env.files["re7mp/lastcall.json"] = { stage = "spawnlog", call = opts.lastcall, clock = 1, time = os.time(), session = "an-older-session" } end
-        env.text = {}
-        env.G.fs = { write = function(p, t) env.text[p] = t end }
-        env.singletons["app.GameManager"] = Obj.new("app.GameManager", {}, { _CurrentChapter = 3, ["<IsSceneLoading>k__BackingField"] = false,
-            RequestChapterJump = false, RequestPlayerChange = false })
-        make_td("app.EnemyManager", { methods = { spawnEnemy = { params = { "System.String", "System.Int32" } }, requestResource = { params = { "System.String" } },
-            loadBusy = {}, createPrefab = { params = { "via.Prefab" } }, getEnemyCount = { ret = "System.Int32" }, updateEnemy = {} } })
-        make_td("via.ResourceManager", { methods = { createResource = { params = { "System.String" }, static = true } } })
-        make_td("via.motion.Chain", { methods = { get_ChainAssetPath = {}, get_Enabled = {}, get_GameObject = {} } })
-        make_td("via.dynamics.GpuCloth", { methods = { get_ClothResource = {}, get_Enabled = {} } })
-        -- Mia: a root with a body (mesh + motion), her chain hair (mesh + chain + cloth) and a head
-        local mia = node("Em2000", vec(1, 0, 2))
-        local body, hair, head = node("Em2000Body", vec(1, 0, 2)), node("Em2000ChainHair", vec(1, 0, 2)), node("Em2000Head", vec(1, 0, 2))
-        link(mia, { body, hair, head })
-        local motion = Obj.new("via.motion.Motion", { get_GameObject = function() return body end, getMotionBankCount = function() return 2 end,
-            getMotionListPathForTool = function(_, i) return ({ "Character/Enemy/em2000/motlist/em2000.motlist", "Character/Enemy/em2000/motlist/em2000_atk.motlist" })[i + 1] end })
-        local chain = Obj.new("via.motion.Chain", { get_GameObject = function() return hair end, get_ChainAssetPath = function() return P.chain end, get_Enabled = function() return true end })
-        local cloth = Obj.new("via.dynamics.GpuCloth", { get_GameObject = function() return hair end, get_Enabled = function() return true end,
-            get_ClothResource = function() return Obj.new("via.dynamics.ClothResource", { get_ResourcePath = function() return P.cloth end }) end })
-        body.comps[1], body.comps[2] = mesh_comp(P.body, "Character/Enemy/em2000/em2000/em2000.mdf2"), motion
-        hair.comps[1], hair.comps[2], hair.comps[3] = mesh_comp(P.hair, "Character/Enemy/em2000/em2070/em2070.mdf2"), chain, cloth
-        head.comps[1] = mesh_comp(P.head, "Character/Enemy/em2000/em2050/em2050.mdf2")
-        -- Ethan (no physics) and an enemy that carries a chain
-        local ethan = node("Pl0000_Chapter1", vec(0, 0, 0))
-        local em33 = node("Em3300", vec(5, 0, 5))
-        local ethan_motion = Obj.new("via.motion.Motion", { get_GameObject = function() return ethan end, getMotionBankCount = function() return 0 end })
-        local em33_motion = Obj.new("via.motion.Motion", { get_GameObject = function() return em33 end, getMotionBankCount = function() return 0 end })
-        local em33_chain = Obj.new("via.motion.Chain", { get_GameObject = function() return em33 end, get_ChainAssetPath = function() return "Character/Enemy/em3300/em3300.chain" end })
-        env.motions = { ethan_motion, em33_motion }
-        env.chains = { em33_chain }
-        env.cloths = {}
-        env.scene_objects = { ethan, em33, mia }
-        env.scene = make_scene(env.scene_objects)
-        env.scene.m["findComponents(System.Type)"] = function(_, t)
-            local list = {}
-            if t == "via.motion.Motion" then list = env.motions elseif t == "via.motion.Chain" then list = env.chains elseif t == "via.dynamics.GpuCloth" then list = env.cloths end
-            return { get_elements = function() return list end }
-        end
-        env.mia = { go = mia, motion = motion, chain = chain, cloth = cloth }
-        load_script(env)
-        host_role_files(env, "host", "tcp")
-        return env
-    end
-    local function dbg(env)
-        env.ui_press["Save the debug file now"] = true
-        run_ui(env)
-        return env.files["re7mp/debug.json"] and env.files["re7mp/debug.json"].health and env.files["re7mp/debug.json"].health.spawn_log
-    end
-    local function find_key(list, part)
-        for _, g in ipairs(list or {}) do if tostring(g.key or g.file or ""):find(part, 1, true) then return g end end
-        return nil
-    end
-
-    -- ---- the whole story: hooks, calls, her spawn, her objects and files, the copy, her leaving ----
-    do
-        local env = world()
-        run_frames(env, 2.0)
-        local early = dbg(env)
-        check(early ~= nil and early.on == true and early.state == "starting", "(9.43 spawn log) at first it waits a few seconds before it hooks anything: " .. tostring(early and early.state))
-        check(env.hooks["app.EnemyManager.spawnEnemy"] == nil, "(9.43 spawn log) ...and nothing is hooked yet")
-        run_frames(env, 5.0)
-        check(env.hooks["app.EnemyManager.spawnEnemy"] ~= nil and env.hooks["app.EnemyManager.requestResource"] ~= nil and env.hooks["app.EnemyManager.createPrefab"] ~= nil
-            and env.hooks["via.ResourceManager.createResource"] ~= nil, "(9.43 spawn log) the spawn / load methods are hooked by name")
-        check(env.hooks["app.EnemyManager.getEnemyCount"] == nil and env.hooks["app.EnemyManager.updateEnemy"] == nil, "(9.43 spawn log) ...but not the getters and the update methods")
-        local d0 = dbg(env)
-        check(d0 and d0.hooked == true and d0.counts.hooks_ok >= 5 and d0.counts.hooks_failed == 0 and d0.state == "watching", "(9.43 spawn log) the methods are hooked, none failed, now watching: " .. tostring(d0 and d0.counts.hooks_ok))
-        env.base_hooks = d0 and d0.counts.hooks_ok
-        check(d0 and #d0.episodes == 0, "(9.43 spawn log) no spawn of Mia yet: no episode")
-        -- the physics census (every 5 s): the enemy's chain is found, Ethan has none, a type this game lacks is said to be missing
-        run_frames(env, 6.0)
-        local d1 = dbg(env)
-        check(d1 and d1.hair_physics and d1.hair_physics.Em3300 and d1.hair_physics.Em3300.objects.Em3300 and d1.hair_physics.Em3300.objects.Em3300[1] == "motion.Chain",
-            "(9.43 spawn log) the census finds the chain on Em3300")
-        check(d1 and d1.physics_types["via.motion.Chain"].exists_in_this_game == true and d1.physics_types["via.motion.Chain"].components_in_scene_at_last_look == 1
-            and d1.physics_types["via.motion.SpringBone"].exists_in_this_game == false, "(9.43 spawn log) ...it says which physics types this game has and how many are standing")
-        local without = {}
-        for _, n in ipairs(d1.characters_seen_without_physics or {}) do without[n] = true end
-        check(without.Pl0000 == true and without.Em3300 == nil, "(9.43 spawn log) ...and which characters were seen with no physics component at all")
-        -- what the game does before she appears
-        local before = env.clock
-        local R = env.hooks["app.EnemyManager.requestResource"]
-        check(R({ 0, 0, str(P.head) }) == 0, "(9.43 spawn log) a hooked call lets the game's own method run")
-        run_frames(env, 0.5)
-        env.hooks["app.EnemyManager.spawnEnemy"]({ 0, 0, str("Em2000"), 1 })
-        env.hooks["via.ResourceManager.createResource"]({ 0, str(P.chain) }) -- (a static method: the first parameter is args[2])
-        env.hooks["app.EnemyManager.createPrefab"]({ 0, 0, Obj.new("via.Prefab", { get_Path = function() return P.pfb end }) })
-        R({ 0, 0, str(P.herb) })
-        for _ = 1, 400 do env.hooks["app.EnemyManager.loadBusy"]({ 0, 0 }) end
-        run_frames(env, 1.0)
-        env.motions[#env.motions + 1] = env.mia.motion
-        env.chains[#env.chains + 1] = env.mia.chain
-        env.cloths[#env.cloths + 1] = env.mia.cloth
-        env.scene_objects[#env.scene_objects + 1] = env.mia.go
-        run_frames(env, 2.5)
-        local d2 = dbg(env)
-        local ep = d2 and d2.episodes and d2.episodes[1]
-        check(ep ~= nil and ep.owner == "Em2000" and ep.chapter == 3 and ep.name == "Em2000Body", "(9.43 spawn log) her spawn is detected: the owner, the chapter and the object that carries the motion")
-        check(ep and ep.already_standing_when_logging_began == false, "(9.43 spawn log) ...she was not there when the log started, so there is a 'before'")
-        local g = ep and find_key(ep.calls_before, "spawnEnemy")
-        check(g ~= nil and g.hit == true and g.n == 1 and tostring(g.arg):find("Em2000", 1, true) ~= nil and g.first < 0,
-            "(9.43 spawn log) the spawn method is in the calls before her spawn, with the name it was given: " .. tostring(g and g.arg))
-        check(ep and find_key(ep.calls_before, "requestResource") ~= nil and find_key(ep.calls_before, "createResource") ~= nil and find_key(ep.calls_before, "createPrefab") ~= nil
-            and find_key(ep.calls_before, "loadBusy") ~= nil, "(9.43 spawn log) ...with the other calls around it (a static method's path, a prefab's path)")
-        check(ep and ep.kinds_of_calls_before == 5, "(9.43 spawn log) ...grouped by method: " .. tostring(ep and ep.kinds_of_calls_before))
-        check(ep and #ep.mentions_before >= 3 and ep.mentions_before[1].key ~= nil, "(9.43 spawn log) the calls that mention her are listed on their own: " .. tostring(ep and #ep.mentions_before))
-        local fchain, fherb, fpfb = ep and find_key(ep.files_asked_for_before, P.chain), ep and find_key(ep.files_asked_for_before, P.herb), ep and find_key(ep.files_asked_for_before, P.pfb)
-        check(fchain ~= nil and fchain.mentions == true and fchain.dt < 0, "(9.43 spawn log) the files the game asked for before she spawned are listed, hers marked")
-        check(fherb ~= nil and fherb.mentions == nil and fpfb ~= nil and fpfb.mentions == true, "(9.43 spawn log) ...an unrelated file is listed without the mark; a prefab's path is read")
-        check(d2.counts.hot == 1, "(9.43 spawn log) a method that fires hundreds of times a second is counted as too busy, once: " .. tostring(d2.counts.hot))
-        check(ep and ep.her_physics and #ep.her_physics == 2 and ep.her_physics[1].obj == "Em2000ChainHair" and ep.her_physics[1].files ~= nil,
-            "(9.43 spawn log) her hair physics is found: a chain and a cloth component on Em2000ChainHair, with their files")
-        -- no copy of her stands: said, not guessed
-        run_frames(env, 3.0)
-        local sf = env.files["re7mp/spawnlog.json"]
-        local fe = sf and sf.episodes and sf.episodes[1]
-        check(fe and fe.her_objects and #fe.her_objects == 4, "(9.43 spawn log) the file has her four objects: " .. tostring(fe and fe.her_objects and #fe.her_objects))
-        local fbody, fhair
-        for _, o in ipairs(fe and fe.her_objects or {}) do
-            if o.name == "Em2000Body" then fbody = o elseif o.name == "Em2000ChainHair" then fhair = o end
-        end
-        local fm
-        for _, c in ipairs(fbody and fbody.comps or {}) do if c.t == "via.render.Mesh" then fm = c elseif c.t == "via.motion.Motion" then fbody.motion = c end end
-        check(fm and fm.files and fm.files.mesh == P.body and fm.files.material == "Character/Enemy/em2000/em2000/em2000.mdf2", "(9.43 spawn log) her mesh and material files are read")
-        check(fbody and fbody.motion and fbody.motion.files["motlist 0"] == "Character/Enemy/em2000/motlist/em2000.motlist" and fbody.motion.banks == 2, "(9.43 spawn log) ...and the animation lists of her motion")
-        local ch
-        for _, c in ipairs(fhair and fhair.comps or {}) do if c.t == "via.motion.Chain" then ch = c end end
-        check(ch and ch.phys == true and ch.files and ch.files.ChainAssetPath == P.chain, "(9.43 spawn log) ...and the file a chain component holds")
-        check(ch and ch.values and ch.values.Enabled == true, "(9.43 spawn log) ...and the numbers and flags a physics component answers")
-        local ma = d1.physics_types["via.motion.Chain"].methods
-        local has_api = false
-        for _, m in ipairs(ma or {}) do if m == "get_ChainAssetPath(0)" then has_api = true end end
-        check(has_api, "(9.43 spawn log) the methods a physics component type has are listed (what the next build needs to set one up)")
-        check(fe and fe.copy_note and fe.copy_note:find("no copy of her is standing", 1, true) ~= nil, "(9.43 spawn log) with no copy standing the log says so instead of guessing")
-        -- now a copy stands: only the body
-        local copy = node("re7mp_body", vec(0, 0, 0))
-        local cbody = node("Em2000Body", vec(0, 0, 0))
-        link(copy, { cbody })
-        cbody.comps[1] = mesh_comp(P.body, "Character/Enemy/em2000/em2000/em2000.mdf2")
-        env.G.RE7MP_TEST_COPY = function() return copy end
-        env.ui_press["Compare the last spawn with my copy"] = true
-        run_ui(env)
-        run_frames(env, 3.0)
-        local d3 = dbg(env)
-        local ep3 = d3 and d3.episodes[1]
-        local miss = ep3 and ep3.missing_on_copy
-        check(miss ~= nil and #miss.physics == 2 and miss.physics[1].obj == "Em2000ChainHair", "(9.43 spawn log) the copy lacks both physics components: " .. tostring(miss and #miss.physics))
-        local lacks = {}
-        for _, n in ipairs(miss and miss.objects or {}) do lacks[n] = true end
-        check(lacks.Em2000ChainHair == true and lacks.Em2000Head == true and lacks.Em2000Body == nil, "(9.43 spawn log) ...the objects it lacks are named (the one it has is not)")
-        local lf = {}
-        for _, f in ipairs(miss and miss.files or {}) do lf[f.file] = true end
-        check(lf[P.hair:lower()] and lf[P.head:lower()] and lf[P.chain:lower()] and lf[P.cloth:lower()] and not lf[P.body:lower()], "(9.43 spawn log) ...and the files it lacks (the hair and head meshes, the chain and cloth files)")
-        check(miss and miss.components[1].phys == true and miss.components[1].real == 1 and miss.components[1].copy == 0, "(9.43 spawn log) ...physics components come first in the list of component kinds it lacks")
-        check(ep3 and ep3.copy_how == "a test copy" or (ep3 and ep3.copy_how ~= nil), "(9.43 spawn log) ...and which copy was compared is named: " .. tostring(ep3 and ep3.copy_how))
-        -- (the 25 seconds after her spawn are over: the spawn is written up)
-        run_frames(env, 20.0)
-        local text = env.text["re7mp/spawn_log.txt"]
-        check(text ~= nil and text:find("=== spawn #1: Em2000", 1, true) ~= nil and text:find("PHYSICS", 1, true) ~= nil and text:find("MISSING on my copy", 1, true) ~= nil,
-            "(9.43 spawn log) the text log has the spawn, her physics components and what the copy lacks")
-        check(text and text:find("mentions her", 1, true) ~= nil and text:find("spawnEnemy", 1, true) ~= nil, "(9.43 spawn log) ...and the calls that mention her")
-        check(text and text:find("file: character/enemy/em2000/em2070/em2070.chain", 1, true) ~= nil, "(9.43 spawn log) ...and the files the copy lacks")
-        check(d3 and d3.text_saved == true, "(9.43 spawn log) the debug file says the text log was written")
-        local d3b = dbg(env)
-        check(d3b.hair_physics.Em2000 ~= nil and d3b.hair_physics.Em2000.objects.Em2000ChainHair ~= nil, "(9.43 spawn log) the census names her too")
-        -- she leaves
-        for i = #env.motions, 1, -1 do if env.motions[i] == env.mia.motion then table.remove(env.motions, i) end end
-        run_frames(env, 4.0)
-        local d4 = dbg(env)
-        check(d4 and d4.episodes[1].left_after_s ~= nil and d4.counts.spawns == 1, "(9.43 spawn log) when she leaves the scene the episode says after how many seconds")
-        -- the panel
-        run_ui(env)
-        check(env.seen_checks and env.seen_checks[BOX] == true, "(9.43 spawn log) the panel draws the box, ticked")
-        env.ui_press["Look for hair physics now"] = true
-        local before_c = dbg(env).counts.censuses
-        run_ui(env)
-        run_frames(env, 1.0)
-        check(dbg(env).counts.censuses > before_c, "(9.43 spawn log) the 'Look for hair physics now' button runs the census at once")
-        local seen_ep = false
-        for _, t in ipairs(env.ui_texts) do
-            check(not t:find("UI error", 1, true), "(9.43 spawn log) no UI error: " .. t)
-            if t:find("Spawn #1: Em2000", 1, true) and t:find("2 physics components", 1, true) and t:find("missing on my copy", 1, true) then seen_ep = true end
-        end
-        check(seen_ep, "(9.43 spawn log) the panel summarises the spawn and what is missing")
-    end
-
-    -- ---- the box is off: nothing is hooked and nothing is read ----
-    do
-        local env = world({ on = false })
-        run_frames(env, 10.0)
-        check(env.hooks["app.EnemyManager.spawnEnemy"] == nil, "(9.43 spawn log) with the box unticked nothing is hooked")
-        local d = dbg(env)
-        check(d and d.on == false and d.state == "off" and d.counts.polls == 0 and d.counts.hooks_ok == 0, "(9.43 spawn log) ...and the scene is not looked at")
-    end
-
-    -- ---- ticking the box in the panel starts it; the watched words can be changed ----
-    do
-        local env = world({ on = false })
-        env.check_override[BOX] = true
-        env.input_override[FOCUS_IN] = "em3300"
-        run_ui(env)
-        run_frames(env, 8.0)
-        local d = dbg(env)
-        check(d and d.on == true and d.hooked == true and d.focus == "em3300", "(9.43 spawn log) ticking the box and changing the words starts it")
-        local ep = d and d.episodes[1]
-        check(ep and ep.owner == "Em3300" and ep.already_standing_when_logging_began == true and #d.episodes == 1, "(9.43 spawn log) a character already standing when the log starts is found, and said to have been standing")
-    end
-
-    -- ---- the game is loading: the scene is not looked at; after it, the spawn is found ----
-    do
-        local env = world()
-        local gm = env.singletons["app.GameManager"]
-        gm.f["<IsSceneLoading>k__BackingField"] = true
-        run_frames(env, 3.5)
-        env.motions[#env.motions + 1] = env.mia.motion
-        run_frames(env, 4.0)
-        local d = dbg(env)
-        check(d and #d.episodes == 0 and tostring(d.state):find("loading", 1, true) ~= nil, "(9.43 spawn log) while the game loads the scene is left alone: " .. tostring(d and d.state))
-        gm.f["<IsSceneLoading>k__BackingField"] = false
-        run_frames(env, 4.0)
-        local d2 = dbg(env)
-        check(d2 and #d2.episodes == 1 and d2.episodes[1].owner == "Em2000", "(9.43 spawn log) ...and once it is done the spawn is found")
-    end
-
-    -- ---- a session that ended inside a hook: that method is never hooked again ----
-    do
-        local env = world({ lastcall = "hook app.EnemyManager.spawnEnemy(System.String,System.Int32)" })
-        run_frames(env, 7.0)
-        check(env.hooks["app.EnemyManager.spawnEnemy"] == nil and env.hooks["app.EnemyManager.requestResource"] ~= nil, "(9.43 spawn log) the method a session ended inside is skipped, the others are hooked")
-        local d = dbg(env)
-        check(d and d.crashes == 1 and d.counts.hooks_skipped == 1 and d.counts.hooks_ok >= 4, "(9.43 spawn log) ...it is counted: " .. tostring(d and d.counts.hooks_skipped))
-        local st = env.files["re7mp/spawnstate.json"]
-        check(st and st.skip and st.skip["hook app.EnemyManager.spawnEnemy(System.String,System.Int32)"] == true and st.crashes == 1, "(9.43 spawn log) ...and remembered in re7mp/spawnstate.json")
-    end
-
-    -- ---- a session that ended while a chain component was read: its getters are not called again, the component is still listed ----
-    do
-        local env = world({ lastcall = "read via.motion.Chain" })
-        run_frames(env, 8.0)
-        env.motions[#env.motions + 1] = env.mia.motion
-        run_frames(env, 6.0)
-        local d = dbg(env)
-        local ph = d and d.episodes[1] and d.episodes[1].her_physics
-        local chain
-        for _, p in ipairs(ph or {}) do if p.t == "via.motion.Chain" then chain = p end end
-        check(chain ~= nil and chain.files == nil, "(9.43 spawn log) a component type that ended a session is listed but none of its getters is called")
-        check(d and d.crashes == 1 and d.skipped_calls[1] == "read via.motion.Chain", "(9.43 spawn log) ...and the skipped call is in the debug file")
-    end
-end
--- END spawnlog scenario
 
 -- =============================================================================================
 -- Scenario 26 (9.44): item sync shares only consumables and weapons (the game's own item category); key items stay in each game, and a weapon
@@ -16585,6 +17474,1440 @@ do
     end
 end
 -- END item sharing scenario
+
+-- =============================================================================================
+-- Scenario 27 (10.1): the motion bank detector: Ethan's own layer-0 bank / clip pair, its name, the label it stands for, the "mot" event, the
+-- table kept in re7mp/motion_banks.json, and the crash marker that switches it off.
+-- =============================================================================================
+do
+    local NAMES = { ["5/21"] = "pl0000_Hands_Reload_00", ["2/7"] = "pl0000_Walk_Loop_F", ["9/9"] = "pl0000_Foo_99", ["4/4"] = "pl0000_Knife_Swing_00" }
+    local function live(env, secs) for _ = 1, math.floor(secs / 0.05 + 0.5) do run_frames(env, 0.05) bump_remote(env) end end
+    local function mbworld(files, opts)
+        opts = opts or {}
+        local env = new_environment()
+        build_world(env)
+        for k, v in pairs(files or {}) do env.files[k] = v end
+        make_td("via.motion.Motion", { methods = { getLayerCount = { ret = "System.Int32" }, getLayer = { params = { "System.Int32" }, ret = "via.motion.TreeLayer" } } })
+        local st = { bank = opts.bank or 5, motion = opts.motion or 21, asks = 0 }
+        env.mst = st
+        local layer = Obj.new("via.motion.TreeLayer", { get_MotionBankID = function() return st.bank end, get_MotionID = function() return st.motion end, get_Frame = function() return 3 end })
+        local pmotion = Obj.new("via.motion.Motion", { getLayerCount = function() return 1 end, getLayer = function() return layer end,
+            ["getMotionInfo(System.UInt32, System.UInt32, via.motion.MotionInfo)"] = function(_, b, m)
+                st.asks = st.asks + 1
+                st.last_name = NAMES[b .. "/" .. m]
+                return st.last_name ~= nil
+            end })
+        local pcomps = env.player.m.get_Components().get_elements()
+        pcomps[#pcomps + 1] = pmotion
+        local real_create = env.G.sdk.create_instance
+        env.G.sdk.create_instance = function(name, simplified)
+            if name == "via.motion.MotionInfo" then
+                local i = Obj.new(name, { get_MotionName = function() return st.last_name end })
+                i.add_ref = function(self) return self end
+                return i
+            end
+            return real_create(name, simplified)
+        end
+        if opts.prep then opts.prep(env) end
+        load_script(env)
+        host_role_files(env, "join", "tcp")
+        live(env, 1.5)
+        return env
+    end
+    local function dbg(env) -- (a press of "Clear the debug log" writes the file at once)
+        live(env, 1.2)
+        env.ui_press["Clear the debug log"] = true
+        run_ui(env)
+        live(env, 0.6)
+        return env.files["re7mp/debug.json"].health.motion_banks
+    end
+    local function mots(env) local out = {} for _, m in ipairs(messages_of_kind(env, 7)) do if m:find("^e|mot|") then out[#out + 1] = m end end return out end
+
+    local e = mbworld()
+    local d = dbg(e)
+    check(d and d.on == true and d.now and d.now.key == "5/21", "(10.1 bank) Ethan's layer-0 pair is read: " .. tostring(d and d.now and d.now.key))
+    check(d.now.name == "pl0000_Hands_Reload_00" and d.now.label == "gun_reload" and d.now.how == "name", "(10.1 bank) ...its name is asked for and the reload label comes from it: " .. tostring(d.now.name) .. " / " .. tostring(d.now.label))
+    check(e.mst.asks == 1, "(10.1 bank) ...the name is asked for once per pair, not every read: " .. e.mst.asks)
+    local m1 = mots(e)
+    check(#m1 >= 1 and m1[#m1]:match("^e|mot|5_21_gun_reload|") ~= nil, "(10.1 bank) ...and the other player is told: " .. tostring(m1[#m1]))
+    check(#m1 <= 4, "(10.1 bank) ...not at every read: " .. #m1 .. " events in 2.5 s")
+    e.mst.bank, e.mst.motion = 2, 7
+    d = dbg(e)
+    check(d.now.key == "2/7" and d.now.label == "walk", "(10.1 bank) a walk name gives the walk label: " .. tostring(d.now.label))
+    check(mots(e)[#mots(e)]:match("^e|mot|2_7_walk|") ~= nil, "(10.1 bank) ...told at once when the pair changes")
+    e.mst.bank, e.mst.motion = 9, 9
+    d = dbg(e)
+    check(d.now.name == "pl0000_Foo_99" and d.now.how ~= "name", "(10.1 bank) a name that says nothing gives no label from the name: " .. tostring(d.now.how))
+    live(e, 2) -- (the pair is sent again every 1.5 s, now with the label)
+    check(d.now.label == "idle" and d.now.how == "pose" and mots(e)[#mots(e)]:match("^e|mot|9_9_idle|") ~= nil, "(10.1 bank) ...it gets the label of what I was doing while it played (I stood still): " .. tostring(d.now.label) .. " / " .. tostring(mots(e)[#mots(e)]))
+    e.mst.bank, e.mst.motion = 4, 4
+    d = dbg(e)
+    check(d.now.label == "melee", "(10.1 bank) a knife swing is a melee: " .. tostring(d.now.label))
+    check(d.names_found == 4 and d.errors == 0 and d.reads > 8, "(10.1 bank) four names found, no errors: " .. tostring(d.names_found) .. " / " .. tostring(d.errors))
+    local ids = 0
+    for _, r in ipairs(d.pairs or {}) do if r.name then ids = ids + 1 end end
+    check(ids == 4, "(10.1 bank) the table in the debug file has the four pairs with names: " .. ids)
+    live(e, 25)
+    local saved = e.files["re7mp/motion_banks.json"]
+    check(saved and #saved.ids >= 4 and saved.ids[1].name ~= nil, "(10.1 bank) the table is kept in re7mp/motion_banks.json: " .. tostring(saved and #saved.ids))
+
+    -- the next session knows the names already (nothing is asked), and a pair seen often with one pose gets that label when its name says nothing
+    local keep = { build = "10.1", ids = {
+        { bank = 5, motion = 21, name = "pl0000_Hands_Reload_00", seen = 30, with = { idle = 30 } },
+        { bank = 7, motion = 7, seen = 40, with = { walk = 39, idle = 1 } } } }
+    local e2 = mbworld({ ["re7mp/motion_banks.json"] = keep })
+    local d2 = dbg(e2)
+    check(e2.mst.asks == 0 and d2.now.label == "gun_reload", "(10.1 bank) a kept name is not asked for again: " .. e2.mst.asks)
+    e2.mst.bank, e2.mst.motion = 7, 7
+    d2 = dbg(e2)
+    check(d2.now.label == "walk" and d2.now.how == "pose", "(10.1 bank) a pair seen with one pose most of the time gets that label: " .. tostring(d2.now.label) .. " " .. tostring(d2.now.how))
+
+    -- the last session ended inside the detector: it is switched off, and says so
+    local e3 = mbworld({ ["re7mp/lastcall.json"] = { stage = "mbank", call = "Ethan clip name 5/21", session = 1699990000, time = 1700000000 } })
+    local d3 = dbg(e3)
+    check(d3.on == false and e3.mst.asks == 0 and #mots(e3) == 0, "(10.1 bank) after a crash inside it the detector is off: nothing is read or sent: on=" .. tostring(d3.on))
+    check(log_has(e3, "motion bank detector was reading Ethan's own animation"), "(10.1 bank) ...and the journal names it")
+
+    -- (10.2) the weapon set of my Motion goes out with the pair ("<bank>_<clip>_<label>.<set>")
+    local e5 = mbworld(nil, { prep = function(env)
+        local pcs = env.player.m.get_Components().get_elements()
+        pcs[#pcs].m.get_TargetBankType = function() return 2 end
+    end })
+    dbg(e5)
+    check(mots(e5)[#mots(e5)] and mots(e5)[#mots(e5)]:match("^e|mot|5_21_gun_reload%.2|") ~= nil, "(10.2 bank) my weapon set goes out with the pair: " .. tostring(mots(e5)[#mots(e5)]))
+
+    -- (10.4) the other layers: a block plays on layers 1 and 2 while layer 0 stays on the Idle tree node
+    NAMES["0/0"], NAMES["0/2300"], NAMES["0/850"] = "pl0000_Idle", "pl0000_Hands_Guard_Loop", "pl0000_Hands_Swept-Bug"
+    local function mols(env) local out = {} for _, m in ipairs(messages_of_kind(env, 7)) do if m:find("^e|mol|") then out[#out + 1] = m end end return out end
+    local e6 = mbworld(nil, { bank = 0, motion = 0, prep = function(env)
+        local pcs = env.player.m.get_Components().get_elements()
+        local pm = pcs[#pcs]
+        local base = pm.m.getLayer
+        env.lay = { bank = 0, id = 2300, fr = 0, frozen = false }
+        local function over(i)
+            return Obj.new("via.motion.TreeLayer", { get_MotionBankID = function() return env.lay.bank end, get_MotionID = function() return env.lay.id end,
+                get_Frame = function() if not env.lay.frozen then env.lay.fr = env.lay.fr + 1 end return env.lay.fr end })
+        end
+        local empty = Obj.new("via.motion.TreeLayer", { get_MotionBankID = function() return 0 end, get_MotionID = function() return 4294967295 end, get_Frame = function() return 0 end })
+        pm.m.getLayerCount = function() return 4 end
+        pm.m.getLayer = function(_, i) if i == 0 then return base(pm, 0) elseif i == 3 then return empty end return over(i) end
+    end })
+    local d6 = dbg(e6)
+    local o6 = d6.other_layers
+    check(d6.now and d6.now.key == "0/0" and d6.now.label == "idle", "(10.4 bank) layer 0 is the Idle tree node: " .. tostring(d6.now and d6.now.key))
+    check(o6 and o6.overlay_now and o6.overlay_now.key == "0/2300" and o6.overlay_now.label == "guard" and o6.overlay_now.layer == 1, "(10.4 bank) ...but layer 1 plays the guard clip, and that is the overlay: " .. tostring(o6 and o6.overlay_now and o6.overlay_now.key))
+    check(mols(e6)[#mols(e6)] and mols(e6)[#mols(e6)]:match("^e|mol|0_2300_guard|") ~= nil and #mols(e6) <= 6, "(10.4 bank) the other player is told with a mol event, not at every read: " .. tostring(mols(e6)[#mols(e6)]) .. " (" .. #mols(e6) .. ")")
+    local pz = (e6.files["re7mp/debug.json"].health.poses or {})
+    check((pz.packets_with_guard or 0) >= 1, "(10.4 bank) ...and the guard flag goes out with my position packets: " .. tostring(pz.packets_with_guard))
+    check(o6.errors == 0 and o6.layers_read >= 3, "(10.4 bank) no errors, the layers are read every time: " .. tostring(o6.layers_read) .. " " .. tostring(o6.last_error))
+    e6.lay.frozen = true -- (the layer keeps its last clip but stops: after 0.6 s it is not counted)
+    live(e6, 1.5) -- (the harness reads about every 0.5 s: two more reads and the layer is stale)
+    d6 = dbg(e6)
+    check(d6.other_layers.overlay_now == nil and mols(e6)[#mols(e6)]:match("^e|mol|0_0_none|") ~= nil, "(10.4 bank) a layer that stopped is not the overlay any more, and they are told: " .. tostring(mols(e6)[#mols(e6)]) .. " / overlay " .. tostring(d6.other_layers.overlay_now and d6.other_layers.overlay_now.key) .. " frame " .. tostring(d6.other_layers.overlay_now and d6.other_layers.overlay_now.frame) .. " / frozen " .. tostring(e6.lay.frozen) .. " fr " .. tostring(e6.lay.fr))
+    e6.lay.frozen, e6.lay.id = false, 850 -- a clip that is neither a block, a heal, a melee nor a reload
+    d6 = dbg(e6)
+    check(d6.other_layers.overlay_now == nil and d6.other_layers.every_pair_seen_on_those_layers["0/850"] ~= nil, "(10.4 bank) another clip on those layers is no overlay, but is listed for the next build")
+    e6.lay.id = 2300
+    live(e6, 1.5) -- (the debug file lags the reads by about a second)
+    d6 = dbg(e6)
+    do
+        local sn = d6.other_layers.every_pair_seen_on_those_layers or {}
+        local parts = {}
+        for k, v in pairs(sn) do parts[#parts + 1] = k .. "=" .. tostring(type(v) == "table" and v.n or v) end
+        check(d6.other_layers.overlay_now ~= nil, "(10.4 bank) ...and the block is found again: seen " .. table.concat(parts, ",") .. "; layers_read " .. tostring(d6.other_layers.layers_read) .. "; id " .. tostring(e6.lay.id) .. " fr " .. tostring(e6.lay.fr) .. " frozen " .. tostring(e6.lay.frozen) .. "; last " .. tostring(d6.last) .. "; errors " .. tostring(d6.other_layers.errors) .. " " .. tostring(d6.other_layers.last_error) .. "; sent " .. tostring(d6.other_layers.sent) .. "; clock " .. tostring(e6.clock) .. "; mols " .. #mols(e6) .. " last " .. tostring(mols(e6)[#mols(e6)]) .. " 850 row: " .. tostring(d6.ids and d6.ids["0/850"] and d6.ids["0/850"].name))
+    end
+
+    -- (10.10) the small actions: a clip of 1000 or more on one of the layers 1 to 7 (touching a door, the codex ...) goes out as the "act" event, with its layer, joint mask and blend mode.
+    -- The weapon's hold poses (2000 to 2099, 2200 to 2204) and the clip already sent as the block / heal overlay are not small actions.
+    NAMES["0/9012"], NAMES["0/2010"] = "pl0000_Hands_DoorPush_00", "pl0000_Hands_Hold_Gun"
+    local function acts(env) local out = {} for _, m in ipairs(messages_of_kind(env, 7)) do if m:find("^e|act|") then out[#out + 1] = m end end return out end
+    local e7 = mbworld(nil, { bank = 0, motion = 0, prep = function(env)
+        local pcs = env.player.m.get_Components().get_elements()
+        local pm = pcs[#pcs]
+        local base = pm.m.getLayer
+        env.al = {} -- layer number -> { bank, id, mask, blend, fr, frozen }
+        local empty = Obj.new("via.motion.TreeLayer", { get_MotionBankID = function() return 0 end, get_MotionID = function() return 4294967295 end, get_Frame = function() return 0 end })
+        pm.m.getLayerCount = function() return 8 end
+        pm.m.getLayer = function(_, i)
+            if i == 0 then return base(pm, 0) end
+            local a = env.al[i]
+            if not a then return empty end
+            return Obj.new("via.motion.TreeLayer", { get_MotionBankID = function() return a.bank end, get_MotionID = function() return a.id end,
+                get_Frame = function() if not a.frozen then a.fr = a.fr + 1 end return a.fr end,
+                get_JointMaskID = function() return a.mask end, get_BlendMode = function() return a.blend end })
+        end
+    end })
+    check(#acts(e7) == 0 or acts(e7)[#acts(e7)]:match("^e|act|0_0_0_0_0|") ~= nil, "(10.10 act) nothing on the layers: no action is sent: " .. tostring(acts(e7)[#acts(e7)]))
+    e7.al[4] = { bank = 0, id = 9012, mask = 3, blend = 1, fr = 0 }
+    local d7 = dbg(e7)
+    check(acts(e7)[#acts(e7)] and acts(e7)[#acts(e7)]:match("^e|act|4_0_9012_3_1|") ~= nil, "(10.10 act) a moving clip of 9012 on layer 4 is sent with its mask and blend mode: " .. tostring(acts(e7)[#acts(e7)]))
+    local sa7 = d7.small_actions
+    check(sa7 and sa7.playing_now and sa7.playing_now.motion == 9012 and sa7.seen["0/9012"] and sa7.seen["0/9012"].mask == 3 and sa7.sent >= 1, "(10.10 act) ...and the debug file lists it: " .. tostring(sa7 and sa7.sent))
+    live(e7, 3)
+    local n_sent = #acts(e7)
+    live(e7, 3)
+    check(#acts(e7) - n_sent <= 4, "(10.10 act) ...it is sent again now and then, not at every read: " .. (#acts(e7) - n_sent) .. " in 3 s")
+    -- the camera's own clips (bank 1: CamAdd_Shake_Loop 1011, ShipShake 1000) are not small actions
+    e7.al[4] = { bank = 1, id = 1011, mask = 3, blend = 1, fr = 0 }
+    d7 = dbg(e7)
+    check(d7.small_actions.playing_now == nil and acts(e7)[#acts(e7)]:match("^e|act|0_0_0_0_0|") ~= nil, "(10.10 act) a camera clip of bank 1 (1011) is not a small action; the end is sent: " .. tostring(acts(e7)[#acts(e7)]))
+    -- hold poses are not small actions; the first allowed clip on a layer in the other mod's order (4, 1, 2, ...) wins
+    e7.al[4] = { bank = 0, id = 2010, mask = 3, blend = 1, fr = 0 }
+    d7 = dbg(e7)
+    check(d7.small_actions.playing_now == nil and acts(e7)[#acts(e7)]:match("^e|act|0_0_0_0_0|") ~= nil, "(10.10 act) a hold pose (2010) is not a small action; the end is sent: " .. tostring(acts(e7)[#acts(e7)]))
+    e7.al[4] = nil
+    e7.al[2] = { bank = 0, id = 9012, mask = 7, blend = 0, fr = 0 }
+    d7 = dbg(e7)
+    check(acts(e7)[#acts(e7)]:match("^e|act|2_0_9012_7_0|") ~= nil, "(10.10 act) the same clip on layer 2 is sent with layer 2 and its own mask: " .. tostring(acts(e7)[#acts(e7)]))
+    -- a clip that stopped moving is not an action any more
+    e7.al[2].frozen = true
+    live(e7, 1.5)
+    d7 = dbg(e7)
+    check(d7.small_actions.playing_now == nil and acts(e7)[#acts(e7)]:match("^e|act|0_0_0_0_0|") ~= nil, "(10.10 act) a clip that stopped is not an action: the end is sent: " .. tostring(acts(e7)[#acts(e7)]))
+    -- with the box off nothing is sent
+    local e8 = mbworld({ ["re7mp/settings.json"] = { act_layers = false } }, { bank = 0, motion = 0, prep = function(env)
+        local pcs = env.player.m.get_Components().get_elements()
+        local pm = pcs[#pcs]
+        local base = pm.m.getLayer
+        pm.m.getLayerCount = function() return 8 end
+        pm.m.getLayer = function(_, i)
+            if i == 0 then return base(pm, 0) end
+            local fr = 0
+            return Obj.new("via.motion.TreeLayer", { get_MotionBankID = function() return 0 end, get_MotionID = function() return i == 4 and 9012 or 4294967295 end,
+                get_Frame = function() fr = fr + 1 return fr end, get_JointMaskID = function() return 3 end, get_BlendMode = function() return 1 end })
+        end
+    end })
+    dbg(e8)
+    check(#acts(e8) == 0 and dbg(e8).small_actions.on == false, "(10.10 act) with the box off (act_layers false) no action is sent: " .. #acts(e8))
+    -- the setting is saved
+    do
+        e7.ui_press["Clear the debug log"] = true
+        run_ui(e7)
+        live(e7, 3)
+        local st = e7.files["re7mp/settings.json"]
+        check(st and st.act_layers == true, "(10.10 act) the setting act_layers is kept in settings.json: " .. tostring(st and st.act_layers))
+    end
+
+    -- (10.14) a scripted move of my Ethan (the van door, a ladder ...): the path of the event's motion list, then the clip, go out as kind 16 ("j|<clip>|<path>", "j|-" when it is over);
+    -- the banks my body has added (3 and up) go out as "b|<id>|<overwrite>|<path>". My layer-0 pair in the move is a number of THAT list: it is not sent as "mot" and not learned.
+    do
+        local LADDER = "Animation/Props/Ladder/motlist/Ladder.motlist"
+        local function js(env) local out = {} for _, m in ipairs(messages_of_kind(env, 16)) do out[#out + 1] = m end return out end
+        local function jworld(files)
+            return mbworld(files, { bank = 5, motion = 21, prep = function(env)
+                local pcs = env.player.m.get_Components().get_elements()
+                local pm = pcs[#pcs]
+                env.jk = { active = false, path = LADDER, bank = 12, dyn = {} }
+                local holder = Obj.new("via.motion.MotionListResourceHolder", { get_ResourcePath = function() return env.jk.path end })
+                local jbank = Obj.new("via.motion.MotionBank", { get_MotionList = function() return holder end, get_BankID = function() return env.jk.bank end })
+                local jfsm = Obj.new("app.MotionJackFsm", { getActiveMotionBank = function(_, i) return jbank end })
+                local ea = Obj.new("app.EventAction", { get_motionJackFsm = function() return jfsm end })
+                local ep = Obj.new("app.EventParam", {}, { ["<eventAction>k__BackingField"] = ea })
+                local task = Obj.new("app.Task", { get_eventParam = function() return ep end })
+                pcs[#pcs + 1] = Obj.new("app.EventActionController", { get_isActive = function() return env.jk.active end }, { CurrentTask = task })
+                -- the banks the game added to my body
+                pm.m.getDynamicMotionBankCount = function() return #env.jk.dyn end
+                pm.m.getDynamicMotionBank = function(_, i)
+                    local d = env.jk.dyn[i + 1]
+                    local h = Obj.new("via.motion.MotionListResourceHolder", { get_ResourcePath = function() return d.path end })
+                    return Obj.new("via.motion.DynamicMotionBank", { get_BankID = function() return d.id end, get_MotionList = function() return h end, get_OverwriteBankID = function() return d.ow end })
+                end
+            end })
+        end
+        local ej = jworld()
+        dbg(ej)
+        check(#js(ej) == 0, "(10.14 jack) not in a scripted move: nothing is sent: " .. #js(ej))
+        ej.jk.active = true
+        ej.mst.bank, ej.mst.motion = 12, 5 -- (layer 0 plays clip 5 of the move's list, bank 12)
+        local d14 = dbg(ej)
+        local jm = js(ej)
+        check(jm[1] == "j|-1|" .. LADDER, "(10.14 jack) the list goes out first, with no clip yet: " .. tostring(jm[1]))
+        check(jm[#jm] == "j|5|" .. LADDER, "(10.14 jack) ...then the clip layer 0 plays from that list's bank: " .. tostring(jm[#jm]))
+        check(d14.scripted_moves.mine and d14.scripted_moves.mine.path == LADDER and d14.scripted_moves.mine.bank == 12, "(10.14 jack) ...and the debug file says which list: " .. tostring(d14.scripted_moves.mine and d14.scripted_moves.mine.path))
+        local mot_n = #mots(ej)
+        ej.mst.motion = 6
+        dbg(ej)
+        local jm2 = js(ej)
+        check(jm2[#jm2] == "j|6|" .. LADDER, "(10.14 jack) a new clip of the move is sent at once: " .. tostring(jm2[#jm2]))
+        check(#mots(ej) == mot_n, "(10.14 jack) ...and my layer-0 pair is NOT sent as a 'mot' event meanwhile: " .. (#mots(ej) - mot_n))
+        local n_sent = #js(ej)
+        live(ej, 3)
+        check(#js(ej) - n_sent >= 1 and #js(ej) - n_sent <= 4, "(10.14 jack) ...the same clip is repeated now and then (every 1.5 s), not at every read: " .. (#js(ej) - n_sent) .. " in 3 s")
+        ej.mst.bank = 7 -- layer 0 is not on the move's bank (a tree node in between): the list only
+        dbg(ej)
+        check(js(ej)[#js(ej)] == "j|-1|" .. LADDER, "(10.14 jack) a layer 0 that is not on the move's bank sends no clip: " .. tostring(js(ej)[#js(ej)]))
+        ej.jk.active = false
+        dbg(ej)
+        check(js(ej)[#js(ej)] == "j|-", "(10.14 jack) when the event is over 'j|-' goes out: " .. tostring(js(ej)[#js(ej)]))
+        local n_end = #js(ej)
+        live(ej, 3)
+        check(#js(ej) == n_end and dbg(ej).scripted_moves.mine.path == nil, "(10.14 jack) ...once, and nothing more is sent: " .. (#js(ej) - n_end))
+        -- a list path that cannot be sent (spaces) is not a scripted move
+        ej.jk.active, ej.jk.path = true, "Bad Path.motlist"
+        dbg(ej)
+        check(#js(ej) == n_end, "(10.14 jack) a list path that cannot be sent is not sent: " .. (#js(ej) - n_end))
+        -- the banks the game added to my body
+        local BKP = "Animation/Enemy/Grab/motlist/Grab.motlist"
+        ej.jk.active = false
+        ej.jk.dyn = { { id = 9, ow = true, path = BKP }, { id = 2, ow = true, path = "Animation/x/motlist/Two.motlist" }, { id = 30, ow = true, path = "Animation/x/motlist/Thirty.motlist" } }
+        dbg(ej)
+        local bs = {}
+        for _, m in ipairs(js(ej)) do if m:find("^b|") then bs[#bs + 1] = m end end
+        check(#bs == 1 and bs[1] == "b|9|1|" .. BKP, "(10.14 bank) a bank the game added to my body goes out (ids 3 to 63 only; 30 is the move's own): " .. table.concat(bs, " , "))
+        live(ej, 3)
+        local bs2 = 0
+        for _, m in ipairs(js(ej)) do if m:find("^b|") then bs2 = bs2 + 1 end end
+        check(bs2 == 1, "(10.14 bank) ...once, not at every read: " .. bs2)
+        ej.jk.dyn[1].path = "Animation/Enemy/Grab/motlist/Grab2.motlist"
+        dbg(ej)
+        local last_b
+        for _, m in ipairs(js(ej)) do if m:find("^b|") then last_b = m end end
+        check(last_b == "b|9|1|Animation/Enemy/Grab/motlist/Grab2.motlist", "(10.14 bank) a changed list is sent again: " .. tostring(last_b))
+        check(dbg(ej).scripted_moves.counts.banks_sent == 2, "(10.14 bank) ...the debug file counts them: " .. tostring(dbg(ej).scripted_moves.counts.banks_sent))
+        -- the last session ended inside it: nothing is read or sent
+        local ek = jworld({ ["re7mp/lastcall.json"] = { stage = "jack", call = "read the list of my scripted move", session = 1699990000, time = 1700000000 } })
+        ek.jk.active = true
+        ek.mst.bank, ek.mst.motion = 12, 5
+        local dk = dbg(ek)
+        check(dk.scripted_moves.on == false and #js(ek) == 0 and #mots(ek) >= 1, "(10.14 jack) after a crash inside it nothing is sent, and the rest of the detector still works: on=" .. tostring(dk.scripted_moves.on) .. " mots " .. #mots(ek))
+    end
+
+    -- someone who is not Ethan is not read
+    local e4 = mbworld(nil, { prep = function(env)
+        env.scene_objects[1] = make_go("Pl2000", vec(0, 0, 0), env.player:call("get_Components"):get_elements())
+        env.scene = make_scene(env.scene_objects)
+    end })
+    local d4 = dbg(e4)
+    check(d4.now == nil, "(10.1 bank) while I play Mia nothing is read from the Ethan layer: " .. tostring(d4.now and d4.now.key))
+end
+
+-- =============================================================================================
+-- Scenario 28 (10.5): Ethan's friend (the loopback bot). Weapons and ammo are SHARED (a gift of one is refused, you keep it), everything else it is given is its
+-- own inventory (kept in re7mp/friend.json); a real player is not affected; the old name "Loopback Bot" (an older re7mp.exe) is the same friend.
+-- =============================================================================================
+do
+    local function friend_world(name, files)
+        local env = new_environment()
+        build_world(env)
+        for k, v in pairs(files or {}) do env.files[k] = v end
+        load_script(env)
+        host_role_files(env, "host", "tcp")
+        env.files["re7mp_in.json"].name = name
+        near_remote(env)
+        run_frames(env, 0.3)
+        bump_remote(env)
+        return env
+    end
+    local function friend_dbg(env)
+        run_frames(env, 1.2) -- (the debug file lags the reads by about a second)
+        env.ui_press["Clear the debug log"] = true
+        run_ui(env)
+        run_frames(env, 0.6)
+        return env.files["re7mp/debug.json"].health.friend
+    end
+    local function press(env, label)
+        env.ui_press[label] = true
+        run_ui(env)
+        run_frames(env, 0.2)
+        bump_remote(env)
+    end
+    for _, nm in ipairs({ "Ethan's friend", "Loopback Bot" }) do
+        local env = friend_world(nm)
+        env.check_override[LAST_BOX] = true -- the last one of a kind may be given (so a refusal is the friend's rule, not the whole-entry rule)
+        run_ui(env)
+        calls = {}
+        press(env, "Give all##a3") -- HandgunBullet x15: ammo (10.8: it carries and shoots its own ammo, so it is accepted like anything else)
+        local m5a = messages_of_kind(env, 5)
+        check(m5a[#m5a] == "HandgunBullet|15", "(10.8 friend, " .. nm .. ") ammo is offered like anything else (10.5: refused as shared): " .. tostring(m5a[#m5a]))
+        push_msgs(env, { { 10, "g|HandgunBullet|15|ok|Ethan's friend took it" } })
+        run_frames(env, 0.3)
+        bump_remote(env)
+        check(calls_have("Inventory.reduceItem HandgunBullet 15"), "(10.8 friend) ...and it leaves my inventory when the friend confirms")
+        press(env, "Give 1##g2") -- Gunpowder: an ordinary item
+        local m5 = messages_of_kind(env, 5)
+        check(m5[#m5] == "Gunpowder|1", "(10.5 friend) anything else is offered as before: " .. tostring(m5[#m5]))
+        push_msgs(env, { { 10, "g|Gunpowder|1|ok|Ethan's friend took it" } })
+        run_frames(env, 0.3)
+        bump_remote(env)
+        check(calls_have("Inventory.reduceItem Gunpowder 1 true"), "(10.5 friend) ...and it leaves my inventory when the friend confirms")
+        local f = friend_dbg(env)
+        check(f and f.is_here_now == true and f.items_taken == 16 and #f.carries == 2 and f.carries[1].id == "Gunpowder" and f.carries[1].count == 1 and f.carries[2].id == "HandgunBullet" and f.carries[2].count == 15,
+            "(10.8 friend) the debug file lists what it carries and what it took: " .. tostring(f and f.items_taken) .. " / " .. tostring(f and #f.carries))
+        local ff = env.files["re7mp/friend.json"]
+        check(ff and ff.inventory and ff.inventory.Gunpowder == 1 and ff.inventory.HandgunBullet == 15, "(10.8 friend) ...and friend.json keeps it, ammo included")
+        run_ui(env)
+        check(ui_has(env, "WHAT IT DOES FOR ITSELF") and ui_has(env, "   Gunpowder x1") and ui_has(env, "   HandgunBullet x15"), "(10.8 friend) the panel section lists what the friend carries")
+    end
+    -- a real player (Bob) is not the friend: ammo goes over as before, nothing is recorded, and the friend's section says it is not here
+    do
+        local env = friend_world("Bob")
+        env.check_override[LAST_BOX] = true
+        run_ui(env)
+        press(env, "Give all##a3")
+        local m5 = messages_of_kind(env, 5)
+        check(m5[#m5] == "HandgunBullet|15", "(10.5 friend) a real player can be given ammo as before: " .. tostring(m5[#m5]))
+        push_msgs(env, { { 10, "g|HandgunBullet|15|ok|in the inventory" } })
+        run_frames(env, 0.3)
+        bump_remote(env)
+        local f = friend_dbg(env)
+        check(f and f.is_here_now == false and f.items_taken == 0 and #f.carries == 0 and f.gifts_refused_as_shared == 0, "(10.5 friend) ...and the friend's inventory is untouched by it")
+        check(env.files["re7mp/friend.json"] == nil, "(10.5 friend) ...and no friend file is written")
+    end
+    -- what the friend carries comes back after a restart
+    do
+        local env = friend_world("Ethan's friend", { ["re7mp/friend.json"] = { inventory = { Gunpowder = 4, Herb = 2, ["bad id"] = 3, Neg = -1 } } })
+        local f = friend_dbg(env)
+        check(f and #f.carries == 2 and f.carries[1].id == "Gunpowder" and f.carries[1].count == 4 and f.carries[2].id == "Herb", "(10.5 friend) its inventory is read back at the next start (a bad entry is dropped): " .. tostring(f and #f.carries))
+    end
+end
+
+-- =============================================================================================
+-- Scenario 29 (10.6): Ethan's friend helps: it gets you up when you are down (within 3 m for 3 s, no item) and heals you from ITS OWN inventory when
+-- your health is low (default 40 %); a real player is never helped by it; the switches, the slider and the settings.
+-- =============================================================================================
+do
+    local FRIEND_REVIVE = "It gets me up when I am down: it stays within 3 m for 3 s, no item is used##friendrevive"
+    local FRIEND_HEAL = "It uses a healing item from its own inventory on me when my health is low##friendheal"
+    local FRIEND_HELPS = "Ethan's friend helps me (gets me up, heals me)##friendhelps"
+    local FRIEND_BELOW = "...when my health is at or below (% of my maximum)##friendbelow"
+    local function helper_world(name, inv, files)
+        local env = new_environment()
+        build_world(env)
+        env.files["re7mp/settings.json"] = { death_mode_choice = 4 }
+        if inv then env.files["re7mp/friend.json"] = { inventory = inv } end
+        for k, v in pairs(files or {}) do env.files[k] = v end
+        load_script(env)
+        host_role_files(env, "host", "tcp")
+        env.files["re7mp_in.json"].name = name
+        near_remote(env) -- 2 m
+        for i = 1, 30 do run_frames(env, 0.05) bump_remote(env) end -- (the first second after the health object is found is muted)
+        return env
+    end
+    local function live(env, secs)
+        for i = 1, math.floor(secs / 0.05 + 0.5) do run_frames(env, 0.05) bump_remote(env) end
+    end
+    local function hp(env) return env.player_hi.f._CurrentHealth end
+    local function hit(env, new_hp)
+        local hi = env.player_hi
+        env.hooks["app.HealthInfo.set_health"]({ 0, hi })
+        hi.f._CurrentHealth = new_hp
+        env.posthooks["app.HealthInfo.set_health"](nil)
+    end
+    local function panel(env) env.ui_texts = {} run_ui(env) end
+    local function events(env, pattern)
+        local n = 0
+        for _, m in ipairs(messages_of_kind(env, 7)) do if m:match(pattern) then n = n + 1 end end
+        return n
+    end
+    local function carried(env, id) -- from the file the script keeps
+        local f = env.files["re7mp/friend.json"]
+        return f and f.inventory and f.inventory[id] or nil
+    end
+
+    -- REVIVE: down, it is 2 m away: it stays 3 s, then you are up (no item used), at the revive health
+    do
+        local env = helper_world("Ethan's friend", { Herb = 2 })
+        hit(env, 0)
+        live(env, 1.0)
+        panel(env)
+        check(ui_has(env, "YOU ARE DOWN: waiting for Ethan's friend"), "(10.6) down: the panel says so")
+        check(ui_has(env, "Now: helping you up"), "(10.6) the friend starts helping you up at once (it is 2 m away)")
+        env.texts = {}
+        live(env, 0.3)
+        check(texts_have(env, "Ethan's friend: helping you up"), "(10.6) ...and the screen says what it is doing")
+        live(env, 1.0)
+        check(hp(env) == 1 and events(env, "^e|up||") == 0, "(10.6) after about 2 s it has not got you up yet")
+        live(env, 1.6)
+        check(events(env, "^e|up||") == 1 and hp(env) == 300, "(10.6) after the revive time you are up with the revive health (30 %): " .. tostring(hp(env)))
+        check(carried(env, "Herb") == 2, "(10.6) ...and no item was used for it: " .. tostring(carried(env, "Herb")))
+        check(events(env, "^e|down||") == 1, "(10.6) (it was told you were down once)")
+    end
+    -- the revive health is 300 (30 %), under 40 %: with a Herb it then heals you
+    do
+        local env = helper_world("Ethan's friend", { Herb = 2 })
+        hit(env, 0)
+        live(env, 3.6)
+        check(hp(env) == 300, "(10.6) revived to 300 first")
+        live(env, 1.4 + 2.6)
+        check(hp(env) == 550 and carried(env, "Herb") == 1, "(10.6) ...then at 30 % it uses a Herb on you (+25 %) and the Herb leaves its inventory: " .. tostring(hp(env)) .. " / " .. tostring(carried(env, "Herb")))
+        live(env, 4)
+        check(hp(env) == 550 and carried(env, "Herb") == 1, "(10.6) ...and at 55 % it does nothing more")
+    end
+    -- too far: it does not help you up; it has to be within the revive distance
+    do
+        local env = helper_world("Ethan's friend", { Herb = 1 })
+        near_remote(env, 3, 4) -- 5 m
+        hit(env, 0)
+        live(env, 4)
+        panel(env)
+        check(hp(env) == 1 and ui_has(env, "YOU ARE DOWN"), "(10.6) 5 m away: you stay down")
+        check(ui_has(env, "Now: you are down and it is 5.0 m away"), "(10.6) ...and the panel says how far it is")
+        near_remote(env) -- it arrives
+        live(env, 1.0)
+        near_remote(env, 3, 4) -- ...and leaves again after one second
+        live(env, 2.5)
+        check(hp(env) == 1, "(10.6) it left again before the time was up: you are still down")
+        near_remote(env)
+        live(env, 3.4)
+        check(hp(env) == 300, "(10.6) it came back and stayed: you are up: " .. tostring(hp(env)))
+        local f = (function() live(env, 1.2) env.ui_press["Clear the debug log"] = true run_ui(env) live(env, 0.6) return env.files["re7mp/debug.json"].health.friend end)()
+        check(f and f.helps and f.helps.revived_you == 1 and f.helps.revive_stopped == 1, "(10.6) the debug file counts it: revived " .. tostring(f and f.helps and f.helps.revived_you) .. ", stopped " .. tostring(f and f.helps and f.helps.revive_stopped))
+    end
+    -- HEAL: 35 % is under 40 %: after a moment it uses the Herb; the animation takes 2.4 s, then the Herb is spent and the health is up
+    do
+        local env = helper_world("Ethan's friend", { Herb = 2, Gunpowder = 1, ChemicalS = 1 })
+        live(env, 3)
+        check(hp(env) == 600 and carried(env, "Herb") == 2, "(10.6) 60 % health: it does nothing")
+        panel(env)
+        check(ui_has(env, "Healing items it carries: Herb x2 (25%)") and not ui_has(env, "Gunpowder x1 (") and not ui_has(env, "ChemicalS x1 ("), "(10.6) the panel lists only the healing items it carries: Herb")
+        hit(env, 350)
+        live(env, 0.8)
+        check(hp(env) == 350, "(10.6) 35 %: it waits a moment before it starts")
+        live(env, 1.2)
+        panel(env)
+        check(ui_has(env, "Now: using a Herb on you"), "(10.6) ...then it is using a Herb on you")
+        env.texts = {}
+        live(env, 0.3)
+        check(texts_have(env, "Ethan's friend: using a Herb on you") and texts_have(env, "[healing]"), "(10.6) ...shown on screen and its body shows the heal pose")
+        check(hp(env) == 350 and carried(env, "Herb") == 2, "(10.6) the Herb is not spent while it is being used")
+        live(env, 2.4)
+        check(hp(env) == 600 and carried(env, "Herb") == 1, "(10.6) after 2.4 s the Herb leaves ITS inventory and you get +25 % (350 -> 600): " .. tostring(hp(env)) .. " / " .. tostring(carried(env, "Herb")))
+        check(env.files["re7mp/friend.json"].inventory.Gunpowder == 1, "(10.6) the rest of its inventory is kept")
+        check(events(env, "^e|heal|Herb") == 0, "(10.6) it is not reported to the friend as a heal of MINE")
+        local f = (function() live(env, 1.2) env.ui_press["Clear the debug log"] = true run_ui(env) live(env, 0.6) return env.files["re7mp/debug.json"].health.friend end)()
+        local h = f and f.helps
+        check(h and h.healed_you == 1 and h.last_heal and h.last_heal.item == "Herb" and h.last_heal.from == 350 and h.last_heal.to == 600 and h.heals_you_at_percent_or_less == 40,
+            "(10.6) the debug file says what it did: " .. tostring(h and h.last_heal and h.last_heal.item))
+        check(h and #h.healing_items == 1 and h.healing_items[1].id == "Herb" and h.healing_items[1].gives_percent == 25 and h.percent_given.first_aid_med == 33, "(10.6) ...what it carries and what an item gives back")
+    end
+    -- the test button, the cooldown, and a second heal when it is still low
+    do
+        local env = helper_world("Ethan's friend", { Herb = 3 })
+        env.ui_press["Test: drop my health under the heal level now (to see it heal me)##friendlow"] = true
+        run_ui(env)
+        check(hp(env) == 300, "(10.6) the test button puts your health at 30 % (10 % under the level): " .. tostring(hp(env)))
+        live(env, 3.8)
+        check(hp(env) == 550 and carried(env, "Herb") == 2, "(10.6) ...and it heals you: " .. tostring(hp(env)))
+        hit(env, 200) -- hit again right away
+        live(env, 0.9)
+        check(hp(env) == 200, "(10.6) a second heal waits for the cooldown and the moment of noticing")
+        live(env, 5.2)
+        check(hp(env) == 450 and carried(env, "Herb") == 1, "(10.6) ...then it heals again: " .. tostring(hp(env)))
+    end
+    -- walking out of its reach during a use: nothing is spent
+    do
+        local env = helper_world("Ethan's friend", { Herb = 1 })
+        hit(env, 300)
+        live(env, 2.2)
+        panel(env)
+        check(ui_has(env, "Now: using a Herb on you"), "(10.6) it is using the Herb")
+        near_remote(env, 3, 4)
+        live(env, 0.3)
+        check(carried(env, "Herb") == 1 and hp(env) == 300, "(10.6) you walked out of its reach: the Herb is not spent and you are not healed")
+        check(log_has(env, "Ethan's friend: stopped using the Herb: you are out of its reach"), "(10.6) ...and the log says why")
+        live(env, 3)
+        check(hp(env) == 300, "(10.6) 5 m away it does not start again")
+        panel(env)
+        check(ui_has(env, "it is 5.0 m away"), "(10.6) ...the panel says how far it is")
+        near_remote(env)
+        live(env, 4.2)
+        check(hp(env) == 550 and carried(env, "Herb") == nil, "(10.6) it comes back and heals you; the last Herb is gone from its inventory: " .. tostring(hp(env)))
+    end
+    -- the weakest item that lifts you back over the level, else the strongest
+    do
+        local env = helper_world("Ethan's friend", { Herb = 1, RemedyM = 1 })
+        hit(env, 300) -- 30 %: Herb +25 = 55 % is enough
+        live(env, 4.2)
+        check(hp(env) == 550 and carried(env, "Herb") == nil and carried(env, "RemedyM") == 1, "(10.6) at 30 % the Herb is enough, so it uses the Herb: " .. tostring(hp(env)))
+        hit(env, 100) -- 10 %: a Herb alone would leave you at 35 %, so the First Aid Med (+33 %) comes first
+        live(env, 5.4) -- (the cooldown after the first heal is 3 s)
+        check(hp(env) == 430 and carried(env, "RemedyM") == nil, "(10.6) at 10 % it uses the First Aid Med (+33 %): " .. tostring(hp(env)))
+    end
+    -- nothing to heal with: it says so once
+    do
+        local env = helper_world("Ethan's friend", { Gunpowder = 2 })
+        hit(env, 300)
+        live(env, 2.0)
+        panel(env)
+        check(hp(env) == 300 and ui_has(env, "It carries no healing item") and ui_has(env, "Now: your health is 30% and it carries no healing item"), "(10.6) with no healing item it says so")
+        check(log_has(env, "Ethan's friend: your health is 30% but it carries no healing item"), "(10.6) ...in the log, once")
+        live(env, 5)
+        local n = 0
+        for _, l in ipairs(env.log or {}) do if tostring(l):find("carries no healing item", 1, true) then n = n + 1 end end
+        check(n == 1, "(10.6) ...only once: " .. n)
+    end
+    -- the switches and the slider
+    do
+        local env = helper_world("Ethan's friend", { Herb = 2 })
+        env.check_override[FRIEND_HEAL] = false
+        run_ui(env)
+        hit(env, 300)
+        live(env, 5)
+        check(hp(env) == 300, "(10.6) 'heals me' unticked: it does not heal you")
+        env.check_override[FRIEND_HEAL] = true
+        env.slider_override[FRIEND_BELOW] = 25
+        run_ui(env)
+        live(env, 5)
+        check(hp(env) == 300, "(10.6) the level moved down to 25 %: 30 % is not low")
+        env.slider_override[FRIEND_BELOW] = 50
+        run_ui(env)
+        live(env, 4.2)
+        check(hp(env) == 550, "(10.6) ...up to 50 %: it heals you: " .. tostring(hp(env)))
+        live(env, 3)
+        local st = env.files["re7mp/settings.json"]
+        check(st and st.friend_heal_below == 50 and st.friend_heal == true and st.friend_revive == true and st.friend_helps == true, "(10.6) the switches and the level are remembered")
+        -- revive off
+        env.check_override[FRIEND_REVIVE] = false
+        run_ui(env)
+        hit(env, 0)
+        live(env, 5)
+        check(hp(env) == 1, "(10.6) 'gets me up' unticked: you stay down")
+        env.check_override[FRIEND_REVIVE] = true
+        run_ui(env)
+        live(env, 3.4)
+        check(hp(env) >= 300, "(10.6) ticked again: you are up: " .. tostring(hp(env)))
+        -- everything off
+        env.check_override[FRIEND_HELPS] = false
+        run_ui(env)
+        hit(env, 100)
+        live(env, 5)
+        check(hp(env) == 100, "(10.6) 'helps me' unticked: nothing at all")
+    end
+    -- the settings come back at the next start (and a bad value is not taken)
+    do
+        local env = helper_world("Ethan's friend", { Herb = 1 }, { ["re7mp/settings.json"] = { death_mode_choice = 4, friend_heal_below = 35, friend_heal = false, friend_helps = true } })
+        run_ui(env)
+        check(env.seen_checks[FRIEND_HEAL] == false and env.seen_checks[FRIEND_HELPS] == true, "(10.6) the saved switches are read back")
+        hit(env, 300)
+        live(env, 5)
+        check(hp(env) == 300, "(10.6) ...and applied")
+        local env2 = helper_world("Ethan's friend", { Herb = 1 }, { ["re7mp/settings.json"] = { death_mode_choice = 4, friend_heal_below = 5 } })
+        hit(env2, 350)
+        live(env2, 4.2)
+        check(hp(env2) == 600, "(10.6) a level outside 10..80 is not taken: the default 40 % stands")
+    end
+    -- a real player is never helped
+    do
+        local env = helper_world("Bob", { Herb = 2 })
+        hit(env, 300)
+        live(env, 5)
+        check(hp(env) == 300 and carried(env, "Herb") == 2, "(10.6) a real player does not heal you from the friend's inventory")
+        hit(env, 0)
+        live(env, 5)
+        check(hp(env) == 1, "(10.6) ...and does not get you up by itself")
+        panel(env)
+        check(ui_has(env, "Now: it is not here"), "(10.6) the panel says the friend is not here")
+    end
+    -- the friend is down itself: it can't help
+    do
+        local env = helper_world("Ethan's friend", { Herb = 2 })
+        push_msgs(env, { { 7, "e|down||1.20|1.60|1.60" } })
+        live(env, 0.5)
+        hit(env, 300)
+        live(env, 5)
+        check(hp(env) == 300, "(10.6) the friend is down itself: it does not heal you")
+        panel(env)
+        check(ui_has(env, "Now: it is down itself"), "(10.6) ...the panel says why")
+        push_msgs(env, { { 7, "e|up||1.20|1.60|1.60" } })
+        live(env, 4.4)
+        check(hp(env) == 550, "(10.6) back up, it heals you: " .. tostring(hp(env)))
+    end
+    -- downed mode off: a hit can't take you down, but a low health is still healed
+    do
+        local env = helper_world("Ethan's friend", { Herb = 1 }, { ["re7mp/settings.json"] = { death_mode_choice = 1 } })
+        hit(env, 300)
+        live(env, 4.4)
+        check(hp(env) == 550, "(10.6) without downed mode it still heals you when you are low: " .. tostring(hp(env)))
+    end
+end
+
+-- =============================================================================================
+-- Scenario 30 (10.7): Ethan's friend acts for itself: its body does not copy your pose, it blocks while an enemy is close, it faces the way it last moved and it
+-- stands on the floor YOU walked on (a trail of your own steps), not at your height. A real player is not touched by any of it.
+-- =============================================================================================
+do
+    local function world(name, files)
+        local env = new_environment()
+        build_world(env)
+        env.files["re7mp/settings.json"] = { death_mode_choice = 4 }
+        for k, v in pairs(files or {}) do env.files[k] = v end
+        load_script(env)
+        host_role_files(env, "host", "tcp")
+        env.files["re7mp_in.json"].name = name
+        return env
+    end
+    local function live(env, secs, fn)
+        for i = 1, math.floor(secs / 0.05 + 0.5) do
+            if fn then fn(i) end
+            run_frames(env, 0.05)
+            bump_remote(env)
+        end
+    end
+    local function at(env, x, y, z)
+        local d = env.files["re7mp_in.json"]
+        d.x, d.y, d.z = x, y, z
+    end
+    local function dbg(env)
+        run_frames(env, 1.2)
+        env.ui_press["Clear the debug log"] = true
+        run_ui(env)
+        run_frames(env, 0.6)
+        return env.files["re7mp/debug.json"].health
+    end
+    local function tags(env, secs)
+        env.texts = {}
+        live(env, secs)
+    end
+
+    -- the default: it acts for itself; the exe is still told to move it the usual way
+    do
+        local env = world("Ethan's friend")
+        at(env, 8, 1.6, 8)
+        live(env, 1.5)
+        local h = dbg(env)
+        check(h.who.friend_does == "own" and h.who.friend_does_told == "own", "(10.7) Ethan's friend acts for itself by default: " .. tostring(h.who.friend_does))
+        local told
+        for _, m in ipairs((env.files["re7mp_msg_out.json"] or {}).msgs or {}) do if m.k == 11 and m.p:find("^state:") then told = m.p end end
+        check(told == "state:copy", "(10.7) ...and the exe is told 'state:copy' (it only moves the friend; the script decides what the body does): " .. tostring(told))
+        env.ui_texts = {}
+        run_ui(env)
+        check(ui_has(env, "it acts for itself"), "(10.7) the panel says what it does")
+        check(h.friend.body and h.friend.body.acting_for_itself == true, "(10.7) the debug file has its body report")
+    end
+
+    -- your pose is not copied: crouch, gun and aim bits from the exe are dropped; "Copies me" still shows them
+    do
+        local env = world("Ethan's friend")
+        at(env, 8, 1.6, 8)
+        live(env, 1.5)
+        env.files["re7mp_in.json"].flags = 256 + 1024 + 2048 -- (what the exe copies from you)
+        tags(env, 1.5)
+        check(not texts_have(env, "[crouching]") and not texts_have(env, "[aiming]") and not texts_have(env, "[gun out]"), "(10.7) it does not crouch, aim or show a gun because YOU do")
+        env.combo_override["Ethan's friend does"] = 2 -- Copies me
+        run_ui(env)
+        tags(env, 1.5)
+        check(texts_have(env, "[crouching]") and texts_have(env, "[aiming]"), "(10.7) 'Copies me' still copies you")
+        env.combo_override["Ethan's friend does"] = nil
+    end
+    do
+        local env = world("Bob")
+        at(env, 8, 1.6, 8)
+        live(env, 1.5)
+        env.files["re7mp_in.json"].flags = 256 + 1024
+        tags(env, 1.5)
+        check(texts_have(env, "[crouching]"), "(10.7) a real player's crouch is shown as before")
+        local h = dbg(env)
+        check(h.friend.body.acting_for_itself == false and h.friend.body.heights_set == 0, "(10.7) a real player's height is not touched: " .. tostring(h.friend.body.heights_set))
+    end
+
+    -- it blocks while an enemy is within 1 m (10.9; it was 5 m) and lowers its guard when it is away from it
+    do
+        local env = world("Ethan's friend")
+        at(env, 1.2, 1.6, 1.6) -- Jack is 3 m from it
+        env.texts = {}
+        live(env, 3.0)
+        check(not texts_have(env, "[blocking]") and dbg(env).friend.body.blocks == 0, "(10.9) an enemy 3 m from it: it does not block (only within 1 m)")
+    end
+    do
+        local env = world("Ethan's friend")
+        at(env, -1.2, 1.6, 1.8) -- Jack is 0.6 m from it
+        env.texts = {}
+        live(env, 3.0)
+        check(texts_have(env, "[blocking]"), "(10.7) an enemy 0.6 m from it: it blocks")
+        check(log_has(env, "Ethan's friend blocks: Em2000"), "(10.7) ...and the log says which enemy")
+        local h = dbg(env)
+        local b = h.friend.body
+        check(b.blocking == true and b.nearest_enemy and b.nearest_enemy.name == "Em2000" and b.blocks == 1, "(10.7) the debug file says so: " .. tostring(b.enemies))
+        check(b.overlay_now == "0_2300_guard.0" and b.overlay_sent >= 1, "(10.7) its body is given the block clip of Ethan's bank: " .. tostring(b.overlay_now))
+        at(env, 14, 1.6, 14) -- far from every enemy
+        live(env, 2.0)
+        env.texts = {}
+        live(env, 1.5)
+        check(not texts_have(env, "[blocking]"), "(10.7) away from the enemy it lowers its guard")
+        check(log_has(env, "Ethan's friend lowers its guard"), "(10.7) ...and says so")
+        local b2 = dbg(env).friend.body
+        check(b2.blocking == false and b2.overlay_now == "none", "(10.7) the block clip is taken off: " .. tostring(b2.overlay_now))
+        at(env, -1.2, 1.6, 1.8)
+        live(env, 3.0)
+        check(dbg(env).friend.body.blocks == 2, "(10.7) back near it, it blocks again (a second block)")
+    end
+    -- the list it looks at has the enemy
+    do
+        local env = world("Ethan's friend")
+        at(env, -1.2, 1.6, 1.8)
+        live(env, 1.0)
+        local b = dbg(env).friend.body
+        check(b.enemies and b.enemies:find("Em2000", 1, true) ~= nil, "(10.7) it sees Jack: " .. tostring(b.enemies))
+        check(b.block_within_m == 1 and math.abs(b.block_lets_go_at_m - 1.4) < 0.001, "(10.9) the debug file says it blocks within 1 m and lets go at 1.4: " .. tostring(b.block_within_m) .. " / " .. tostring(b.block_lets_go_at_m))
+    end
+
+    -- it faces the way it last moved
+    do
+        local env = world("Ethan's friend")
+        at(env, 6, 1.6, 6)
+        live(env, 1.0)
+        local x = 6
+        live(env, 1.5, function() x = x + 0.2 at(env, x, 1.6, 6) end) -- 4 m/s along +x
+        local h = dbg(env)
+        local hd = h.friend.body.heading
+        check(hd and hd.x > 0.95 and math.abs(hd.z) < 0.1, "(10.7) it heads along +x after moving that way: " .. tostring(hd and hd.x))
+        local fc = h.testing.facing
+        check(fc and fc.x > 0.9, "(10.7) ...and its body faces that way (not the way your camera looks): " .. tostring(fc and fc.x))
+        live(env, 1.0) -- it stops
+        check((dbg(env).testing.facing or {}).x > 0.9, "(10.7) it keeps facing the way it moved when it stands still")
+        local z = 6
+        live(env, 1.2, function() z = z - 0.2 at(env, x, 1.6, z) end)
+        local fc2 = dbg(env).testing.facing
+        check(fc2 and fc2.z < -0.9, "(10.7) it turns to the new direction when it moves again: " .. tostring(fc2 and fc2.z))
+    end
+
+    -- grounded: you climb stairs; the exe puts the friend at YOUR height, the script puts it on the floor of your trail
+    do
+        local env = world("Ethan's friend")
+        at(env, 1.2, 1.6, 0.5)
+        live(env, 1.0)
+        live(env, 1.6, function() env.camera_pos.z = env.camera_pos.z + 0.1 env.camera_pos.y = env.camera_pos.y + 0.04 end) -- 3.2 m along, 1.28 m up
+        at(env, 1.2, env.camera_pos.y, 0.5) -- the exe: at your height, but down at the bottom of the stairs
+        live(env, 0.5)
+        local b = dbg(env).friend.body
+        check(b.trail_points >= 8, "(10.7) your steps are kept as a trail: " .. tostring(b.trail_points))
+        check(b.floor_y and b.floor_y < 0.5 and b.floor_y > -0.2, "(10.7) at the bottom of the stairs it stands on the floor there, not at your height (floor " .. tostring(b.floor_y) .. ", you are at " .. string.format("%.2f", env.camera_pos.y - 1.6) .. ")")
+        check(b.from_trail > 0, "(10.7) ...taken from the trail: " .. tostring(b.from_trail))
+        at(env, 1.2, env.camera_pos.y, env.camera_pos.z - 0.4)
+        live(env, 0.5)
+        local b2 = dbg(env).friend.body
+        check(b2.floor_y and b2.floor_y > 0.9, "(10.7) beside you at the top it stands up there (floor " .. tostring(b2.floor_y) .. ")")
+        at(env, 1.2, env.camera_pos.y, 30) -- somewhere there is no trail: your floor
+        live(env, 0.5)
+        local b3 = dbg(env).friend.body
+        check(b3.from_my_floor > 0 and math.abs(b3.floor_y - (env.camera_pos.y - 1.6)) < 0.05, "(10.7) where there is no trail it uses your floor (" .. tostring(b3.floor_y) .. ")")
+    end
+    -- (10.10) "I dont think its telling the ground height below it very well": the floor under you is read from your own player object (its position is its feet) when the camera is a believable height above it
+    do
+        local env = world("Ethan's friend")
+        local root = { x = 0, y = 0.0, z = 0 }
+        local function json_of(t) local o = {} for k, v in pairs(t) do o[#o + 1] = tostring(k) .. "=" .. tostring(v) end table.sort(o) return table.concat(o, ", ") end
+        env.singletons["app.ObjectManager"] = Obj.new("app.ObjectManager", {}, { PlayerObj = Obj.new("via.GameObject", {
+            get_Transform = function() return Obj.new("via.Transform", { get_Position = function() return root end }) end }) })
+        at(env, 1.2, 1.6, 0.5)
+        live(env, 1.0)
+        live(env, 1.6, function() env.camera_pos.z = env.camera_pos.z + 0.1 env.camera_pos.y = env.camera_pos.y + 0.04 root.y = root.y + 0.04 end) -- stairs: the camera and the floor under you go up together
+        local f = dbg(env).friend.body.floor_under_me
+        check(f.readings > 10 and f.used_for_the_trail > 10 and f.rejected_as_unbelievable == 0, "(10.10 floor) your own object's height is read and used for the trail: " .. json_of(f))
+        check(f.standing_m and math.abs(f.standing_m - 1.6) < 0.05, "(10.10 floor) ...with the camera 1.6 m above it standing: " .. tostring(f.standing_m))
+        -- an object that is NOT at the feet (its origin at the hips, 0.9 m up): the camera would be 0.7 m above it standing: not believable, the guess is used and said so
+        root.y = env.camera_pos.y - 0.7
+        live(env, 0.6)
+        local f2 = dbg(env).friend.body.floor_under_me
+        check(f2.rejected_as_unbelievable > 0, "(10.10 floor) an object whose height is not believable (the camera 0.7 m above it, standing) is not used: " .. json_of(f2))
+    end
+    -- the trail is dropped when you are taken somewhere else (a load), and does not grow without end
+    do
+        local env = world("Ethan's friend")
+        at(env, 3, 1.6, 0)
+        live(env, 1.0)
+        live(env, 4.0, function() env.camera_pos.x = env.camera_pos.x + 0.06 end) -- 4.8 m along
+        local n1 = dbg(env).friend.body.trail_points
+        env.camera_pos.x, env.camera_pos.z = 300, 300 -- a different place
+        live(env, 1.5)
+        local b = dbg(env).friend.body
+        check(b.trail_resets >= 1 and b.trail_points < n1, "(10.7) a jump of 20 m or more starts a new trail: " .. tostring(n1) .. " -> " .. tostring(b.trail_points))
+        live(env, 40.0, function(i) env.camera_pos.x = env.camera_pos.x + 0.05 end) -- 100 m of walking
+        check(dbg(env).friend.body.trail_points <= 500, "(10.7) the trail is at most 500 points")
+    end
+    -- helping you: the heal pose clip is given to its body while it works on you
+    do
+        local env = world("Ethan's friend", { ["re7mp/friend.json"] = { inventory = { Herb = 2 } } })
+        near_remote(env)
+        live(env, 1.5)
+        local hi = env.player_hi
+        env.hooks["app.HealthInfo.set_health"]({ 0, hi })
+        hi.f._CurrentHealth = 300
+        env.posthooks["app.HealthInfo.set_health"](nil)
+        live(env, 2.0)
+        local b = dbg(env).friend.body
+        check(b.overlay_now == "0_2790_heal.0" or b.overlay_sent >= 1, "(10.7) while it uses a heal on you its body gets the heal clip: " .. tostring(b.overlay_now))
+    end
+end
+
+-- =============================================================================================
+-- Scenario 31 (10.7): the menu was cleaned up: Start together, Co-op saves, Find item hooks and Model probe are not shown; "Send me this" is one compact box
+-- inside Developer tools. A hidden switch in settings.json brings the four back.
+-- =============================================================================================
+do
+    local function nodes_of(env)
+        local out = {}
+        for _, n in ipairs(env.ui_nodes) do out[#out + 1] = n end
+        return table.concat(out, "\n")
+    end
+    local function has_node(env, needle) return nodes_of(env):find(needle, 1, true) ~= nil end
+    local env = new_environment()
+    build_world(env)
+    env.retired_hidden = true
+    load_script(env)
+    host_role_files(env, "host", "tcp")
+    for _ = 1, 20 do run_frames(env, 0.05) bump_remote(env) end
+    run_ui(env)
+    check(not has_node(env, "Start together") and not has_node(env, "Co-op saves") and not has_node(env, "Find item hooks") and not has_node(env, "Model probe"),
+        "(10.7) Start together, Co-op saves, Find item hooks and Model probe are not in the menu")
+    check(not has_node(env, "Send me this"), "(10.7) the old top-level 'Send me this' box is gone")
+    check(has_node(env, "Debug files for the developer") and has_node(env, "Developer tools") and has_node(env, "Game and items (1, 2, 7, 10)")
+        and has_node(env, "Enemies (3, 5, 6, 12, 13)") and has_node(env, "Player and events (4, 8, 9, 11)"), "(10.7) the debug files are one compact box inside Developer tools, in three groups")
+    check(has_node(env, "Collect model data") or has_node(env, "COLLECT MODEL DATA"), "(10.7) the other developer sections are still there")
+    for _, t in ipairs(env.ui_texts) do check(not t:find("UI error", 1, true), "(10.7) no UI error in the clean menu: " .. t) end
+    env.ui_press["Save the debug file now"] = true
+    run_ui(env)
+    env.ui_press["Clear the debug log"] = true
+    run_ui(env)
+    check(true, "(10.7) the debug buttons still work")
+    local env2 = new_environment()
+    build_world(env2)
+    env2.files["re7mp/settings.json"] = { show_retired_panels = true }
+    load_script(env2)
+    host_role_files(env2, "host", "tcp")
+    for _ = 1, 20 do run_frames(env2, 0.05) bump_remote(env2) end
+    run_ui(env2)
+    check(has_node(env2, "Start together") and has_node(env2, "Co-op saves") and has_node(env2, "Find item hooks") and has_node(env2, "Model probe"),
+        "(10.7) show_retired_panels: true in settings.json brings the four sections back")
+    env2.check_override["Ethan's friend helps me (gets me up, heals me)##friendhelps"] = false
+    run_ui(env2)
+    run_frames(env2, 3)
+    check(env2.files["re7mp/settings.json"].show_retired_panels == true and env2.files["re7mp/settings.json"].friend_helps == false, "(10.7) ...and the switch is kept when the settings are saved")
+end
+
+-- =============================================================================================
+-- Scenario 32 (10.8): the fighting friend. It crouches when you crouch; it shoots the enemies near YOU with its own gun and ammo (no line of sight needed),
+-- takes the ammo out of ITS inventory, says when it is out of ammo, heals itself below a threshold and takes damage from enemies that reach it.
+-- =============================================================================================
+do
+    local function world(name, inv, files)
+        local env = new_environment()
+        build_world(env)
+        add_pose_components(env) -- (so the camera's crouch is read)
+        env.files["re7mp/settings.json"] = { death_mode_choice = 4 }
+        if inv then env.files["re7mp/friend.json"] = { inventory = inv } end
+        for k, v in pairs(files or {}) do env.files[k] = v end
+        load_script(env)
+        host_role_files(env, "host", "tcp")
+        env.files["re7mp_in.json"].name = name
+        return env
+    end
+    local function live(env, secs, fn)
+        for i = 1, math.floor(secs / 0.05 + 0.5) do
+            if fn then fn(i) end
+            run_frames(env, 0.05)
+            bump_remote(env)
+        end
+    end
+    local function at(env, x, y, z)
+        local d = env.files["re7mp_in.json"]
+        d.x, d.y, d.z = x, y, z
+    end
+    local function dbg(env)
+        run_frames(env, 1.2)
+        env.ui_press["Clear the debug log"] = true
+        run_ui(env)
+        run_frames(env, 0.6)
+        return env.files["re7mp/debug.json"].health
+    end
+    local function sent11(env)
+        local out = {}
+        for _, m in ipairs((env.files["re7mp_msg_out.json"] or {}).msgs or {}) do if m.k == 11 then out[#out + 1] = m.p end end
+        return out
+    end
+
+    -- it crouches when I crouch (the camera sits low), and a real player's body does not
+    do
+        local env = world("Ethan's friend")
+        at(env, 8, 1.6, 8)
+        live(env, 1.5)
+        env.texts = {}
+        live(env, 1.0)
+        check(not texts_have(env, "[crouching]"), "(10.8) I stand: it stands")
+        env.camera_pos.y = 1.05
+        env.move.f.IsCrouching, env.move.f.StanceType = true, 2
+        env.texts = {}
+        live(env, 1.5)
+        check(texts_have(env, "[crouching]"), "(10.8) I crouch: Ethan's friend crouches too")
+        env.camera_pos.y = 1.6
+        env.move.f.IsCrouching, env.move.f.StanceType = false, 0
+        live(env, 1.0)
+        env.texts = {}
+        live(env, 1.0)
+        check(not texts_have(env, "[crouching]"), "(10.8) I stand up: it stands up")
+        local envb = world("Bob")
+        at(envb, 8, 1.6, 8)
+        live(envb, 1.5)
+        envb.camera_pos.y = 1.05
+        envb.move.f.IsCrouching, envb.move.f.StanceType = true, 2
+        envb.texts = {}
+        live(envb, 1.5)
+        check(not texts_have(envb, "[crouching]"), "(10.8) a real player does not crouch because I do")
+    end
+
+    -- it shoots with its own gun and ammo; every shot takes a round out of ITS inventory; it says when it is out
+    do
+        local env = world("Ethan's friend", { HandgunM19 = 1, HandgunBullet = 3 })
+        at(env, 1.2, 1.6, 1.6) -- Jack is 3 m from it and about 2.5 m from me
+        live(env, 4.5)
+        local h = dbg(env)
+        local f = h.friend.fights
+        check(f and f.stats.shots == 3 and f.stats.ammo_used == 3, "(10.8) three bullets, three shots: " .. tostring(f and f.stats.shots) .. " / " .. tostring(f and f.stats.ammo_used))
+        check(f.stats.hits >= 1 and f.stats.damage_dealt > 0, "(10.8) the shots do damage to the enemy: hits " .. tostring(f.stats.hits) .. ", dealt " .. tostring(f.stats.damage_dealt) .. " (" .. tostring(f.last) .. ")")
+        check(f.line_of_sight == "ignored", "(10.8) line of sight is ignored")
+        local inv = env.files["re7mp/friend.json"] and env.files["re7mp/friend.json"].inventory or {}
+        check((inv.HandgunBullet or 0) == 0 and inv.HandgunM19 == 1, "(10.8) the ammo is gone from ITS inventory (file), the gun stays: " .. tostring(inv.HandgunBullet))
+        check(f.stats.out_of_ammo >= 1 and log_has(env, "friend: I'm out of ammo!"), "(10.8) it says it is out of ammo")
+        check(f.state == "out of ammo" or f.state == "no ammo", "(10.8) the debug file says so: " .. tostring(f.state))
+        check(f.stats.low_ammo >= 1 and log_has(env, "Running low on handgun ammo"), "(10.8) ...after warning that it was running low")
+        local before = f.stats.shots
+        live(env, 3.0)
+        check(dbg(env).friend.fights.stats.shots == before, "(10.8) with no ammo it does not shoot")
+        env.ui_texts = {}
+        run_ui(env)
+        check(ui_has(env, "WHAT IT DOES FOR ITSELF") and ui_has(env, "ammo: none"), "(10.8) the panel shows its fighting and its ammo")
+    end
+
+    -- ammo you give it is used (a gift of a gun or ammo is no longer refused), and the one that is shot is the kind the gun takes
+    do
+        local env = world("Ethan's friend", { HandgunM19 = 1, ShotgunBullet = 10, HandgunBullet = 6 })
+        at(env, 1.2, 1.6, 1.6)
+        live(env, 2.0)
+        local f = dbg(env).friend.fights
+        local inv = env.files["re7mp/friend.json"].inventory
+        check(f.stats.shots >= 1 and inv.ShotgunBullet == 10 and inv.HandgunBullet < 6, "(10.8) a handgun shoots handgun bullets, not shotgun shells: " .. tostring(inv.HandgunBullet) .. " / " .. tostring(inv.ShotgunBullet))
+        check(f.weapon and f.weapon.id == "HandgunM19" and f.weapon.kind == "handgun" and f.weapon.damage == 120, "(10.8) the gun in hand and its table damage are in the debug file: " .. tostring(f.weapon and f.weapon.damage))
+    end
+
+    -- a dead enemy is not shot again (no round is wasted)
+    do
+        local env = world("Ethan's friend", { HandgunM19 = 1, HandgunBullet = 60 })
+        at(env, 1.2, 1.6, 1.6)
+        live(env, 6.0)
+        local f = dbg(env).friend.fights
+        check(f.stats.kills == 1 and f.stats.shots <= 5, "(10.8) Jack (820 health, 252 a shot) dies after four shots and is not shot again: " .. tostring(f.stats.shots) .. " shots, " .. tostring(f.stats.kills) .. " kills")
+        check(f.target == nil, "(10.8) ...and it has no target afterwards")
+    end
+
+    -- the stance: with a gun and ammo it does not block, it faces the enemy with its gun out and aiming; a friend that is down does not shoot
+    do
+        local env = world("Ethan's friend", { HandgunM19 = 1, HandgunBullet = 60 })
+        at(env, -1.2, 1.6, 1.8) -- (0.6 m from Jack: close enough to start a block, which the shooting then takes over)
+        env.texts = {}
+        live(env, 2.5)
+        check(texts_have(env, "[aiming]") and texts_have(env, "[shooting]"), "(10.8) while it shoots it aims and shows the shot")
+        check(log_has(env, "Ethan's friend lowers its guard"), "(10.8) ...and it lowers its guard (the block it began with) once it can shoot")
+        local fc = (dbg(env).testing or {}).facing
+        check(fc and fc.x < -0.5, "(10.8) it faces the enemy it shoots at (Jack is on the -x side): " .. tostring(fc and fc.x))
+    end
+    do
+        local env = world("Ethan's friend", { HandgunM19 = 1, HandgunBullet = 60 })
+        at(env, 1.2, 1.6, 1.6)
+        live(env, 1.5)
+        push_msgs(env, { { 7, "h|1|1000|1" } })
+        live(env, 0.3)
+        local s0 = dbg(env).friend.fights.stats.shots
+        env.texts = {}
+        live(env, 3.0, function() push_msgs(env, { { 7, "h|1|1000|1" } }) end)
+        local f = dbg(env).friend.fights
+        check(f.state == "down" and f.stats.shots == s0 and f.stats.times_down >= 1, "(10.8) a friend that is down does not shoot: " .. tostring(f.state))
+    end
+
+    -- ammo whose name does not say the kind of gun (an unknown name with "bullet" in it) fits the gun
+    do
+        local env = world("Ethan's friend", { HandgunM19 = 1, PistolBullet = 4 })
+        at(env, 1.2, 1.6, 1.6)
+        live(env, 3.0)
+        local f = dbg(env).friend.fights
+        local inv = env.files["re7mp/friend.json"].inventory
+        check(f.stats.shots >= 1 and (inv.PistolBullet or 0) < 4, "(10.8) ammo of a kind the name does not tell is shot by a gun that has none of its own kind: " .. tostring(inv.PistolBullet))
+    end
+
+    -- no gun: it blocks (as before) and says so once; no enemy near me: it does not shoot
+    do
+        local env = world("Ethan's friend", { Herb = 1 })
+        at(env, -1.2, 1.6, 1.8)
+        env.texts = {}
+        live(env, 3.0)
+        local hd = dbg(env).friend
+        local f, b = hd.fights, hd.body
+        check(f.stats.no_gun == 1 and log_has(env, "I have nothing to shoot with"), "(10.8) with no gun it says so (once)")
+        check(f.stats.shots == 0, "(10.8) ...and does not shoot")
+        check(b.blocking == true, "(10.8) it blocks when it cannot shoot (as in 10.7)")
+        env.ui_texts = {}
+        run_ui(env)
+        check(ui_has(env, "it carries no gun"), "(10.8) the panel says it has no gun")
+    end
+    do
+        local env = world("Ethan's friend", { HandgunM19 = 1, HandgunBullet = 20 })
+        env.camera_pos.x, env.camera_pos.z = 40, 40 -- far from every enemy
+        at(env, 41, 1.6, 40)
+        live(env, 4.0)
+        local f = dbg(env).friend.fights
+        check(f.stats.shots == 0 and f.target == nil, "(10.8) no enemy near me: it holds its fire: " .. tostring(f.state))
+    end
+    do
+        local env = world("Bob", { HandgunM19 = 1, HandgunBullet = 20 })
+        at(env, 1.2, 1.6, 1.6)
+        live(env, 3.0)
+        local f = dbg(env).friend.fights
+        check(not f or f.stats.shots == 0, "(10.8) a real player is not a friend: nothing is shot for them")
+    end
+    do -- the switch
+        local env = world("Ethan's friend", { HandgunM19 = 1, HandgunBullet = 20 }, { ["re7mp/settings.json"] = { death_mode_choice = 4, friend_fights = false } })
+        at(env, 1.2, 1.6, 1.6)
+        live(env, 3.0)
+        check(dbg(env).friend.fights.stats.shots == 0, "(10.8) 'it shoots at enemies near me' off (settings.json): it does not")
+        env.check_override["It shoots at enemies near me, with its own guns and ammo (damage by the gun and the scale in the Weapons section)##friendfights"] = true
+        run_ui(env)
+        live(env, 3.0)
+        check(dbg(env).friend.fights.stats.shots >= 1, "(10.8) ...ticked in the panel it shoots")
+    end
+
+    -- it heals itself from its own inventory when its health is low, by an exact amount, and the item leaves its inventory
+    do
+        local env = world("Ethan's friend", { Herb = 2 })
+        at(env, 14, 1.6, 14) -- away from the enemies
+        live(env, 1.5)
+        push_msgs(env, { { 7, "h|300|1000|0" } }) -- the exe says its health is 30 %
+        live(env, 4.0, function() bump_remote(env) end)
+        local f = dbg(env).friend.fights
+        check(f.stats.heals == 1, "(10.8) it used a Herb on itself: " .. tostring(f.stats.heals) .. " (" .. tostring(f.last) .. ")")
+        local inv = env.files["re7mp/friend.json"].inventory
+        check(inv.Herb == 1, "(10.8) ...and it left its inventory: " .. tostring(inv.Herb))
+        local set
+        for _, p in ipairs(sent11(env)) do if p:find("^hp:") then set = p end end
+        check(set == "hp:550", "(10.8) the exe is told the exact new health (300 + 25 % of 1000): " .. tostring(set))
+        check(log_has(env, "used a Herb on itself"), "(10.8) ...and it is logged")
+        -- an exe from before 10.8 ignores the command: no health report comes back, so the script says so and, for a big heal, asks for 'up'
+        live(env, 3.0)
+        check(dbg(env).friend.fights.exe_older_than_10_8 == true, "(10.8) when the exe does not take the exact health the debug file says so")
+    end
+    do -- a 10.8 exe answers with the new health: no complaint
+        local env = world("Ethan's friend", { Herb = 1 })
+        at(env, 14, 1.6, 14)
+        live(env, 1.5)
+        push_msgs(env, { { 7, "h|300|1000|0" } })
+        live(env, 3.5)
+        push_msgs(env, { { 7, "h|550|1000|0" } })
+        live(env, 3.0)
+        local f = dbg(env).friend.fights
+        check(f.stats.heals == 1 and f.exe_older_than_10_8 == false, "(10.8) when the exe answers with the new health nothing is wrong: " .. tostring(f.exe_older_than_10_8))
+    end
+    do -- not below the threshold: no heal; nothing to use: it says so
+        local env = world("Ethan's friend", { Herb = 1 })
+        at(env, 14, 1.6, 14)
+        live(env, 1.5)
+        push_msgs(env, { { 7, "h|700|1000|0" } })
+        live(env, 4.0)
+        check(dbg(env).friend.fights.stats.heals == 0, "(10.8) at 70 % it does not heal itself")
+        local env2 = world("Ethan's friend", {})
+        at(env2, 14, 1.6, 14)
+        live(env2, 1.5)
+        push_msgs(env2, { { 7, "h|300|1000|0" } })
+        live(env2, 4.0)
+        check(dbg(env2).friend.fights.stats.no_heal_item == 1 and log_has(env2, "I'm hurt (30%) and I have nothing to heal with"), "(10.8) hurt with nothing to use: it says so")
+    end
+
+    -- enemies that reach it hurt it (simulated: the game's AI does not know it exists); at 1 health the exe takes it down
+    do
+        local env = world("Ethan's friend", { HandgunM19 = 1, HandgunBullet = 30 })
+        at(env, -1.5, 1.6, 1.6) -- right next to Jack
+        live(env, 3.0)
+        local f = dbg(env).friend.fights
+        check(f.stats.hurts >= 1 and f.stats.damage_taken > 0, "(10.8) Jack reaches it: it takes damage: " .. tostring(f.stats.hurts) .. " / " .. tostring(f.stats.damage_taken))
+        local ffs = 0
+        for _, m in ipairs(messages_of_kind(env, 7)) do if m:match("^e|ff|") then ffs = ffs + 1 end end
+        check(ffs >= 1, "(10.8) ...the hit goes to the exe as a friendly-fire event")
+        env.files["re7mp/settings.json"] = nil
+    end
+    do
+        local env = world("Ethan's friend", {}, { ["re7mp/settings.json"] = { death_mode_choice = 4, friend_hurt_pct = 0 } })
+        at(env, -1.5, 1.6, 1.6)
+        live(env, 3.0)
+        check(dbg(env).friend.fights.stats.hurts == 0, "(10.8) with the slider at 0 enemies never hurt it")
+    end
+
+    -- settings are kept
+    do
+        local env = world("Ethan's friend", {})
+        env.check_override["It uses a healing item from its own inventory on itself when its health is low##friendselfheal"] = false
+        run_ui(env)
+        run_frames(env, 3)
+        local st = env.files["re7mp/settings.json"]
+        check(st.friend_heals_itself == false and st.friend_fights == true and st.friend_self_below == 40 and st.friend_hurt_pct == 8, "(10.8) the friend's fighting settings are kept")
+    end
+
+    -- (10.10) "ethans friend should shoot slower, 300ms delay minimum": two of its shots are never closer than that, whatever the gun (the machine gun's own gap was 140 ms)
+    do
+        local function gun_world(files)
+            local env = world("Ethan's friend", { MachineGunM1 = 1, MachineGunBullet = 60 }, files)
+            at(env, 1.2, 1.6, 1.6)
+            live(env, 1.5)
+            return env
+        end
+        local env = gun_world()
+        local f = dbg(env).friend.fights
+        check(f.weapon and f.weapon.kind == "machinegun" and f.weapon.ms_between_shots == 300 and f.shortest_gap_ms == 300,
+            "(10.10) the machine gun fires every 300 ms at the most (its own gap is 140): " .. tostring(f.weapon and f.weapon.ms_between_shots) .. " / " .. tostring(f.shortest_gap_ms))
+        check(f.stats.shots >= 3 and f.stats.shots <= 6, "(10.10) ...so about five shots in a second and a half, not eight or more: " .. tostring(f.stats.shots))
+        local env2 = gun_world({ ["re7mp/settings.json"] = { death_mode_choice = 4, friend_shot_gap_ms = 1000 } })
+        local f2 = dbg(env2).friend.fights
+        check(f2.shortest_gap_ms == 1000 and f2.stats.shots >= 1 and f2.stats.shots <= 3, "(10.10) with the slider at 1000 ms it is slower still: " .. tostring(f2.stats.shots) .. " shots")
+        local env3 = world("Ethan's friend", { HandgunM19 = 1, HandgunBullet = 6 }, { ["re7mp/settings.json"] = { death_mode_choice = 4, friend_shot_gap_ms = 50 } })
+        check(dbg(env3).friend.fights.shortest_gap_ms == 300, "(10.10) a damaged value (50 ms) is ignored: 300 stays")
+        env.slider_override["Its shots are at least this far apart (ms; 300 = no gun fires faster than that)##friendgap"] = 450
+        run_ui(env)
+        live(env, 1.0)
+        check(dbg(env).friend.fights.shortest_gap_ms == 450 and env.files["re7mp/settings.json"].friend_shot_gap_ms == 450, "(10.10) dragging the slider sets it and it is saved: " .. tostring(env.files["re7mp/settings.json"].friend_shot_gap_ms))
+    end
+
+    -- (10.9) it shoots enemies within 5 m of YOU (10 m in 10.8); the distance is a slider (2 to 25 m) kept in settings.json; its crouch slider goes from -2 to +0.6 m
+    do
+        local function shoot_world(camx, files)
+            local env = world("Ethan's friend", { HandgunM19 = 1, HandgunBullet = 20 }, files)
+            env.camera_pos.x, env.camera_pos.z = -1.8 + camx, 1.8 -- Jack stands at (-1.8, 1.8): I am camx metres from him
+            at(env, -1.8 + camx - 1.2, 1.6, 1.8)
+            live(env, 3.0)
+            return env
+        end
+        local env = shoot_world(6.0)
+        local h = dbg(env).friend
+        check(h.fights.near_you_m == 5 and h.fights.stats.shots == 0, "(10.9) default: an enemy 6 m from me is not shot (the distance is 5 m): " .. tostring(h.fights.near_you_m) .. " / " .. tostring(h.fights.stats.shots))
+        check(h.body.crouch.slider_m == 0, "(10.9) ...and the friend's own crouch slider starts at 0: " .. tostring(h.body.crouch.slider_m))
+        local env2 = shoot_world(4.5)
+        check(dbg(env2).friend.fights.stats.shots >= 1, "(10.9) an enemy 4.5 m from me is shot")
+        local env3 = shoot_world(6.0, { ["re7mp/settings.json"] = { death_mode_choice = 4, friend_shoot_m = 8 } })
+        local h3 = dbg(env3).friend
+        check(h3.fights.near_you_m == 8 and h3.fights.stats.shots >= 1, "(10.9) with the slider at 8 m the enemy 6 m from me is shot: " .. tostring(h3.fights.near_you_m) .. " / " .. tostring(h3.fights.stats.shots))
+        -- what the settings file may hold: the distance 2 to 25 (in half metres), the crouch slider -2 to +0.6; anything else is ignored
+        local function loaded(k, v)
+            local e = world("Ethan's friend", {}, { ["re7mp/settings.json"] = { death_mode_choice = 4, [k] = v } })
+            live(e, 0.3)
+            local f = dbg(e).friend
+            if k == "friend_guard_m" then return f.body.block_within_m end
+            return k == "friend_shoot_m" and f.fights.near_you_m or f.body.crouch.slider_m
+        end
+        check(loaded("friend_guard_m", 0.5) == 0.5 and loaded("friend_guard_m", 5) == 5 and loaded("friend_guard_m", 2.34) == 2.3, "(10.9) the block distance takes 0.5, 5 and rounds to 0.1 (2.34 -> 2.3)")
+        check(loaded("friend_guard_m", 0.4) == 1 and loaded("friend_guard_m", 5.1) == 1 and loaded("friend_guard_m", "near") == 1, "(10.9) ...and ignores 0.4, 5.1 and text: the default 1 stays")
+        check(loaded("friend_shoot_m", 2) == 2 and loaded("friend_shoot_m", 25) == 25 and loaded("friend_shoot_m", 7.3) == 7.5, "(10.9) the shooting distance takes 2, 25 and rounds to half metres (7.3 -> 7.5)")
+        check(loaded("friend_shoot_m", 1.9) == 5 and loaded("friend_shoot_m", 26) == 5 and loaded("friend_shoot_m", "far") == 5, "(10.9) ...and ignores 1.9, 26 and text: the default 5 stays")
+        check(loaded("friend_crouch_lift", -2) == -2 and loaded("friend_crouch_lift", 0.6) == 0.6 and loaded("friend_crouch_lift", -1.25) == -1.25, "(10.9) the friend's crouch slider takes -2, +0.6 and -1.25")
+        check(loaded("friend_crouch_lift", -2.5) == 0 and loaded("friend_crouch_lift", 0.7) == 0 and loaded("friend_crouch_lift", "low") == 0, "(10.9) ...and ignores -2.5, 0.7 and text: the default 0 stays")
+        -- the settings written back hold both
+        local e4 = world("Ethan's friend", {}, { ["re7mp/settings.json"] = { death_mode_choice = 4, friend_shoot_m = 12, friend_crouch_lift = -0.75 } })
+        run_ui(e4)
+        run_frames(e4, 3)
+        local st4 = e4.files["re7mp/settings.json"]
+        check(st4.friend_guard_m == 1, "(10.9) the block distance (1 m) is in settings.json: " .. tostring(st4.friend_guard_m))
+        check(st4.friend_revive_after_over == true, "(10.9) the 'after a game over it comes to me' switch is on by default and kept in settings.json: " .. tostring(st4.friend_revive_after_over))
+        e4.check_override["After a game over it gets up at full health and comes to me (when the reload has finished; needs the new exe to be put next to me)##friendover"] = false
+        run_ui(e4)
+        run_frames(e4, 3)
+        check(e4.files["re7mp/settings.json"].friend_revive_after_over == false, "(10.9) ...unticked in the panel it is off and kept")
+        check(st4.friend_shoot_m == 12 and st4.friend_crouch_lift == -0.75, "(10.9) both are kept in settings.json: " .. tostring(st4.friend_shoot_m) .. " / " .. tostring(st4.friend_crouch_lift))
+        -- dragged in the panel: the new values are used and kept
+        e4.slider_override["It shoots enemies this close to YOU (m; the enemy's own reach to hurt it stays 1.6 m)##friendshootm"] = 9.3
+        e4.slider_override["It blocks only when an enemy is this close to IT (m; it lets go 0.4 m further)##friendblockm"] = 2.0
+        e4.slider_override["Crouch: stand its body this much higher on top of that (m; negative = lower; if its crouch floats, drag it down, if it sinks, up)##friendcrouch"] = -1.8
+        run_ui(e4)
+        run_frames(e4, 3)
+        local f4 = dbg(e4).friend
+        check(f4.fights.near_you_m == 9.5 and f4.body.crouch.slider_m == -1.8 and f4.body.block_within_m == 2, "(10.9) dragging the three sliders in the panel sets them: " .. tostring(f4.fights.near_you_m) .. " / " .. tostring(f4.body.crouch.slider_m) .. " / " .. tostring(f4.body.block_within_m))
+        check(e4.files["re7mp/settings.json"].friend_shoot_m == 9.5 and e4.files["re7mp/settings.json"].friend_crouch_lift == -1.8, "(10.9) ...and they are saved")
+    end
+end
+
+-- =============================================================================================
+-- Scenario 40 (10.12): run or walk (the running bit), crawling / lying (the "low" event), key items and weapons are not put on the ground, the EntranceHallKey is
+-- shared, and the joiner plays the host's enemies back on a timeline (the host's clock rides in the snapshot; 15 snapshots a second with few enemies)
+-- =============================================================================================
+do
+    local function new_world(role)
+        local env = new_environment()
+        build_world(env)
+        add_pose_components(env)
+        load_script(env)
+        host_role_files(env, role or "host", "tcp")
+        for _ = 1, 30 do run_frames(env, 0.05) bump_remote(env) end
+        return env
+    end
+    local function bit(flags, b) return math.floor((flags or 0) / b) % 2 == 1 end
+    local function out_flags(env) return (env.files["re7mp_out.json"] or {}).flags end
+    local function health(env)
+        run_frames(env, 1.2)
+        env.ui_press["Clear the debug log"] = true
+        run_ui(env)
+        run_frames(env, 0.6)
+        return env.files["re7mp/debug.json"].health
+    end
+
+    -- ---- run or walk ----
+    do
+        local env = new_world("host")
+        local function move(speed, secs)
+            for _ = 1, math.floor(secs / 0.05 + 0.5) do
+                env.camera_pos.x = env.camera_pos.x + speed * 0.05
+                run_frames(env, 0.05)
+                bump_remote(env)
+            end
+        end
+        move(2.5, 1.5)
+        check(not bit(out_flags(env), 8192), "(10.12) walking at 2.5 m/s (the recorded walk) does not send the running bit")
+        move(4.0, 1.5)
+        check(bit(out_flags(env), 8192), "(10.12) running at 4 m/s sends the running bit (8192)")
+        move(3.1, 1.5)
+        check(bit(out_flags(env), 8192), "(10.12) 3.1 m/s after a run is still running (a lower bar to stay running than to start)")
+        move(2.0, 1.5)
+        check(not bit(out_flags(env), 8192), "(10.12) slowing to 2 m/s ends it")
+        move(3.1, 1.5)
+        check(not bit(out_flags(env), 8192), "(10.12) 3.1 m/s from a walk does not start it")
+        local rw = health(env).run_or_walk
+        check(rw and rw.on > 3.2 and rw.on < 3.4 and rw.off < rw.on, "(10.12) the bars are the middle of the recorded walk and run speeds: " .. tostring(rw and rw.on) .. " / " .. tostring(rw and rw.off))
+        check(rw and rw.counts.sent_run > 0, "(10.12) the report counts the frames that said running")
+        -- crouched: never running, whatever the speed
+        env.move.f.IsCrouching, env.move.f.StanceType = true, 2
+        env.camera_pos.y = 1.05
+        move(4.0, 1.5)
+        check(not bit(out_flags(env), 8192), "(10.12) crouched is never running")
+    end
+    do -- the other player: their bit, or their speed from where they were seen
+        local env = new_world("host")
+        local d = env.files["re7mp_in.json"]
+        d.flags = 8192
+        for _ = 1, 10 do run_frames(env, 0.05) bump_remote(env) end
+        local rw = health(env).run_or_walk
+        check(rw.they_run_flag == true or rw.counts.flag_seen >= 1, "(10.12) their running bit is seen: " .. tostring(rw.counts.flag_seen))
+    end
+
+    -- ---- crawling / lying: "low" ----
+    do
+        local env = new_world("host")
+        local root = { x = 0, y = 0.0, z = 0 }
+        env.singletons["app.ObjectManager"] = Obj.new("app.ObjectManager", {}, { PlayerObj = Obj.new("via.GameObject", {
+            get_Transform = function() return Obj.new("via.Transform", { get_Position = function() return root end }) end }) })
+        local function lows()
+            local out = {}
+            for _, m in ipairs(messages_of_kind(env, 7)) do if m:find("^e|low|") then out[#out + 1] = m end end
+            return out
+        end
+        env.camera_pos.x, env.camera_pos.y, env.camera_pos.z = 0.1, 1.6, 0
+        for _ = 1, 20 do run_frames(env, 0.05) bump_remote(env) end
+        check(#lows() == 0, "(10.12) standing: nothing is said about being low")
+        env.camera_pos.y = 0.5 -- crawling: the camera half a metre above the feet
+        for _ = 1, 20 do run_frames(env, 0.05) bump_remote(env) end
+        local sent = lows()
+        check(#sent >= 1 and sent[#sent]:find("^e|low|50|"), "(10.12) a camera 0.5 m above the feet is sent as low, 50 cm: " .. tostring(sent[#sent]))
+        env.camera_pos.y = 1.6
+        for _ = 1, 30 do run_frames(env, 0.05) bump_remote(env) end
+        sent = lows()
+        check(sent[#sent] and sent[#sent]:find("^e|low|0|"), "(10.12) standing up says 0: " .. tostring(sent[#sent]))
+        -- a cutscene camera far from the player is not lying down
+        local n0 = #lows()
+        env.camera_pos.x, env.camera_pos.y = 12, 0.5
+        for _ = 1, 20 do run_frames(env, 0.05) bump_remote(env) end
+        check(#lows() == n0, "(10.12) a camera that is not on the player says nothing")
+        -- the other side
+        local env2 = new_world("host")
+        push_msgs(env2, { { 7, "e|low|45|0.00|0.00|0.00" } })
+        for _ = 1, 10 do run_frames(env2, 0.05) bump_remote(env2) end
+        local lb = health(env2).low_body
+        check(lb and lb.received >= 1 and lb.their_height_m and math.abs(lb.their_height_m - 0.45) < 0.001, "(10.12) their low height is taken in: " .. tostring(lb and lb.their_height_m))
+        push_msgs(env2, { { 7, "e|low|0|0.00|0.00|0.00" } })
+        for _ = 1, 10 do run_frames(env2, 0.05) bump_remote(env2) end
+        lb = health(env2).low_body
+        check(lb and lb.their_height_m == nil, "(10.12) low 0 ends it")
+    end
+
+    -- ---- key items and weapons are never made for the ground; the EntranceHallKey is shared ----
+    do
+        local env = new_world("host")
+        env.singletons["app.ObjectManager"] = nil
+        push_msgs(env, { { 6, "MailMia|1|1.00|0.00|2.00" }, { 6, "ShotgunBullet|4|1.00|0.00|2.00" } })
+        for _ = 1, 20 do run_frames(env, 0.05) bump_remote(env) end
+        local g = health(env).items.ground
+        check(g.refused_not_consumable >= 1 and tostring(g.last_refused):find("MailMia", 1, true), "(10.12) a key item dropped by the other player is not made for the ground: " .. tostring(g.last_refused))
+        local acks = {}
+        for _, m in ipairs(messages_of_kind(env, 10)) do acks[#acks + 1] = m end
+        local refused = false
+        for _, m in ipairs(acks) do if m:find("^d|MailMia|1|") and not m:find("|ok|", 1, true) then refused = true end end
+        check(refused, "(10.12) ...and the answer says it did not happen: " .. table.concat(acks, " ; "):sub(1, 200))
+    end
+
+    -- ---- the joiner's timeline ----
+    do
+        local env = new_world("join")
+        env.combo_override["Enemy sync"] = 3
+        run_ui(env)
+        local xs = {}
+        calls = {}
+        local t0 = 200.0
+        for k = 0, 39 do
+            env.files["re7mp_state_in.json"] = { seq = k + 1, n = k + 1,
+                p = string.format("T%.3f;Em2000,%.2f,0.00,6.00,0,0,0,1,500,1,2,3,4.0", t0 + k * 0.1, k * 0.2) } -- 2 m/s, a snapshot every 0.1 s
+            for _ = 1, 2 do
+                run_frames(env, 0.05)
+                bump_remote(env)
+                for i = #calls, 1, -1 do
+                    local x = calls[i]:match("^Em2000%.set_Position (%-?[%d%.]+) ")
+                    if x then xs[#xs + 1] = tonumber(x) break end
+                end
+            end
+        end
+        local steps, big, back = 0, 0, 0
+        for i = 20, #xs do
+            local dx = xs[i] - xs[i - 1]
+            steps = steps + 1
+            if dx > 0.3 then big = big + 1 end
+            if dx < -0.001 then back = back + 1 end
+        end
+        check(#xs >= 60 and steps > 40, "(10.12) timeline: the enemy was moved every frame (" .. #xs .. " positions)")
+        check(big == 0 and back == 0, "(10.12) timeline: 2 m/s in 0.1 s snapshots is drawn without steps or going back (steps over 0.3 m: " .. big .. ", backwards: " .. back .. ")")
+        local mid = xs[#xs]
+        local newest = 39 * 0.2
+        check(mid and newest - mid > 0.15 and newest - mid < 1.0, "(10.12) timeline: it is drawn a short time behind the newest snapshot (" .. string.format("%.2f", newest - (mid or 0)) .. " m at 2 m/s)")
+        local tl = health(env).enemy_timeline
+        check(tl and tl.with_host_clock >= 30 and tl.frames_interpolated > 40, "(10.12) timeline: the host clock is used and frames are interpolated: " .. tostring(tl and tl.with_host_clock) .. " / " .. tostring(tl and tl.frames_interpolated))
+        check(tl and tl.snapshot_gap_s > 0.08 and tl.snapshot_gap_s < 0.12 and tl.delay_s >= 0.15 and tl.delay_s <= 0.5, "(10.12) timeline: the gap (" .. tostring(tl and tl.snapshot_gap_s) .. " s) and the delay (" .. tostring(tl and tl.delay_s) .. " s) are measured")
+        -- a warp is not slid through
+        env.files["re7mp_state_in.json"] = { seq = 100, n = 100, p = string.format("T%.3f;Em2000,60.00,0.00,6.00,0,0,0,1,500,1,2,3,4.0", t0 + 4.2) }
+        calls = {}
+        for _ = 1, 3 do run_frames(env, 0.05) bump_remote(env) end
+        local jumped = false
+        for _, c in ipairs(calls) do local x = c:match("^Em2000%.set_Position (%-?[%d%.]+) ") if x and tonumber(x) > 59 then jumped = true end end
+        check(jumped, "(10.12) timeline: a jump of 50 m is shown at once, not slid through")
+        -- an older host (no clock): the arrival time is used and it still works
+        local env2 = new_world("join")
+        env2.combo_override["Enemy sync"] = 3
+        run_ui(env2)
+        for k = 0, 19 do
+            env2.files["re7mp_state_in.json"] = { seq = k + 1, n = k + 1, p = string.format("Em2000,%.2f,0.00,6.00,0,0,0,1,500,1,2,3,4.0", k * 0.2) }
+            for _ = 1, 2 do run_frames(env2, 0.05) bump_remote(env2) end
+        end
+        local tl2 = health(env2).enemy_timeline
+        check(tl2 and tl2.without_host_clock >= 15 and tl2.frames_interpolated > 10, "(10.12) timeline: with no host clock (an older host) it plays back from the arrival times: " .. tostring(tl2 and tl2.without_host_clock))
+    end
+    do -- the host: its clock, and 15 snapshots a second with few enemies
+        local env = new_world("host")
+        local seq0 = (env.files["re7mp_state_out.json"] or {}).seq or 0
+        for _ = 1, 60 do run_frames(env, 1 / 60, 1 / 60) bump_remote(env) end
+        local d = env.files["re7mp_state_out.json"]
+        local n = (d and d.seq or 0) - seq0
+        check(n >= 13 and n <= 17, "(10.12) the host sends about 15 snapshots a second while it has few enemies (60 frames: " .. tostring(n) .. ")")
+        check(d and d.p and d.p:match("^T%d+%.%d+"), "(10.12) ...each starts with the host's clock: " .. tostring(d and d.p and d.p:sub(1, 16)))
+    end
+end
+
+run_1015_file() -- (10.15) the checks of this build, in their own file
+run_1018_file() -- (10.18) the checks of this build, in their own file
+run_1019_file() -- (10.19) the checks of this build, in their own file
+run_1020_file() -- (10.20) the checks of this build, in their own file
+run_1021_file() -- (10.21) the checks of this build, in their own file
+run_1022_file() -- (10.22) the checks of this build, in their own file
+run_1023_file() -- (10.23) the checks of the build before, in their own file
+run_1024_file() -- (10.24) the checks of this build, in their own file
+run_1026_file() -- (10.26) the checks of this build, in their own file
+run_1027_file() -- (10.27) the checks of this build, in their own file
 
 print(string.format("lua smoke test: %d checks passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

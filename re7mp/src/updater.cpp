@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <sstream>
@@ -82,6 +83,45 @@ std::string version_in_tag(const std::string& tag) {
     return num;
 }
 
+// (10.26) Finds the alpha label in `s`: the word "alpha" (not inside a longer word), some separators, an optional "build" / "b" / "v", more separators and
+// a number token (digits, and dots between digits). begin / end: where the whole label sits in `s` (the number token included, whatever it is); number: the
+// alpha number when the token is one whole number from 1 to 9999, else 0 ("alpha" alone, "alpha 10.24", "alpha 0"). False when there is no such word.
+bool find_alpha_label(const std::string& s, size_t& begin, size_t& end, int& number) {
+    const std::string low = lower(s);  // same length as s
+    auto sep = [&](size_t i) {
+        return i < low.size() && (low[i] == ' ' || low[i] == '-' || low[i] == '_' || low[i] == '.' || low[i] == ':' || low[i] == '#');
+    };
+    bool found = false;  // the first alpha word, kept in case no later one has a number
+    for (size_t at = low.find("alpha"); at != std::string::npos; at = low.find("alpha", at + 1)) {
+        if (at > 0 && std::isalnum(static_cast<unsigned char>(low[at - 1]))) continue;     // inside a longer word
+        size_t i = at + 5;
+        if (i < low.size() && std::isalpha(static_cast<unsigned char>(low[i]))) continue;  // "alphabet"
+        while (sep(i)) ++i;
+        for (const char* w : {"build", "b", "v"}) {  // "alpha build 3", "alpha v3", "alpha b3"
+            const size_t n = std::char_traits<char>::length(w);
+            if (low.compare(i, n, w) == 0 && i + n < low.size() && (sep(i + n) || std::isdigit(static_cast<unsigned char>(low[i + n])))) {
+                i += n;
+                while (sep(i)) ++i;
+                break;
+            }
+        }
+        const std::string num = number_at(low, i);
+        int n = 0;
+        if (!num.empty() && num.find('.') == std::string::npos && num.size() <= 4) {
+            n = std::atoi(num.c_str());
+            if (n < 1) n = 0;
+        }
+        if (n > 0 || !found) {
+            begin = at;
+            end = i + num.size();
+            number = n;
+            found = true;
+        }
+        if (n > 0) return true;
+    }
+    return found;
+}
+
 bool read_all(const fs::path& p, std::vector<uint8_t>& out) {
     std::ifstream f(p, std::ios::binary);
     if (!f) return false;
@@ -131,6 +171,40 @@ std::string release_version(const std::string& title, const std::string& tag) {
     return v;
 }
 
+bool has_alpha_word(const std::string& text) {
+    size_t b = 0, e = 0;
+    int n = 0;
+    return find_alpha_label(text, b, e, n);
+}
+
+int alpha_number_in(const std::string& text) {
+    size_t b = 0, e = 0;
+    int n = 0;
+    return find_alpha_label(text, b, e, n) ? n : 0;
+}
+
+std::string without_alpha_label(const std::string& text) {
+    size_t b = 0, e = 0;
+    int n = 0;
+    if (!find_alpha_label(text, b, e, n)) return text;
+    return text.substr(0, b) + text.substr(e);
+}
+
+int compare_release(const std::string& version_a, int alpha_a, const std::string& version_b, int alpha_b) {
+    const int c = compare_versions(version_a, version_b);
+    if (c != 0) return c;
+    // the same release number: a normal release (alpha 0) is below its alphas, or above them when the alphas lead up to it
+    auto rank = [](int a) { return (!kAlphaFollowsItsRelease && a == 0) ? 1000000 : a; };
+    const int x = rank(alpha_a), y = rank(alpha_b);
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+std::string release_name(const std::string& version, int alpha) {
+    const std::string v = version.empty() ? std::string() : "v" + version;
+    if (alpha <= 0) return v;
+    return (v.empty() ? std::string() : v + " ") + "alpha " + std::to_string(alpha);
+}
+
 bool url_is_github(const std::string& url) {
     const std::string pre = "https://";
     if (url.compare(0, pre.size(), pre) != 0) return false;
@@ -146,7 +220,8 @@ bool url_is_github(const std::string& url) {
            ends_with(host, ".githubusercontent.com");
 }
 
-bool pick_release(const std::string& json, bool include_prerelease, ReleaseInfo& out, std::string& err) {
+bool parse_release_list(const std::string& json, std::vector<ReleaseInfo>& out, std::string& err) {
+    out.clear();
     mini::Value root;
     if (!mini::parse(json, root)) {
         err = "GitHub's answer could not be read";
@@ -162,7 +237,6 @@ bool pick_release(const std::string& json, bool include_prerelease, ReleaseInfo&
         }
         list.push_back(&root);
     }
-    bool found = false;
     for (const mini::Value* r : list) {
         if (r->type != mini::Value::Type::Obj) continue;
         auto str = [&](const char* k) {
@@ -174,16 +248,19 @@ bool pick_release(const std::string& json, bool include_prerelease, ReleaseInfo&
             return v && v->type == mini::Value::Type::Bool && v->b;
         };
         if (flag("draft")) continue;
-        const bool pre = flag("prerelease");
-        if (pre && !include_prerelease) continue;
         ReleaseInfo info;
         info.tag = str("tag_name");
         info.title = str("name");
-        info.version = release_version(info.title, info.tag);
-        if (info.version.empty()) continue;
+        info.alpha = has_alpha_word(info.title) || has_alpha_word(info.tag);
+        info.alpha_no = alpha_number_in(info.title);
+        if (info.alpha_no == 0) info.alpha_no = alpha_number_in(info.tag);
+        // An alpha release's release number is read from what is left of the title and the tag once the label is out of them ("Alpha 3 (v0.11)" is
+        // release 0.11, not release 3); one that names no release has an empty version, and the alpha channel does not offer it (it cannot be put in order).
+        info.version = !info.alpha ? release_version(info.title, info.tag)
+                                   : release_version(without_alpha_label(info.title), without_alpha_label(info.tag));
         info.notes = str("body");
         info.page_url = str("html_url");
-        info.prerelease = pre;
+        info.prerelease = flag("prerelease");
         if (const auto* assets = r->get("assets"); assets && assets->type == mini::Value::Type::Arr) {
             for (const auto& a : assets->arr) {
                 if (a.type != mini::Value::Type::Obj) continue;
@@ -196,6 +273,19 @@ bool pick_release(const std::string& json, bool include_prerelease, ReleaseInfo&
                 if (!ra.name.empty() && !ra.url.empty()) info.assets.push_back(std::move(ra));
             }
         }
+        out.push_back(std::move(info));
+    }
+    return true;
+}
+
+bool pick_release(const std::string& json, bool include_prerelease, ReleaseInfo& out, std::string& err) {
+    std::vector<ReleaseInfo> all;
+    if (!parse_release_list(json, all, err)) return false;
+    bool found = false;
+    for (auto& info : all) {
+        if (info.prerelease && !include_prerelease) continue;
+        if (info.alpha) continue;  // (10.24) an alpha build is for the alpha channel only, never for a player on the normal releases (10.26: any release with the word alpha)
+        if (info.version.empty()) continue;
         if (!found || compare_versions(info.version, out.version) > 0) {
             out = std::move(info);
             found = true;
@@ -240,7 +330,15 @@ UpdateCheck check_for_update(HttpClient& http, const std::string& current_versio
         r.message = "Could not check for updates: " + err;
         return r;
     }
-    if (!pick_release(as_string(body), include_prerelease, r.release, err)) {
+    bool picked = pick_release(as_string(body), include_prerelease, r.release, err);
+    if (!picked && !include_prerelease) {
+        // (10.24) "latest" is one release, the newest that is not flagged pre-release. An alpha build published without that flag can be it, and
+        // then it is not for this player: the list has the normal releases too. If that fails as well, the complaint of the first answer stands.
+        std::vector<uint8_t> list_body;
+        std::string list_err;
+        picked = http.get(kReleasesApiList, list_body, list_err, nullptr) && pick_release(as_string(list_body), false, r.release, list_err);
+    }
+    if (!picked) {
         r.message = "Could not check for updates: " + err;
         return r;
     }
@@ -254,8 +352,11 @@ UpdateCheck check_for_update(HttpClient& http, const std::string& current_versio
     return r;
 }
 
-bool fetch_new_exe(HttpClient& http, const ReleaseInfo& r, std::vector<uint8_t>& exe, std::string& err,
-                   const Progress& progress) {
+namespace {
+
+// The shared part of fetch_new_exe and fetch_update_package. When the asset is a zip it is handed back in `zip_out`.
+bool fetch_exe_impl(HttpClient& http, const ReleaseInfo& r, std::vector<uint8_t>& exe, std::vector<uint8_t>* zip_out,
+                    std::string& err, const Progress& progress) {
     ReleaseAsset asset;
     const AssetKind kind = choose_asset(r, asset);
     if (kind == AssetKind::None) {
@@ -283,11 +384,111 @@ bool fetch_new_exe(HttpClient& http, const ReleaseInfo& r, std::vector<uint8_t>&
             return false;
         }
         if (!zip_read(body, *best, exe, kMaxExe, err)) return false;
+        if (zip_out) *zip_out = std::move(body);
     }
     if (!looks_like_exe(exe)) {
         err = "the downloaded file does not look like a Windows program, so it was not installed";
         exe.clear();
+        if (zip_out) zip_out->clear();
         return false;
+    }
+    return true;
+}
+
+constexpr uint64_t kMaxScriptFile = 16ull * 1024 * 1024;
+
+// The text between the quotes after `key = "` where the key starts a word (so BUILD does not match PREBUILD).
+std::string quoted_after(const std::string& text, const std::string& key) {
+    const std::string pat = key + " = \"";
+    size_t from = 0;
+    while (true) {
+        const size_t i = text.find(pat, from);
+        if (i == std::string::npos) return {};
+        const bool word_start = i == 0 || !(std::isalnum(static_cast<unsigned char>(text[i - 1])) || text[i - 1] == '_' || text[i - 1] == '.');
+        if (word_start) {
+            const size_t a = i + pat.size(), b = text.find('"', a);
+            if (b == std::string::npos || b - a > 32) return {};
+            return text.substr(a, b - a);
+        }
+        from = i + 1;
+    }
+}
+
+}  // namespace
+
+std::string script_build(const std::string& lua) { return quoted_after(lua.substr(0, 16384), "BUILD"); }
+std::string script_release(const std::string& lua) { return quoted_after(lua.substr(0, 16384), "RELEASE"); }
+int script_alpha(const std::string& lua) {
+    const std::string a = quoted_after(lua.substr(0, 16384), "ALPHA");
+    if (a.empty() || a.size() > 4) return 0;
+    for (const char c : a) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) return 0;
+    }
+    return std::atoi(a.c_str());
+}
+
+bool fetch_new_exe(HttpClient& http, const ReleaseInfo& r, std::vector<uint8_t>& exe, std::string& err,
+                   const Progress& progress) {
+    return fetch_exe_impl(http, r, exe, nullptr, err, progress);
+}
+
+bool fetch_update_package(HttpClient& http, const ReleaseInfo& r, UpdatePackage& pkg, std::string& err,
+                          const Progress& progress) {
+    pkg = UpdatePackage{};
+    std::vector<uint8_t> zip;
+    if (!fetch_exe_impl(http, r, pkg.exe, &zip, err, progress)) return false;
+
+    std::string lua, defaults;
+    if (!zip.empty()) {  // the release is a zip: the script sits in its lua/ folder, the clips under data/re7mp/
+        std::vector<ZipEntry> entries;
+        std::string zerr;
+        if (zip_list(zip, entries, zerr)) {
+            const ZipEntry *lua_e = nullptr, *def_e = nullptr;
+            for (const auto& z : entries) {
+                if (z.is_dir) continue;
+                const std::string n = lower(zip_safe_name(z.name));
+                if (n.empty()) continue;
+                if (n == "re7mp.lua" || ends_with(n, "/re7mp.lua")) {
+                    if (!lua_e || n.size() < zip_safe_name(lua_e->name).size()) lua_e = &z;
+                } else if (n == "data/re7mp/defaults.json" || ends_with(n, "/data/re7mp/defaults.json")) {
+                    if (!def_e || n.size() < zip_safe_name(def_e->name).size()) def_e = &z;
+                }
+            }
+            std::vector<uint8_t> b;
+            if (lua_e && zip_read(zip, *lua_e, b, kMaxScriptFile, zerr)) lua = as_string(b);
+            if (def_e && zip_read(zip, *def_e, b, kMaxScriptFile, zerr)) defaults = as_string(b);
+        }
+    } else {  // the release is the bare exe: look for the two files beside it
+        for (const auto& a : r.assets) {
+            const std::string n = lower(a.name);
+            std::string* dest = n == "re7mp.lua" ? &lua : n == "defaults.json" ? &defaults : nullptr;
+            if (!dest || !url_is_github(a.url)) continue;
+            std::vector<uint8_t> b;
+            std::string gerr;
+            if (http.get(a.url, b, gerr, nullptr) && b.size() <= kMaxScriptFile) *dest = as_string(b);
+        }
+    }
+
+    if (lua.empty()) {
+        pkg.note = "this release has no re7mp.lua attached";
+    } else if (lua.find('\0') != std::string::npos) {
+        pkg.note = "the release's re7mp.lua is not a text file";
+        lua.clear();
+    } else if (r.alpha) {  // (10.26) an alpha release: the script's RELEASE label is the alpha's release number and its ALPHA label is the alpha's number
+        if (script_release(lua).empty() || compare_versions(script_release(lua), r.version) != 0) {
+            pkg.note = "the release's re7mp.lua says release \"" + script_release(lua) + "\" but the release is " + release_name(r.version, r.alpha_no);
+            lua.clear();
+        } else if (r.alpha_no <= 0 || script_alpha(lua) != r.alpha_no) {
+            pkg.note = "the release's re7mp.lua says alpha " + std::to_string(script_alpha(lua)) + " but the release is " + release_name(r.version, r.alpha_no);
+            lua.clear();
+        }
+    } else if (script_release(lua).empty() || compare_versions(script_release(lua), r.version) != 0) {
+        pkg.note = "the release's re7mp.lua says release \"" + script_release(lua) + "\" but the release is " + r.version;
+        lua.clear();
+    }
+    if (!lua.empty()) {
+        pkg.lua = std::move(lua);
+        pkg.defaults = std::move(defaults);
     }
     return true;
 }

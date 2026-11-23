@@ -33,6 +33,8 @@ local FILES = { -- the bridge files in reframework/data (one table instead of se
     STATE_OUT_FILE = "re7mp_state_out.json",
     STATE_IN_FILE = "re7mp_state_in.json",
     CHAR_FILE = "re7mp_char.json", -- 9.31: written by re7mp.exe ("Play as"): { character = "auto" | "ethan" | "mia" | "clancy" | "pete" | "andre", seq = n }
+    ENEMYSYNC_FILE = "re7mp_enemysync.json", -- 10.19: written by re7mp.exe ("Sync enemies and the Molded"): { enemy_sync = true | false, seq = n }
+    CHANNEL_FILE = "re7mp_channel.json", -- (10.24) written by re7mp.exe ("Join the alpha..."): { channel = "stable" | "alpha", exe_build = "10.24", seq = n }
     STORY_FILE = "re7mp_story.json", -- 9.33: written by re7mp.exe ("Sync story cutscenes"): { story_sync = true | false, seq = n }
 }
 
@@ -57,11 +59,16 @@ FILES.MAP = {
     loadstate = { "re7mp/loadstate.json", "re7mp_loadstate.json" }, -- 9.32: "a body made from model FILES is standing" (a crash while it stands switches loading by path off at the next start)
     forcestate = { "re7mp/forcestate.json", "re7mp_forcestate.json" }, -- 9.32: "a cutscene was played here for the other player" (a crash within 90 s puts that cutscene on the not-played list)
     motlists = { "re7mp/motlists.json", "re7mp_motlists.json" }, -- 9.33: every .motlist (animation file) path the "Enemy animations" button has seen
-    hairstate = { "re7mp/hairstate.json", "re7mp_hairstate.json" }, -- 9.35: "Mia's hair physics component is standing" + the calls that ended a session (skipped from then on)
     enemy_clips = { "re7mp/enemy_clips.json", "re7mp_enemy_clips.json" }, -- 9.41: every enemy animation bank and clip number the game showed, and each bank's .motlist path (kept between sessions)
-    spawnlog = { "re7mp/spawnlog.json", "re7mp_spawnlog.json" }, -- 9.43: the spawn log: each spawn of Mia (calls before / after, files), her objects and files, what her copy lacks, the hair physics census
-    spawntext = { "re7mp/spawn_log.txt", "re7mp_spawn_log.txt" }, -- 9.43: the same log as plain text lines
-    spawnstate = { "re7mp/spawnstate.json", "re7mp_spawnstate.json" }, -- 9.43: the calls that ended a session while the spawn log was reading (skipped from then on)
+    modpack = { "re7mp/modpack.json", "re7mp_modpack.json" }, -- 10.1: written by re7mp.exe when it has put the full character models (Nexus RE7 mod 86) under natives/stm/coop
+    motion_banks = { "re7mp/motion_banks.json", "re7mp_motion_banks.json" }, -- 10.1: Ethan's motion banks and which bank / clip he plays for each thing he does (kept between sessions)
+    game_motion = { "re7mp/game_motion.json", "re7mp_game_motion.json" }, -- 10.2: {"on": true / false}: the other player's body plays the game's own motion bank clips (the box in "Other player's body")
+    limb_probe = { "re7mp/limb_probe.json", "re7mp_limb_probe.json" }, -- 10.21: the Molded limb probe: the type definitions of the lost-parts classes and what the first body of each family showed
+    car_probe = { "re7mp/car_probe.json", "re7mp_car_probe.json" }, -- 10.16: the garage car probe (reads only): the type app.CarInGarage and its objects
+    flow_probe = { "re7mp/flow_probe.json", "re7mp_flow_probe.json" }, -- 10.18: the story flow probe (reads only): the game's types for it and every flow with its number and steps
+    car_sync = { "re7mp/car_sync.json", "re7mp_car_sync.json" }, -- 10.19: the garage car sync journal (who ran the car, the other player's get-in, the puppet, Jack, damage)
+    actor_probe = { "re7mp/actor_probe.json", "re7mp_actor_probe.json" }, -- 10.19: scene objects that run a script of their own like the garage car (reads only)
+    friend = { "re7mp/friend.json", "re7mp_friend.json" }, -- 10.5: what Ethan's friend carries (items given to it; weapons and ammo are shared, never in this list)
     model_status = { "re7mp/model_status.json", "re7mp_model_status.json" }, -- 9.36: per enemy / player model: made, failed and why, what the every-5-seconds check found (kept between sessions)
 }
 FILES.folder_ok, FILES.folder_note = nil, nil
@@ -90,14 +97,16 @@ function FILES.read(key) -- the file's content (the folder first, then the old f
     return nil
 end
 local CFG = {
-    RELEASE = "0.9",          -- the public release number; must equal kReleaseVersion in src/version.hpp (a test checks). Only changes when the owner says.
-    BUILD = "9.44",            -- internal build label (the changelog's v9.x), shown in the panel and debug file
+    RELEASE = "0.11",          -- the public release number; must equal kReleaseVersion in src/version.hpp (a test checks). Only changes when the owner says. (10.22: 0.11, the hotfix; 10.23 keeps it)
+    BUILD = "10.27",            -- internal build label (the changelog's v9.x), shown in the panel and debug file. (10.27: the frame dips of the 10.26 file, the garage car's blind spots) (10.26: Ethan's friend follows you / stays put with the F5 key, the exe's radios are gone; alpha releases are numbered "v0.11 alpha 3")
+    ALPHA = "0",                -- (10.26) which ALPHA of RELEASE this script is: "0" = a normal release; an alpha release says "3" for "v0.11 alpha 3". re7mp.exe reads it (updater.cpp, script_alpha) to know whether it IS an alpha, and tools/pack_alpha.py sets and checks it. Only the alpha packer changes this; a normal release stays "0".
     -- Risky features, each behind a switch that is OFF at the start. When one has been proven in the real game, its
     -- default here becomes true; nothing else has to change. Neither is saved: a game that crashed with one on starts with it off.
     STORY_SYNC_DEFAULT = false,  -- story / cutscene sync: tell the other player when I start a cutscene
     STORY_TELEPORT_DEFAULT = false, -- ...and (joiner) move to the host's place when the host starts one
     ver = {},                 -- release / version-check state (see "Version check" below)
     lm = {},                  -- Load screen labels (see "Load screen labels" below)
+    show_retired = false,     -- (10.7) the sections Start together, Co-op saves, Find item hooks and Model probe left the menu; settings.json "show_retired_panels": true brings them back
     SEND_INTERVAL = 0.04,     -- seconds between pose updates (25 Hz)
     READ_INTERVAL = 0.03,
     STALE_AFTER = 2.0,        -- seconds without a new packet before the figure turns grey
@@ -128,6 +137,7 @@ local CFG = {
     POSE_GUN = 1024,          -- "I have a gun out" (9.28; the exe passes the whole 16-bit field on, so the protocol is unchanged)
     POSE_AIM = 2048,          -- "I am aiming" (9.28)
     POSE_SHOOT = 4096,        -- "I just fired" (9.28; about 0.4 s after each shot)
+    POSE_RUN = 8192,          -- "I am running" (10.12; bit 13 of the same 16-bit field: the receiver no longer has to guess run from walk by a noisy speed)
     CROUCH_DROP = 0.5,        -- the stand-in's body: how far the eyes sink in a full crouch (metres)
     CROUCH_ENTER = 0.22,      -- measured: the eyes this far below the standing height = crouching ...
     CROUCH_EXIT = 0.12,       -- ... and back up to this = standing again
@@ -235,7 +245,7 @@ end
 ----------------------------------------------------------------------------------------------
 -- 9.36: THE HITCHING. The tester's 9.35 session "kept hitching" and then closed. The debug file is the whole report (about 380 KB of data, 657 KB
 -- on disk): it is built and written in ONE go on the render thread. Until 9.35 that happened (a) every 2 s whenever any journal line had been
--- written (the loopback bot's pose loop, the item journal and the weapon lines write one every second or two) and (b) at once for every line of
+-- written (Ethan's friend's pose loop, the item journal and the weapon lines write one every second or two) and (b) at once for every line of
 -- the item "trail" (221 of them in that session). Now:
 --   * the file is written at most every `play_s` seconds while playing, and every `ui_s` seconds while the REFramework menu or a game menu is open
 --     (nobody feels a hitch there, and the file is fresh when you look), never because of a trail line;
@@ -245,7 +255,7 @@ end
 -- Every line is still in REFramework's own log the moment it is said, and the item trail has its own small file, so a crash loses nothing that matters.
 -- CFG.perf below measures the rest of the script's time per frame (the next file says which part was slow).
 ----------------------------------------------------------------------------------------------
-CFG.dbgf = { play_s = tonumber(rawget(_G, "RE7MP_TEST_FLUSH_S")) or 15, ui_s = 2, cost_x = 100, cost_max_s = 60, n = 0, total = 0, max = 0, last = 0, interval = 0, forced = 0, last_build = 0, last_dump = 0 } -- (RE7MP_TEST_FLUSH_S: only the test harness sets it)
+CFG.dbgf = { play_s = tonumber(rawget(_G, "RE7MP_TEST_FLUSH_S")) or 30, ui_s = 2, cost_x = 100, cost_max_s = 60, n = 0, total = 0, max = 0, last = 0, interval = 0, forced = 0, last_build = 0, last_dump = 0 } -- (RE7MP_TEST_FLUSH_S: only the test harness sets it)
 
 CFG.perf = {
     on = true, SLOW = 0.008, MAX_WORST = 12,
@@ -254,6 +264,13 @@ CFG.perf = {
     over = { ms4 = 0, ms8 = 0, ms16 = 0, ms33 = 0, ms66 = 0 },
     worst = {},                       -- the slowest frames: { at, ms, top, top_ms }
     t = 0, t0 = 0, top = nil, top_dt = 0,
+    -- 10.20: the time BETWEEN frames. The parts above time only the script, so a hitch the game makes (an autosave, a load, a streaming stall) shows in them as nothing:
+    -- it is a long wait between two frames with almost no script time in it. Every frame start is compared with the one before: gap = the wall time between them,
+    -- ours = what the script used in the earlier frame (its parts plus the game-phase callbacks), other = the rest (the game, the graphics driver, other programs).
+    -- Gaps of 60 ms and more are listed in time order with what the game was doing (loading, a menu open, saving). The game's saving flag is looked at on every frame.
+    gap = { prev = nil, last_total = 0, last_top = nil, acc = 0, frames = 0, MIN = 0.06, MAX_RECENT = 30, MAX_WORST = 12,
+        over = { ms50 = 0, ms100 = 0, ms250 = 0, ms500 = 0, ms1000 = 0 }, not_ours_100 = 0, ours_100 = 0, recent = {}, worst = {},
+        saving = { supported = nil, polls = 0, errors = 0, now = false, since = nil, began = 0, events = {}, sm = nil, sm_at = -100, last_error = nil } },
 }
 
 function CFG.perf.begin()
@@ -262,6 +279,126 @@ function CFG.perf.begin()
     P.t = os.clock()
     P.t0 = P.t
     P.top, P.top_dt = nil, 0
+    pcall(CFG.perf.gap_note, P.t0) -- (10.20: the recorder must never break a frame)
+end
+
+-- 10.20: is the game saving right now? (app.SaveDataManager.get_NowSaving, read on every frame; five answers that are not true / false in a row and it is given up)
+function CFG.perf.poll_saving(t)
+    local S = CFG.perf.gap.saving
+    if S.supported == false then return end
+    if S.sm == nil or t - S.sm_at > 5 then
+        local okm, sm = pcall(sdk.get_managed_singleton, "app.SaveDataManager")
+        S.sm, S.sm_at = (okm and sm) or nil, t
+    end
+    if S.sm == nil then return end
+    local ok, v = pcall(function() return S.sm:call("get_NowSaving") end)
+    S.polls = S.polls + 1
+    if not ok or type(v) ~= "boolean" then
+        S.errors = S.errors + 1
+        S.last_error = ok and ("answered " .. type(v)) or tostring(v):sub(1, 80)
+        S.sm = nil
+        if S.supported == nil and S.errors >= 5 then S.supported = false end
+        return
+    end
+    S.supported = true
+    if v ~= S.now then
+        S.now = v
+        if v then S.since, S.began = t, S.began + 1 else S.ended = t end -- (10.27: S.ended = when the save finished, for saving_quiet below)
+        local ev = S.events
+        ev[#ev + 1] = { at = math.floor(t * 10) / 10, what = v and "saving began" or "saving ended",
+            secs = (not v and S.since) and math.floor((t - S.since) * 100) / 100 or nil }
+        while #ev > 30 do table.remove(ev, 1) end
+    end
+end
+
+-- 10.27: is the game writing a save right now (or did it only just finish)? The autosave, the script's slot questions (isExistData) and the debug file all go to the same disk. In the
+-- 10.26 file four of the twelve worst frames (626, 499, 266 and 222 ms, every one of them 0.7 to 2.7 s after "saving began") were the script's slot watch or its debug-file write landing
+-- inside the game's own save of about 2.7 s. Work that can wait asks this first and tries again on a later frame; `what` names the caller so the debug file says how long each one waited
+-- (saving_flag.waits). It is false when the flag is not supported (nothing ever waits then) and false after 15 s of "saving" (a stuck flag must never stop anything for good).
+CFG.perf.SAVE_AFTER_S, CFG.perf.SAVE_STUCK_S = 1.5, 15
+CFG.perf.waits = {}
+function CFG.perf.saving_quiet(now, what)
+    local P = CFG.perf
+    local S = P.gap.saving
+    local busy = false
+    if S.supported == true then
+        if S.now then
+            busy = not (S.since and now - S.since > P.SAVE_STUCK_S)
+        else
+            busy = S.ended ~= nil and now - S.ended < P.SAVE_AFTER_S
+        end
+    end
+    if what then
+        local w = P.waits[what]
+        if w == nil then w = { times = 0, total_s = 0, longest_s = 0, since = nil } P.waits[what] = w end
+        if busy then
+            if w.since == nil then w.since = now end
+        elseif w.since ~= nil then -- it can run again: how long did it wait?
+            local waited = now - w.since
+            w.since, w.times, w.total_s = nil, w.times + 1, w.total_s + waited
+            if waited > w.longest_s then w.longest_s = waited end
+        end
+    end
+    return busy
+end
+
+-- 10.20: called at the start of every frame (see CFG.perf.gap above).
+function CFG.perf.gap_note(t)
+    local P = CFG.perf
+    local G = P.gap
+    local prev = G.prev
+    G.prev = t
+    local ours = G.last_total + G.acc
+    G.acc = 0
+    P.poll_saving(t)
+    if not prev then return end
+    local gap = t - prev
+    G.frames = G.frames + 1
+    if gap < 0.05 then return end
+    local O = G.over
+    O.ms50 = O.ms50 + 1
+    if gap > 0.1 then O.ms100 = O.ms100 + 1 end
+    if gap > 0.25 then O.ms250 = O.ms250 + 1 end
+    if gap > 0.5 then O.ms500 = O.ms500 + 1 end
+    if gap > 1 then O.ms1000 = O.ms1000 + 1 end
+    local other = gap - ours
+    if gap > 0.1 then
+        if other > gap * 0.75 then G.not_ours_100 = G.not_ours_100 + 1 else G.ours_100 = G.ours_100 + 1 end
+    end
+    if gap < G.MIN then return end
+    local S = G.saving
+    local rec = { at = math.floor(prev * 10) / 10, gap_ms = math.floor(gap * 10000) / 10, ours_ms = math.floor(ours * 10000) / 10,
+        other_ms = math.floor(other * 10000) / 10, ours_top = G.last_top, saving = S.now or nil,
+        saving_began_s_ago = (S.since and t - S.since < 10) and math.floor((t - S.since) * 10) / 10 or nil,
+        loading = (CFG.busy and CFG.busy.busy) or nil, menu = (CFG.menu and CFG.menu.open) or nil }
+    local R = G.recent
+    R[#R + 1] = rec
+    while #R > G.MAX_RECENT do table.remove(R, 1) end
+    local W = G.worst
+    W[#W + 1] = rec
+    table.sort(W, function(a, b) return a.gap_ms > b.gap_ms end)
+    while #W > G.MAX_WORST do table.remove(W) end
+end
+
+function CFG.perf.gap_report()
+    local G = CFG.perf.gap
+    local S = G.saving
+    return { about = "10.20: the wall time between frames. gap_ms = since the last frame started; ours_ms = what the script used in that earlier frame; other_ms = the rest (the game, the driver, other programs). "
+            .. "A long gap with a small ours_ms is not the script. saving = the game's get_NowSaving was true when the frame after the gap started (unverified: see saving_flag).",
+        frames_seen = G.frames, gaps_over = { ["50ms"] = G.over.ms50, ["100ms"] = G.over.ms100, ["250ms"] = G.over.ms250, ["500ms"] = G.over.ms500, ["1000ms"] = G.over.ms1000 },
+        over_100ms_mostly_not_the_script = G.not_ours_100, over_100ms_mostly_the_script = G.ours_100,
+        recent = G.recent, worst = G.worst,
+        saving_flag = { supported = S.supported, polls = S.polls, errors = S.errors, last_error = S.last_error, times_began = S.began, now = S.now, events = S.events,
+            -- 10.27: what was held back while the game saved (times it waited, seconds in all, the longest wait; "since" = waiting right now)
+            waits = CFG.perf.waits_report() } }
+end
+
+function CFG.perf.waits_report()
+    local out = { about = "10.27: slot_watch (the save-slot questions) and debug_write (this file) wait while the game is saving and for 1.5 s after; a wait of a few seconds here is the fix working" }
+    for what, w in pairs(CFG.perf.waits) do
+        out[what] = { times = w.times, total_s = math.floor(w.total_s * 10) / 10, longest_s = math.floor(w.longest_s * 10) / 10, waiting_now = w.since ~= nil or nil }
+    end
+    return out
 end
 
 -- The time since the last mark (or the start of the frame) is charged to `label`.
@@ -280,7 +417,7 @@ function CFG.perf.mark(label)
 end
 
 -- Time spent outside the frame callback (the game-phase callbacks): added to a label of its own.
-function CFG.perf.add(label, dt)
+function CFG.perf.add(label, dt, nested)
     local P = CFG.perf
     if not P.on then return end
     local m = P.marks[label]
@@ -288,12 +425,23 @@ function CFG.perf.add(label, dt)
     m.total, m.calls = m.total + dt, m.calls + 1
     if dt > m.max then m.max = dt end
     if dt > P.SLOW then m.slow = m.slow + 1 end
+    if not nested then P.gap.acc = P.gap.acc + dt end -- (10.20: the game-phase callbacks count as the script's own time between two frames; a lap inside one is already in it)
+end
+
+-- 10.20: inside a game-phase tick: the time since the last lap (or the tick's start, CFG.perf.lap_t) is charged to `label`.
+function CFG.perf.lap(label)
+    local P = CFG.perf
+    if not P.on then return end
+    local t = os.clock()
+    P.add(label, t - (P.lap_t or t), true)
+    P.lap_t = t
 end
 
 function CFG.perf.finish()
     local P = CFG.perf
     if not P.on then return end
     local total = os.clock() - P.t0
+    P.gap.last_total, P.gap.last_top = total, P.top
     P.frames, P.total = P.frames + 1, P.total + total
     if total > P.max then P.max = total end
     local O = P.over
@@ -319,9 +467,10 @@ function CFG.perf.report()
             max_ms = math.floor(m.max * 10000) / 10, over_8ms = m.slow }
     end
     table.sort(rows, function(a, b) return a.total_ms > b.total_ms end)
-    while #rows > 24 do table.remove(rows) end
+    while #rows > 48 do table.remove(rows) end -- (10.20: 24 before; the parts are finer now)
     return {
         about = "how long the script's own work took on the render thread: per part (totals over the session), the slowest frames, and what writing this very file cost",
+        frame_gaps = CFG.perf.gap_report(), -- 10.20: the time between frames (is a hitch the script's or the game's?)
         on = P.on, frames = P.frames, avg_ms = P.frames > 0 and math.floor(P.total / P.frames * 10000) / 10 or 0, max_ms = math.floor(P.max * 10000) / 10,
         frames_over = { ["4ms"] = P.over.ms4, ["8ms"] = P.over.ms8, ["16ms"] = P.over.ms16, ["33ms"] = P.over.ms33, ["66ms"] = P.over.ms66 },
         slowest_frames = P.worst, parts = rows,
@@ -340,6 +489,9 @@ local function flush_debug(now, force)
         local need = math.max((ui or menu) and F.ui_s or F.play_s, math.min(F.cost_max_s, F.cost_x * F.last))
         F.interval = need
         if now - dbg.last_flush < need then return end
+        -- (10.27) not while the game writes a save (a write of this file took 266 ms inside one in the 10.26 file): the file stays dirty, so it is written a moment after the save.
+        -- The button's write (force) is the owner asking, so it goes ahead.
+        if CFG.perf.saving_quiet(now, "debug_write") then return end
     else
         F.forced = F.forced + 1
     end
@@ -351,7 +503,8 @@ local function flush_debug(now, force)
         if okx then extra = v end
     end
     local t1 = os.clock()
-    pcall(json.dump_file, FILES.path("debug"), { script = "re7mp v" .. CFG.BUILD, release = CFG.RELEASE, build = CFG.BUILD,
+    pcall(json.dump_file, FILES.path("debug"), { script = "re7mp v" .. CFG.BUILD, release = CFG.RELEASE, build = CFG.BUILD, alpha = tonumber(CFG.ALPHA) or 0, -- (10.26) which alpha of the release this is (0 = a normal release)
+        channel = CFG.chan and CFG.chan.value, exe_build = CFG.chan and CFG.chan.exe_build, -- (10.24) "alpha" / "stable" and re7mp.exe's own build, nil when the exe has not said
         exe = state.exe_version, exe_protocol = state.exe_proto, other_player_version = CFG.ver.summary,
         data_folder = { used = FILES.folder_ok, note = FILES.folder_note }, -- (9.30: false = the game refused the re7mp folder; the old flat file names are used)
         health = extra, events = dbg.events, pinned = dbg.pinned, lines = dbg.lines })
@@ -687,7 +840,13 @@ end
 -- The other player's flags, or 0 if we haven't heard from them lately.
 local function remote_flags_now(now)
     if now - state.remote_changed_at > CFG.STALE_AFTER then return 0 end
-    return state.remote_flags or 0
+    local f = state.remote_flags or 0
+    local FB = CFG.friend and CFG.friend.body
+    if FB and FB.own_on() then -- (10.7) Ethan's friend acts for itself: your pose bits are not its own
+        local ok, v = pcall(FB.own_flags, f, now)
+        if ok and type(v) == "number" then return v end
+    end
+    return f
 end
 
 ----------------------------------------------------------------------------------------------
@@ -806,6 +965,10 @@ local function local_flags(now)
             if lp.shoot then f = f + CFG.POSE_SHOOT end
         end
     end
+    -- (10.12) running (not crouched): my own speed against the middle of the walk and run speeds, with a lower bar to stay running than to start
+    local okr, run = pcall(CFG.run.mine, now, lp.crouch == true)
+    lp.run = okr and run == true
+    if lp.run then f = f + CFG.POSE_RUN end
     return f
 end
 
@@ -939,12 +1102,15 @@ local function send_local(now)
     if pos then
         state.local_pos = pos
         state.local_quat = quat
+        local FB = CFG.friend and CFG.friend.body
+        if FB then pcall(FB.note_player, pos, state.local_pose and state.local_pose.crouch) end -- (10.7) the places you walked (the friend's ground)
     else
         -- No camera yet (menus, loading): still send the ready-check flags, but mark the pose invalid.
         flags = flags + FLAG_NOPOSE
         pos = state.local_pos or { x = 0, y = 0, z = 0 }
         quat = { x = 0, y = 0, z = 0, w = 1 }
     end
+    CFG.perf.mark("net: pose gather") -- (10.27: the camera, the pose flags (health / gun / run reads) and the friend's ground notes, apart from the file write below)
     state.seq = state.seq + 1
     json.dump_file(FILES.OUT_FILE, {
         seq = state.seq,
@@ -960,7 +1126,16 @@ end
 -- (9.33) A bridge file that comes back empty or unreadable (the leftover of an exe that was killed in the middle of a write, or no exe at
 -- all) used to be read again every 30 ms, and REFramework writes a line to its log for every failed read: 7,300 of them in 4 minutes
 -- of one test. After a failed read the next one waits 0.1 s, then 0.25, 0.5, 1 and 2 s; one good read starts the pace over.
-CFG.bridge = { slots = {}, STEPS = { 0.1, 0.25, 0.5, 1, 2 } }
+CFG.bridge = { slots = {}, STEPS = { 0.1, 0.25, 0.5, 1, 2 },
+    -- (10.15) The message inbox (re7mp_msg_in.json) is a file read on the render thread, and nearly every read finds nothing new. In the 10.13 session the script's "net send/read" was its
+    -- biggest part (0.7 ms a frame on average, 1263 frames over 8 ms) and the reads are most of it: 33 a second for the pose file and 33 for this one. While the inbox is quiet it is read
+    -- about ten times a second; for ACTIVE_S seconds after a message arrives it is read as often as before. (RE7MP_TEST_QUIET_S: only the test harness sets it.)
+    --
+    -- (10.20) In the 10.15 files the HOST's inbox was in active mode 98.5 % of the time (145,309 reads in 5,480 s, 2,237 left out): messages come all the time there, and "active" read
+    -- it on every pose read (about 28 a second), a file of up to 32 messages each time. The most the inbox can wait now is ACTIVE_GAP_S (0.07 s) in active mode, for ACTIVE_S = 1 s after
+    -- a message. (RE7MP_TEST_ACTIVE_GAP and RE7MP_TEST_ACTIVE_S: only the test harness sets them; the older checks keep the old 0 s and 2 s.)
+    msg = { QUIET_S = tonumber(rawget(_G, "RE7MP_TEST_QUIET_S")) or 0.1, ACTIVE_S = tonumber(rawget(_G, "RE7MP_TEST_ACTIVE_S")) or 1,
+        ACTIVE_GAP_S = tonumber(rawget(_G, "RE7MP_TEST_ACTIVE_GAP")) or 0.07, heard_at = -100, next_at = 0, reads = 0, throttled = 0 } }
 
 function CFG.bridge.read(slot, path, now)
     local s = CFG.bridge.slots[slot]
@@ -990,6 +1165,9 @@ function CFG.bridge.report()
     for slot, s in pairs(CFG.bridge.slots) do
         out[slot] = { failed_reads = s.total_fails, reads_skipped_while_waiting = s.skipped, longest_run_of_failures = s.longest }
     end
+    local m = CFG.bridge.msg
+    out.message_inbox_poll = { about = "10.15: the message inbox is read every quiet_s seconds while nothing arrives, and as often as the pose file for active_s seconds after a message",
+        quiet_s = m.QUIET_S, active_s = m.ACTIVE_S, active_gap_s = m.ACTIVE_GAP_S, reads = m.reads, reads_left_out = m.throttled }
     return out
 end
 
@@ -1017,6 +1195,9 @@ local function read_remote(now)
 
     local target = { x = data.x, y = data.y, z = data.z }
     local quat = { x = data.qx or 0, y = data.qy or 0, z = data.qz or 0, w = data.qw or 1 }
+    local FB = CFG.friend and CFG.friend.body
+    if FB and FB.own_on() then pcall(FB.adjust, target, now) end -- (10.7) the friend's height from your trail, the way it last moved
+    if CFG.carsync then pcall(CFG.carsync.ride_offset, target, now) end -- (10.19) in the garage car the other player is drawn at the second seat
 
     if state.prev_target then
         local dt = now - state.prev_target_time
@@ -1039,6 +1220,11 @@ local function update_remote(now, dt)
     local r = state.remote
     if not r then return end
     local fx, fy, fz = forward_of(r.quat)
+    local FB = CFG.friend and CFG.friend.body
+    if FB and FB.own_on() then -- (10.7) Ethan's friend faces the way it last moved (an enemy at a block), not the way your camera points
+        local okf, hx, hz = pcall(FB.facing, r.pos)
+        if okf and hx then fx, fy, fz = hx, 0, hz end
+    end
     if CFG.face_me and state.local_pos and r.pos then -- 9.28: look at me (sideways only; a body does not tip over to look up)
         local dx, dz = state.local_pos.x - r.pos.x, state.local_pos.z - r.pos.z
         local len = math.sqrt(dx * dx + dz * dz)
@@ -1093,7 +1279,10 @@ local function update_remote(now, dt)
     local pa = 1 - math.exp(-CFG.POSE_BLEND * dt)
     P.guard = P.guard + (tg - P.guard) * pa
     P.heal = P.heal + (th - P.heal) * pa
-    P.crouch = (P.crouch or 0) + (tc - (P.crouch or 0)) * pa
+    local pac = pa
+    local FBc = CFG.friend and CFG.friend.body
+    if FBc and FBc.own_on() then pac = 1 - math.exp(-CFG.friend.CROUCH_BLEND * dt) end -- (10.9) "it takes a second": the friend gets down at once
+    P.crouch = (P.crouch or 0) + (tc - (P.crouch or 0)) * pac
     P.menu = (P.menu or 0) + (tm - (P.menu or 0)) * pa
     P.gun = (P.gun or 0) + (tgn - (P.gun or 0)) * pa
     P.aim = (P.aim or 0) + (tam - (P.aim or 0)) * pa
@@ -2018,7 +2207,12 @@ local function prime_messages()
 end
 
 local function read_messages()
-    local d = CFG.bridge.read("exe_message_file", FILES.MSG_IN_FILE, os.clock())
+    local now = os.clock()
+    local P = CFG.bridge.msg
+    if now < P.next_at then P.throttled = P.throttled + 1 return end
+    P.next_at = now + ((now - P.heard_at < P.ACTIVE_S) and P.ACTIVE_GAP_S or P.QUIET_S) -- (10.15: see CFG.bridge.msg; 10.20: active mode has a gap too)
+    P.reads = P.reads + 1
+    local d = CFG.bridge.read("exe_message_file", FILES.MSG_IN_FILE, now)
     if type(d) ~= "table" or type(d.msgs) ~= "table" then return end
     if d.epoch ~= netmsg.epoch then -- the engine restarted: its numbering starts again
         netmsg.epoch = d.epoch
@@ -2027,6 +2221,7 @@ local function read_messages()
     for _, m in ipairs(d.msgs) do
         if type(m) == "table" and type(m.n) == "number" and m.n > netmsg.last_n then
             netmsg.last_n = m.n
+            P.heard_at = now
             local handler = netmsg.handlers[m.k]
             if handler then
                 local ok, err = pcall(handler, tostring(m.p or ""))
@@ -2403,7 +2598,16 @@ function tracer.crumb(stage, key)
     -- a burst (a chapter loading): at most 400 writes a second. Only the per-call "enter" / "done" crumbs are held back: a
     -- "clean" or "hooking" written in a burst used to be dropped, and the file then blamed a hook that had long been installed.
     if tracer.crumb_n > 400 and (stage == "enter" or stage == "done") then return end
+    tracer.last_stage = stage
     pcall(json.dump_file, FILES.path("lastcall"), { stage = stage, call = key, clock = now, time = os.time(), session = tracer.session })
+end
+
+-- (10.18) a crumb for a call that is made again and again (the story flow, the targets): written only when no other module's marker is waiting for its "clean" (the file holds one
+-- crumb, so this one would overwrite it). Returns true when it was written; the caller then writes the "clean" itself.
+function tracer.crumb_idle(stage, key)
+    if tracer.last_stage ~= nil and tracer.last_stage ~= "clean" then return false end
+    tracer.crumb(stage, key)
+    return true
 end
 
 function tracer.report_previous()
@@ -2442,20 +2646,50 @@ function tracer.report_previous()
     elseif d.stage == "face" then
         text = "The last session ended while the script was switching the layers of Mia's head: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. Switching the layers is off this time (tick the box again to try)."
         tracer.face_suspect = true
-    elseif d.stage == "hair" then
-        text = "The last session ended while the script was working on Mia's hair physics: " .. d.call .. when .. ". If the game crashed, that call is the suspect: tell me. Hair physics is switched off this time and that call is skipped from now on (tick the box again to try)."
-        tracer.hair_suspect, tracer.hair_key = true, tostring(d.call):sub(1, 119)
-    elseif d.stage == "spawnlog" then
-        text = "The last session ended while the spawn log was working: " .. d.call .. when .. ". If the game crashed, that call is the suspect: tell me. It is never made again."
-        tracer.slog_key = tostring(d.call):sub(1, 119)
     elseif d.stage == "verify" then
         text = "The last session ended while the script was checking a model it made (the every-5-seconds check): " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The check is switched off this time (tick its box again to try)."
         tracer.verify_suspect = true
     elseif d.stage == "motion" then
         text = "The last session ended while the script was reading the animation lists (.motlist) of an object: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. (The Enemy animations probe only reads; it does nothing until its button or F3 is pressed.)"
         tracer.motion_suspect = true
+    elseif d.stage == "mbank" then
+        text = "The last session ended while the motion bank detector was reading Ethan's own animation: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The detector is switched off this time (it only reads); the other player's body keeps using the pose flags and the recorded clips."
+        tracer.mbank_suspect = true
+    elseif d.stage == "gmot" then
+        text = "The last session ended while the script was setting up or playing the game's own animations on the other player's body: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The game's animations are switched off this time (the recorded clips play); tick the box in 'Other player's body' to try again."
+        tracer.gmot_suspect = true
+    elseif d.stage == "jack" then
+        text = "The last session ended while the script was sharing a scripted move (the van door, a ladder ...) or the animation banks the game adds to a body: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. Sharing them is switched off this time; the rest of the animation sync is not."
+        tracer.jack_suspect = true
+    elseif d.stage == "molded" then
+        text = "The last session ended while the script was moving a copy of the host's Molded in this game (or bringing one out, or letting one go): " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The Molded copies are switched off this time (tick the box in the enemy section to try again); the ghosts and the shooting are not."
+        tracer.molded_suspect = true
+    elseif d.stage == "pool" then
+        text = "The last session ended while the script was writing a health number into its own copy of the host's enemy (or hitting it): " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The health pool is switched off this time (tick its box to try again)."
+        tracer.pool_suspect = true
+    elseif d.stage == "wmesh" then
+        text = "The last session ended while the script was putting the other player's weapon model on their body: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The weapon model is switched off this time (tick the box in 'Other player's body' to try again)."
+        tracer.wmesh_suspect = true
     elseif d.stage == "revive" then
         text = "The last session ended while the script was finishing an F8 revive: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me."
+    elseif d.stage == "flow" then
+        text = "The last session ended while the script was reading or stepping the story flow (the game's numbered story steps): " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The story-point probe and the matching are switched off this time (tick their boxes in 'Story points' to try again)."
+        tracer.flow_suspect = true
+    elseif d.stage == "own" then
+        text = "The last session ended while the script was handing an enemy to a player (or taking it back): " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The enemy hand-over is switched off this time (tick its box in the enemy section to try again)."
+        tracer.own_suspect = true
+    elseif d.stage == "car" then
+        text = "The last session ended while the script was working on the garage car (getting the other player in, putting the car where theirs is, breaking a window, a hit from the car): " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The garage car sync is switched off until its box is ticked again."
+        tracer.car_suspect = true
+    elseif d.stage == "kill" then
+        text = "The last session ended while the script was killing an enemy for the other player (or finishing its own copy of one): " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. Kill sharing is switched off this time (tick its box to try again)."
+        tracer.kill_suspect = true
+    elseif d.stage == "limb" then
+        text = "The last session ended while the script was reading or applying the lost parts (head, arms, legs) of a Molded: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. Limb sharing is switched off this time (tick its box to try again)."
+        tracer.limb_suspect = true
+    elseif d.stage == "tgt" then
+        text = "The last session ended while the script was reading who an enemy is targeting: " .. d.call .. when .. ". If the game crashed, that is the suspect: tell me. The targeting log is switched off this time (tick its box to try again)."
+        tracer.tgt_suspect = true
     else
         return -- "clean": the scripts were reset normally
     end
@@ -2848,9 +3082,18 @@ end
 
 function items.category_name(n) return n and (items.CATEGORY[n] or ("category " .. tostring(n))) or "unknown" end
 
+-- (10.12) "EntranceHallKey can be shared since only one person needs it to open the door for both": the door the key opens is opened in both games (CFG.door), so
+-- the key is taken from the other game when one of you picks it up, like a herb. Only the keys listed here; every other key item stays in each game.
+items.SHARE_NAMES = { entrancehallkey = true }
+function items.name_shared(id)
+    if type(id) ~= "string" then return false end
+    return items.SHARE_NAMES[(id:lower():gsub("[^%w]", ""))] == true
+end
+
 -- May this item be shared? (true / false, and the words for the log)
 function items.may_share(item, id)
     local n, why = items.category_of(item, id)
+    if items.safe_only and items.name_shared(id) then return true, n, "a key that opens a door for both of you" end
     if not items.safe_only then return true, n, "all kinds are shared (the box is unticked)" end
     if n == nil then return false, nil, why or "its category can't be read" end
     if items.SHARE[n] then return true, n, items.category_name(n) end
@@ -2982,12 +3225,12 @@ local function remove_world_item(id, name, x, y, z)
     local okc, lying = pcall(function() return best:call("getComponent(System.Type)", sdk.typeof("app.Item")) end)
     local lcat, lwhy
     if okc and lying ~= nil then lcat, lwhy = items.category_of(lying, id) end
-    if items.safe_only and not (lcat ~= nil and items.SHARE[lcat]) then
+    if items.safe_only and not (lcat ~= nil and items.SHARE[lcat]) and not items.name_shared(id) then
         if lcat == nil then items.unreadable = items.unreadable + 1 else items.not_shared = items.not_shared + 1 end
         item_note(string.format("%s took %s (%s): it stays here, it is not shared", state.remote_name or CFG.DEFAULT_NAME, id, lcat ~= nil and items.category_name(lcat) or tostring(lwhy or "category unknown")))
         return
     end
-    if items.mode == "both" and not (lcat ~= nil and items.WEAPONS[lcat]) then
+    if items.mode == "both" and not (lcat ~= nil and items.WEAPONS[lcat]) and not items.name_shared(id) then
         items.kept = items.kept + 1
         item_note(string.format("%s took %s: it stays here too, so you can take it as well (both players get it)", state.remote_name or CFG.DEFAULT_NAME, id))
         return
@@ -3131,7 +3374,7 @@ local function hook_method(type_name, method_name, pre, post)
             errors = errors + 1
             if errors <= 3 then say("hook error in " .. method_name .. ": " .. tostring(err)) end -- (9.13: three times, not for ever)
         elseif err == "skip" and SKIP_ORIGINAL ~= nil then
-            return SKIP_ORIGINAL -- only the execution test's opt-in "block the game over" returns this; every other callback returns nothing
+            return SKIP_ORIGINAL -- (10.23) only the downed player's healing-item block (H.item_blocked) returns "skip"; every other callback returns nothing
         end
         return CALL_ORIGINAL
     end, function(retval)
@@ -3231,23 +3474,57 @@ end
 -- The player's GameObject (Pl0000 for Ethan, Pl2000 for Mia ...): remembered from hooks, or searched for (at most every 3
 -- seconds). When there are several, the one nearest the camera is the one being played. A single one is looked for again
 -- only once a minute (the scan walks the whole scene), several every 5 seconds.
+-- (10.11) "every 10 seconds there is a 10 fps frame dip": the walk of the scene (up to 20000 objects, a name read for each) cost 27 to 34 ms in the user's debug file
+-- (slowest frames at 225.5 s, 245.5 s, 265.5 s, 295.5 s ... all in "menu/who/weapon/inventory") and the Play-as module forced it every 10 s. The walk is only needed when the
+-- remembered player object may be the wrong one, and the wrong one is not where the camera is (RE7 is first person: the camera is the player's eyes). So the remembered object
+-- is looked at first (one position read): while it is within 3.5 m of the camera it is kept and the scene is NOT walked. A walk because the object is elsewhere (a cutscene
+-- camera, a swapped object) is repeated at most every 30 s (60, 120 ... 300 s while it keeps finding the same object). Counters: mgr.player_walks (health.who.player_search in the debug file).
+mgr.player_walks = { walks = 0, kept = 0, last_ms = 0, max_ms = 0, last_at = -1000, far_at = -1000, ON_CAMERA_M = 3.5, FAR_EVERY = 30, FAR_MAX = 300, far_every = 30 }
+function mgr.player_on_camera()
+    local cam = state.local_pos
+    if not mgr.player or not cam then return true end -- no camera reading to compare with: the object answers to its name, so it is kept
+    local ok, p = pcall(function() return mgr.player:call("get_Transform"):call("get_Position") end)
+    if not ok or not p then return false end
+    local W = mgr.player_walks
+    local dx, dy, dz = p.x - cam.x, p.y - cam.y, p.z - cam.z
+    local d2 = dx * dx + dy * dy + dz * dz
+    W.last_d = math.floor(math.sqrt(d2) * 100 + 0.5) / 100
+    return d2 <= W.ON_CAMERA_M * W.ON_CAMERA_M
+end
+
 local function player_object()
     local now = os.clock()
+    local PW = mgr.player_walks
+    local far_walk = false
     if mgr.player then
         local ok, n = pcall(function() return mgr.player:call("get_Name") end)
         if ok and is_player_name(n) then
             if now - (mgr.player_scan_at or -1000) < (mgr.player_multi and 5 or 60) then return mgr.player end
+            -- (10.11) a look is due: the object stays when it is where the camera is, and a walk because it is not is repeated at most every FAR_EVERY s
+            if mgr.player_on_camera() then
+                mgr.player_scan_at = now
+                PW.kept = PW.kept + 1
+                PW.far_every = PW.FAR_EVERY
+                return mgr.player
+            end
+            if now - PW.far_at < PW.far_every then return mgr.player end
+            far_walk = true
         else
             mgr.player = nil
         end
     end
     if now - mgr.player_checked < 3 then return mgr.player end
     mgr.player_checked = now
+    if far_walk then PW.far_at, PW.had = now, mgr.player_name end -- (a walk that finds the same kind of player object again doubles the wait for the next one: the camera is simply somewhere else)
     local cands = {}
+    local t0 = os.clock()
     pcall(each_gameobject, function(go)
         local okn, n = pcall(function() return go:call("get_Name") end)
         if okn and is_player_name(n) then cands[#cands + 1] = go end
     end, 20000)
+    PW.walks, PW.last_at = PW.walks + 1, now
+    PW.last_ms = math.floor((os.clock() - t0) * 10000 + 0.5) / 10
+    if PW.last_ms > PW.max_ms then PW.max_ms = PW.last_ms end
     mgr.player_scan_at, mgr.player_multi, mgr.player_cands = now, #cands > 1, #cands
     local best
     if #cands == 1 then
@@ -3267,6 +3544,10 @@ local function player_object()
         local okn, n = pcall(function() return best:call("get_Name") end)
         n = okn and n or nil
         if n ~= mgr.player_name then say("player object: " .. tostring(n) .. " (" .. #cands .. " found)") end
+        if PW.had ~= nil then
+            PW.far_every = (n == PW.had) and math.min(PW.far_every * 2, PW.FAR_MAX) or PW.FAR_EVERY
+            PW.had = nil
+        end
         mgr.player_name = n
         mgr.player = best
     end
@@ -3544,6 +3825,7 @@ local give = {
     -- (createDropItemInstance, the call the game itself uses for what lies on the ground; addItem is never called and nothing is made for the
     -- inventory). The other player picks it up with the game's own pickup, which the pickup hook sees and syncs. The real game showed it works
     -- (the 9.32 files: Herb, HandgunBullet, ShotgunBullet drops, all alive seconds later). Growing a stack of a kind already held stays the first way.
+    drops_refused = 0, last_refused_drop = nil, -- (10.12) key items / weapons are never made for the ground (createDropItemInstance made bare objects for them and crashed the game)
     ground = true, ground_drops = {}, GROUND_KEEP = 8, GROUND_LOOK_AFTER = 2.0, ground_made = 0, ground_failed = 0, ground_picked = 0, ground_gone = 0,
 }
 
@@ -3665,6 +3947,63 @@ function CFG.mprobe.matches(words, path, name)
     end
     return false
 end
+-- (10.27) The cheaper walk the scan uses. The 10.26 file has the scan at 105 to 180 ms every 20 s (5,165 objects), with 70 to 90 ms more lost in the next frame, and these are
+-- the 71 of the 73 gaps over 100 ms in that file. each_gameobject made a path string for every object and `matches` lower-cased the WHOLE path again for each one, then, for
+-- the two short words ("pl", "em"), built a pattern and tried every part of the path. A name decides a match on its own and a match is inherited by everything under it (the path
+-- is the parents' names plus its own, the words never contain "/"), so this reads each object's OWN name once, lower-cases only that, makes the path text only for an object that
+-- matched (from a list of the names on the way down) and makes no closure per object. The same objects are visited (8 levels, `max_nodes`), the same ones match.
+function CFG.mprobe.compile(words)
+    local short, long = {}, {}
+    for _, w in ipairs(words) do
+        if #w <= 2 then short[#short + 1] = "^" .. (w:gsub("%p", "%%%0")) .. "%d" else long[#long + 1] = w end
+    end
+    return { short = short, long = long }
+end
+-- Does this one name (lower case) match? The short words must start a part of the name (split at "/", as the old path was) and be followed by a digit.
+function CFG.mprobe.name_hit(cw, low)
+    for _, w in ipairs(cw.long) do
+        if low:find(w, 1, true) then return true end
+    end
+    if #cw.short > 0 then
+        for seg in low:gmatch("[^/]+") do
+            for _, pat in ipairs(cw.short) do
+                if seg:find(pat) then return true end
+            end
+        end
+    end
+    return false
+end
+-- visit(go, name, hit, names, depth) for every object that has a GameObject: `hit` is true when the name, or the name of any parent, matched; the path of the object is
+-- "/" .. table.concat(names, "/", 1, depth + 1). Returns how many objects were looked at.
+function CFG.mprobe.walk(cw, visit, max_nodes)
+    local scene = scene_object()
+    if not scene then return 0 end
+    local MP = CFG.mprobe
+    local count = 0
+    local names = {}
+    local function walk(xf, depth, inherited)
+        while xf and count < max_nodes do
+            count = count + 1
+            local go = xf:call("get_GameObject")
+            local name = "?"
+            if go then
+                local okn, n = pcall(go.call, go, "get_Name")
+                if okn and n ~= nil then name = tostring(n) end
+            end
+            names[depth + 1] = name
+            local hit = inherited or MP.name_hit(cw, name:lower())
+            if go and visit(go, name, hit, names, depth) then return true end
+            if depth < 8 then
+                local child = xf:call("get_Child")
+                if child and walk(child, depth + 1, hit) then return true end
+            end
+            xf = xf:call("get_Next")
+        end
+        return false
+    end
+    walk(scene:call("get_FirstTransform"), 0, false)
+    return count
+end
 -- The joint objects of a transform (an array), or nil and a note.
 function CFG.mprobe.joint_els(xf)
     local arr = CFG.mprobe.try(xf, { "get_Joints", "getJoints" })
@@ -3707,12 +4046,12 @@ function CFG.mprobe.scan()
         scanned = 0, matched = 0, left_out = 0, repeated = 0, unreadable = 0, errors = 0, at_s = math.floor(os.clock()) }
     MP.last_at = os.clock()
     local per_mesh = {}
-    local ok, err = pcall(each_gameobject, function(go, path)
+    local cw = MP.compile(words)
+    local ok, err = pcall(MP.walk, cw, function(go, name, hit, names, depth) -- (10.27: the cheaper walk, see CFG.mprobe.walk; it used each_gameobject and MP.matches on the whole path)
         res.scanned = res.scanned + 1
+        if not hit then return false end
         if res.matched >= MP.MAX_MATCHED then return false end
-        local okn, name = pcall(function() return go:call("get_Name") end)
-        name = okn and tostring(name) or "?"
-        if not MP.matches(words, path, name) then return false end
+        local path = "/" .. table.concat(names, "/", 1, depth + 1)
         local okc, comps = pcall(component_names, go)
         local mesh_comp
         if okc then
@@ -3837,6 +4176,8 @@ CFG.mprobe.TARGETS = {
     { "Marguerite Baker", { "marguerite", "em3100", "em3600", "em3800" }, "her cutscenes and the fight against her" },
     { "Lucas Baker", { "lucas", "em3200", "em3900" }, "his cutscenes and the places he talks to you from" },
     { "Zoe", { "zoe", "em3400", "pl3400" }, "her cutscenes" },
+    { "Joe Baker (End of Zoe, pl9000)", { "joe", "pl9000", "pl9100", "pl9200", "ch9" }, "End of Zoe: play as Joe and press F11 while his hands are in view (the files of his hands are then used for him)" },
+    { "Chris (Not a Hero, pl1000)", { "chris", "pl1000", "ch8" }, "Not a Hero: play as Chris and press F11 while his hands are in view" },
     { "Molded (the black-mould enemies)", { "molded", "em4000", "em4100", "em4200" }, "stand near one: every kind you meet (the smallest, the big ones)" },
 }
 
@@ -3980,8 +4321,12 @@ function CFG.mprobe.collect(why)
     local st = MP.stats
     st.presses = st.presses + 1
     MP.quiet = why == "auto"
+    local t0 = os.clock()
     local ok, err = pcall(MP.scan)
     MP.quiet = false
+    local ms = (os.clock() - t0) * 1000 -- (10.27) what one scan costs, for the panel and the debug file (the 10.26 file's scans took 105 to 180 ms each)
+    st.last_ms, st.total_ms, st.max_ms = ms, (st.total_ms or 0) + ms, math.max(st.max_ms or 0, ms)
+    st.timed = (st.timed or 0) + 1
     if not ok or not MP.result then
         st.last = "the scan failed: " .. tostring(err):sub(1, 100)
         st.shown_at = os.clock()
@@ -4008,6 +4353,36 @@ function CFG.mprobe.clear()
     say("model collection: cleared")
 end
 
+-- (10.27) The automatic mode only scans at a calm moment. A scan is a stop of about a tenth of a second (a hundred milliseconds in the 10.26 file, plus the game's own clean-up in the
+-- frame after): hardly seen when you stand in a menu or watch a cutscene, a hitch every 20 s while you run or fight. A moment is calm when a menu is open, when my Ethan is in a scripted
+-- move (the game is playing one of its own scenes with him), or when I have stood still for 1.5 s (less than 25 cm in half a second, over and over). If none of those comes for
+-- AUTO_FORCE_S (two minutes) it scans anyway, so a long run still collects. It never scans while the game is saving or loading. F11 and the button always scan at once.
+CFG.mprobe.AUTO_FORCE_S, CFG.mprobe.STILL_S = 120, 1.5
+CFG.mprobe.track = { at = -100, x = nil, y = nil, z = nil, still_since = nil }
+function CFG.mprobe.watch_still(now)
+    local T = CFG.mprobe.track
+    if now - T.at < 0.5 then return end
+    T.at = now
+    local p = state.local_pos
+    if p == nil then T.still_since = nil T.x = nil return end
+    if T.x ~= nil and (p.x - T.x) ^ 2 + (p.y - T.y) ^ 2 + (p.z - T.z) ^ 2 < 0.0625 then -- under 25 cm since the sample half a second ago
+        T.still_since = T.still_since or now
+    else
+        T.still_since = nil
+    end
+    T.x, T.y, T.z = p.x, p.y, p.z
+end
+-- true, why: a calm moment; false, why: not now.
+function CFG.mprobe.calm(now)
+    local MP = CFG.mprobe
+    if (CFG.menu and CFG.menu.open == true) or (state.ui_at ~= nil and now - state.ui_at < 1.5) then return true, "a menu is open" end
+    local J = CFG.jack and CFG.jack.s
+    if J and J.path and J.t and now - J.t < 1.0 then return true, "in a scripted move" end
+    local T = MP.track
+    if T.still_since and now - T.still_since >= MP.STILL_S then return true, "standing still" end
+    return false, "moving"
+end
+
 -- F11 (no menu needed in a cutscene) and the automatic mode.
 function CFG.mprobe.update(now)
     local MP = CFG.mprobe
@@ -4015,10 +4390,24 @@ function CFG.mprobe.update(now)
     down = okk and down == true
     if down and not MP.key_was_down then MP.collect("F11") end
     MP.key_was_down = down
-    if MP.auto and now - MP.auto_at >= MP.auto_every then
-        MP.auto_at = now
-        MP.collect("auto")
+    if not MP.auto then MP.stats.waiting = nil return end
+    pcall(MP.watch_still, now)
+    local due = now - MP.auto_at - MP.auto_every
+    if due < 0 then MP.stats.waiting = nil return end
+    -- due: the game must not be saving or loading, and the moment must be calm (or the two minutes must be up)
+    if (CFG.perf and CFG.perf.saving_quiet(now, "model_scan")) or (CFG.busy and CFG.busy.busy) then
+        MP.stats.waiting = "waiting: the game is saving or loading"
+        return
     end
+    local calm, why = MP.calm(now)
+    if not calm and now - MP.auto_at < MP.AUTO_FORCE_S then
+        MP.stats.waiting = "waiting for a calm moment (" .. why .. "); it scans anyway after " .. MP.AUTO_FORCE_S .. " s"
+        return
+    end
+    MP.stats.waiting = nil
+    MP.auto_at = now
+    MP.stats.auto_calm, MP.stats.auto_forced = (MP.stats.auto_calm or 0) + (calm and 1 or 0), (MP.stats.auto_forced or 0) + (calm and 0 or 1)
+    MP.collect("auto")
 end
 
 -- A line on screen for a few seconds after a collection, so a press in a cutscene can be seen to have worked.
@@ -4041,7 +4430,12 @@ function CFG.mprobe.report()
     end
     return { file = FILES.path("models"), collected = MP.collected_n, max = MP.COLLECT_MAX, presses = MP.stats.presses, scans = MP.stats.scans,
         added = MP.stats.added, not_kept = MP.stats.dropped, loaded_from_file = MP.stats.loaded, saved = MP.stats.saved,
-        save_error = MP.stats.save_error, auto = MP.auto, last = MP.stats.last, checklist = checklist, other = MP.other_names(), models = models }
+        save_error = MP.stats.save_error, auto = MP.auto, last = MP.stats.last, checklist = checklist, other = MP.other_names(), models = models,
+        -- 10.27: what a scan costs and when the automatic mode scans (calm = a menu, a scripted move or standing still; forced = two minutes without one)
+        scan_cost = { scans_timed = MP.stats.timed or 0, last_ms = MP.stats.last_ms and math.floor(MP.stats.last_ms * 10) / 10 or nil,
+            avg_ms = (MP.stats.timed or 0) > 0 and math.floor(MP.stats.total_ms / MP.stats.timed * 10) / 10 or nil,
+            max_ms = MP.stats.max_ms and math.floor(MP.stats.max_ms * 10) / 10 or nil },
+        auto_scans = { at_a_calm_moment = MP.stats.auto_calm or 0, forced_after_waiting = MP.stats.auto_forced or 0, waiting = MP.stats.waiting } }
 end
 
 -- Lists the engine's methods for making, copying, posing and drawing a mesh object (read-only): health.model_types.
@@ -4099,7 +4493,10 @@ CFG.body = { enabled = false, lines = {}, queue = {}, go = nil, xf = nil, mc = n
 -- 9.28: the lab's body can be scaled (Mia's copy is shorter than Ethan) and each part can be hidden (her hair is cloth, which a mesh copy lacks)
 CFG.body.scale, CFG.body.hidden, CFG.body.SCALE_MIN, CFG.body.SCALE_MAX, CFG.body.MAIN = 1.0, {}, 0.5, 1.5, "(main body)"
 -- (9.38) "the crouch still goes into the floor a bit": the body is stood this much higher than the camera's drop in a full crouch (metres; a slider in the body lab)
-CFG.body.crouch_extra, CFG.body.CROUCH_EXTRA_MAX = 0.08, 0.4
+-- (10.8) 0.08 -> 0.20: the 14 Nov screenshot-test had the crouched body in the ground up to the knees (the slider is under Ethan's friend, and in the body lab box)
+CFG.body.crouch_extra, CFG.body.CROUCH_EXTRA_MAX, CFG.body.CROUCH_EXTRA_OLD = 0.20, 0.4, 0.08
+-- (10.9) the slider goes down to -2 m ("make the crouch slider also do negatives all the way to -2"); CROUCH_EXTRA_TOP is the friend's slider top
+CFG.body.CROUCH_EXTRA_MIN, CFG.body.CROUCH_EXTRA_TOP = -2.0, 0.6
 
 -- A line in the panel, the journal and the debug file; risky = also written to the black box before anything else happens.
 function CFG.body.note(text, risky)
@@ -4162,6 +4559,15 @@ function CFG.body.find()
     local B = CFG.body
     local want = B.model_src
     if type(want) ~= "string" or want == "" then want = B.SRC end
+    -- 10.1: the full model pack's files come first (also for a character that IS in the scene: the pack's bodies have their heads)
+    if B.allow_load and CFG.pack and CFG.pack.active(want) then
+        local okp, packed = pcall(CFG.load.find, want)
+        if okp and packed then
+            CFG.pack.used[CFG.ids.family(want)] = (CFG.pack.used[CFG.ids.family(want)] or 0) + 1
+            packed.from_pack = true
+            return packed
+        end
+    end
     if B.ETHAN_NAMES[want] == true then
         local function usable(o) return o.object ~= nil and o.root ~= nil and o.root.holder ~= nil end
         local out = B.find_one(B.SRC, true)
@@ -4472,9 +4878,22 @@ function CFG.body.join_pending(now)
                 B.note("Parts: " .. rec.name .. ": its mesh was not loaded after " .. B.PART_WAIT .. " s, so it is taken away again (the body goes on without it)", true)
                 pcall(function() sdk.find_type_definition("via.GameObject"):get_method("destroy(via.GameObject)"):call(nil, rec.go) end)
                 table.remove(B.kids, i)
+                -- (10.7) a part of the full model pack that is not from the pack (a hand, or a guess at one) and never loads: left out for the session, not tried at every make
+                if CFG.pack and CFG.real and CFG.real.model then pcall(CFG.pack.drop, CFG.real.model, tostring(rec.name), "its mesh was not loaded after " .. B.PART_WAIT .. " s") end
                 -- (9.32) Mia's own head that never loaded: the head the scene has (the corrupted one) is made instead, so she is not headless
                 if rec.fallback then pcall(B.face_failed, rec.fallback, "its mesh was not loaded after " .. B.PART_WAIT .. " s", now) end
             end
+        end
+    end
+    -- (10.10) every hand guess of a side was left out: the body is made again once so that it wears the borrowed hand for that side (CFG.pack.parts_of)
+    local P = CFG.pack
+    if P and P.remake_for then
+        local fam = P.remake_for
+        P.remake_for = nil
+        local R = CFG.real
+        if R and R.on and CFG.ids.family(R.model) == fam then
+            B.note("Parts: " .. tostring(R.model) .. ": none of the hand files guessed for a side loaded; making the body again with the borrowed hand", true)
+            pcall(R.retry)
         end
     end
 end
@@ -4502,7 +4921,8 @@ CFG.body.face = {
     heads = {}, scanned = 0, scan_walked = 0, methods = nil, MAX_HEADS = 8, MAX_METHODS = 70,
     -- (9.33) the layers
     mats = true,                                  -- switch the layers of the scene's head (a box in the panel; off for good after a crash in it)
-    LAYERED = { em2050 = true },                  -- the heads (mesh folders) that have layers worth switching
+    LAYERED = { em2050 = true, pl2002 = true, pl2102 = true }, -- the heads (mesh folders) that have layers worth switching (10.4: the full model pack's Mia heads carry the em2050 layers too)
+    vr_off = true,                                -- (10.4) the VR hands layer (a material named ..._VR) is hidden on a body that has hand parts of its own (a box in the panel)
     MAT_DEFAULT = { em2050_Skin_Evil = false, em2050_Skin_Blend = false, em2050_Skin_Mia = true }, -- layer name -> shown? (nothing else is touched)
     shown = {},                                   -- the player's own choices by layer name (saved), they win over MAT_DEFAULT
     mat_ver = 1,                                  -- raised when a choice changes: every head is put right again
@@ -4568,9 +4988,8 @@ function CFG.body.make_part(k, now, fallback, donor)
         return nil
     end
     local rec = { go = kg, name = k.name, shown = true, fallback = fallback, mesh = k.mesh, layered = B.face_layered(k.mesh), spec = k, donor_spec = donor }
-    if donor then -- (9.35) a part of Mia's corrupted model on her playable body: its skeleton is checked before it joins, its hair may get a chain
-        rec.donor, rec.hair_role = donor, donor.role == "hair"
-        rec.orig_go = k.go -- the scene's own object (nil when the part is made from its file): where the chain physics would be copied from
+    if donor then -- (9.35) a part of Mia's corrupted model on her playable body: its skeleton is checked before it joins
+        rec.donor, rec.hair_role = donor, donor.role == "hair" -- (10.23: the part is a still mesh; the chain physics that used rec.orig_go was removed)
     end
     B.kids[#B.kids + 1] = rec
     pcall(function() rec.xf = kg:call("get_Transform") end)
@@ -4678,15 +5097,52 @@ end
 
 -- (9.33) Is this mesh a head whose layers are switched? ("Character/Enemy/em2000/em2050/em2050.mesh": the scene's Mia head)
 function CFG.body.face_layered(mesh)
-    local token = tostring(mesh or ""):lower():match("/(em%d%d50)/")
-    return token ~= nil and CFG.body.face.LAYERED[token] == true
+    -- (10.4) every part is read for layers now (a head's skins, the VR hands that a body mesh carries as a material); a layer is only WRITTEN when there is a
+    -- choice for it (the panel's boxes, the head defaults, the VR rule), so a part with none of those is only read
+    return true
 end
 
 -- Shown (true), hidden (false) or left as the game has it (nil): the player's own choice for this layer, else the default.
 function CFG.body.face_wanted(name)
     local F = CFG.body.face
     if F.shown[name] ~= nil then return F.shown[name] end
-    return F.MAT_DEFAULT[name]
+    if F.MAT_DEFAULT[name] ~= nil then return F.MAT_DEFAULT[name] end
+    if F.vr_off and CFG.body.is_vr_layer(name) and not CFG.body.vr_layer_kept(name) and CFG.body.has_hand_parts() then return false end -- (10.4)
+    -- (10.10 hid the pack's hand layer pl2020_Lhand once pl2020_hand had joined, and the 10.10 test showed Mia with NO left hand and a codex: the game's pl2020 (Pl2000HandL,
+    -- 69 joints + the codex socket Codex_s, 2 materials) is her left ARM holding the codex, it has no hand of its own, and the hand is that layer. 10.11 keeps the layer shown.)
+    return nil
+end
+
+-- (10.10) Has this part (by its name) joined the body? (made, loaded and attached: not still waiting)
+function CFG.body.part_joined(part_name)
+    for _, rec in ipairs(CFG.body.kids or {}) do
+        if rec.name == part_name and rec.go ~= nil and not rec.waiting then return true end
+    end
+    return false
+end
+
+-- (10.4) THE VR HANDS. The player models carry a second set of hands as a MATERIAL of the body mesh (Ethan's pl0001 has pl0000_VR, Mia's pl2023 pl2000_VR),
+-- drawn for VR mode. On a body that also has hand parts of its own (pl3010 / pl3020 ...) they are drawn OVER the normal hands: Clancy's hands looked wrong
+-- ("the VR hands trying to display over the normal ones"). So a layer named ..._VR is switched off while the body has hand parts; a box per layer in
+-- the panel says otherwise, and one box switches the rule off.
+function CFG.body.is_vr_layer(name)
+    local n = tostring(name or ""):lower()
+    return n:match("_vr$") ~= nil or n:match("_vr_") ~= nil or n:match("^vr_") ~= nil
+end
+
+-- (10.9) A layer named ..._VR that is NOT a pair of VR hands, so the rule above leaves it alone: Joe's legs (pl9002_Leg_VR_m, "legs") and Mia's pl2000_VR,
+-- which sits in her pl2023 part and is where her CHEST is (the other developer: "without pl2023 her chest and left hand were missing"; the 10.8 test
+-- hid it with this rule and she had "a hole in her chest"). Your own box for a layer still wins.
+function CFG.body.vr_layer_kept(name)
+    local n = tostring(name or ""):lower()
+    return n:find("leg", 1, true) ~= nil or n == "pl2000_vr"
+end
+
+function CFG.body.has_hand_parts()
+    for _, rec in ipairs(CFG.body.kids or {}) do
+        if tostring(rec.name or ""):lower():match("^pl%d%d[12]0$") and rec.go ~= nil then return true end
+    end
+    return false
 end
 
 -- A choice made in the panel or read from the settings: every head is put right again.
@@ -4748,7 +5204,10 @@ function CFG.body.face_materials(rec, now)
         if type(before) ~= "boolean" then before = nil end
         F.seen[name] = before == nil and "?" or before
         local want
-        if active then want = B.face_wanted(name) elseif rec.orig then want = rec.orig[i] end
+        if active then
+            want = B.face_wanted(name)
+            if want == nil and rec.orig and rec.orig[i] ~= nil then want = rec.orig[i] end -- (10.4) a layer this switched off and nothing asks for any more (the VR rule unticked): back as it was
+        elseif rec.orig then want = rec.orig[i] end
         local row = { i = i, name = name, was = before, want = want, now = before }
         rec.stuck = rec.stuck or {}
         -- (a layer the engine took the call for but did not keep is not written again until a choice changes)
@@ -4776,7 +5235,19 @@ function CFG.body.face_materials(rec, now)
     if changed > 0 or not F.rows[rec.name] then F.rows[rec.name] = rows end -- the pass that changed something (the first, until a choice changes)
     F.rows_now[rec.name] = rows -- the latest pass
     F.last_layers = string.format("%s: %d layers read, %d changed%s", rec.name, n, changed, active and "" or " back (the box is off)")
-    if changed > 0 then B.note("Face: " .. F.last_layers, true) end
+    if changed > 0 then
+        local ch = {}
+        for _, rw in ipairs(rows) do
+            if rw.set ~= nil then ch[#ch + 1] = string.format("%s %s->%s", tostring(rw.name), rw.was == nil and "?" or (rw.was and "on" or "off"), rw.now == nil and "?" or (rw.now and "on" or "off")) end
+        end
+        B.note("Face: " .. F.last_layers .. " (" .. table.concat(ch, ", "):sub(1, 200) .. ")", true) -- (10.9) which ones
+    end
+    if not rec.layers_told then -- (10.9) every layer of the part once, with its state: "a hole in her chest" can be read off this
+        rec.layers_told = true
+        local all = {}
+        for _, rw in ipairs(rows) do all[#all + 1] = string.format("%s=%s", tostring(rw.name), rw.now == nil and "?" or (rw.now and "on" or "off")) end
+        B.note("Face: " .. tostring(rec.name) .. " layers: " .. table.concat(all, ", "):sub(1, 300), true)
+    end
     pcall(tracer.crumb, "clean", "head layers set")
 end
 
@@ -4785,7 +5256,7 @@ end
 function CFG.body.face_materials_tick(now)
     local B, F = CFG.body, CFG.body.face
     local active = F.mats and not F.mats_broken
-    for _, rec in ipairs(B.kids) do
+    local function one(rec)
         if rec.layered and rec.mc and rec.joined and not rec.waiting and not rec.mat_gave_up and (active or rec.orig) then
             local due = rec.mat_ver ~= F.mat_ver and 0.25 or F.RECHECK
             if now - (rec.mat_at or -100) >= due then
@@ -4797,6 +5268,18 @@ function CFG.body.face_materials_tick(now)
             end
         end
     end
+    -- (10.4) the body's own mesh first (its VR hands are one of its materials), then the parts
+    if B.mc and B.go then
+        local rr = B.root_rec
+        if rr == nil or rr.mc ~= B.mc then
+            rr = { name = "body", mc = B.mc, layered = true, joined = true }
+            B.root_rec = rr
+        end
+        one(rr)
+    else
+        B.root_rec = nil
+    end
+    for _, rec in ipairs(B.kids) do one(rec) end
 end
 
 ----------------------------------------------------------------------------------------------
@@ -4902,6 +5385,7 @@ end
 function CFG.body.add_donors(src, now)
     local B, D = CFG.body, CFG.body.donor
     if not D.on then D.last = "off (the box in the panel)" return 0 end
+    if src and src.from_pack then D.last = "not needed: the full model pack's body has its own head and hair" return 0 end -- (10.1)
     local fam = CFG.ids.family(src and src.name or "")
     local list = fam and B.DONORS[fam]
     if not list then return 0 end
@@ -4952,326 +5436,9 @@ function CFG.body.donor_report()
         from_files = D.from_file, not_added = D.missing, shared_joints_needed = D.SHARED_MIN, per_part = D.rows, log = D.log }
 end
 
-----------------------------------------------------------------------------------------------
--- (9.35) MIA'S HAIR PHYSICS (EXPERIMENTAL, ships unticked). Her hair is cloth and chains: the chain hair (em2070) has a native via.motion.Chain
--- component, the side locks (em2071 L / R) have via.dynamics.GpuCloth. A body made of mesh components has none of them, so the hair hangs still.
--- This tries the one that can be copied: when the scene has its own corrupted Mia (Em2000ChainHair), a via.motion.Chain is created on the copy
--- of that part and every readable property of the original's component is copied onto it (numbers, booleans, text, and resource references,
--- which are shared; nothing else). What the original's components hold is read first (zero-argument getters and fields; only reading) and
--- written to the debug file as health.hair, WHETHER OR NOT the copy works, so that the next build can do it from the real property names.
--- The side locks (GpuCloth) are not attempted. Without a corrupted Mia in the scene there is nothing to copy from: the hair hangs still.
--- Safety: every native call is announced in re7mp/lastcall.json first; a session that ended inside one skips that call from then on and starts
--- with hair physics off; a component standing when the session ended switches it off for the next start too (re7mp/hairstate.json). Unverified.
-----------------------------------------------------------------------------------------------
-CFG.hair = {
-    on = false,                  -- the box in the panel (remembered; ships unticked)
-    broken = nil,                -- why it is off for this session
-    tried = 0, copied = 0, failed = 0, errors = 0, last = "not used yet", last_error = nil,
-    standing = nil, standing_at = nil, state_cleared = true, VERIFY_AFTER = 30, verified = 0,
-    skip = {},                   -- "Type.method" keys a session ended inside: never called again
-    probes = {}, MAX_PROBES = 6, MAX_PROPS = 80, MAX_FIELDS = 30, MAX_SET = 70,
-    CHAIN = "via.motion.Chain", PROBE_TYPES = { "via.motion.Chain", "via.dynamics.GpuCloth", "app.ChainClothSelector" },
-    PROBE_OBJECTS = { "Em2000ChainHair", "Em2000LeftHair", "Em2000RightHair", "Em2000Head" },
-    NEVER = { GameObject = true, Transform = true, Owner = true, Valid = true, Type = true, Name = true, Address = true, WorldMatrix = true }, -- (getters not read / setters not used)
-    log = {}, MAX_LOG = 40,
-}
-
-function CFG.hair.note(text)
-    local H = CFG.hair
-    text = tostring(text):gsub("[\r\n]+", " "):sub(1, 220)
-    H.log[#H.log + 1] = text
-    if #H.log > H.MAX_LOG then table.remove(H.log, 1) end
-    CFG.body.note("Hair: " .. text, true)
-end
-
-function CFG.hair.skip_list()
-    local out = {}
-    for k in pairs(CFG.hair.skip) do out[#out + 1] = k end
-    table.sort(out)
-    while #out > 60 do table.remove(out) end
-    return out
-end
-
-function CFG.hair.save_state()
-    local H = CFG.hair
-    pcall(json.dump_file, FILES.path("hairstate"), { session = tracer.session, standing = H.standing == true, skip = H.skip_list(), at = os.time() })
-end
-
--- A hair component is standing on the copy: written to the file until it has run fine for VERIFY_AFTER seconds.
-function CFG.hair.stand()
-    local H = CFG.hair
-    H.standing, H.standing_at, H.state_cleared = true, os.clock(), false
-    H.save_state()
-end
-
-function CFG.hair.clear(why)
-    local H = CFG.hair
-    if H.state_cleared then return end
-    H.state_cleared, H.standing, H.standing_at = true, nil, nil
-    H.save_state()
-    H.last_cleared = tostring(why):sub(1, 60)
-end
-
--- At the start: skip what ended the last session, and start with the box off when that session ended with a component standing.
-function CFG.hair.after_previous()
-    local H = CFG.hair
-    local d = FILES.read("hairstate")
-    if type(d) == "table" and type(d.skip) == "table" then
-        for _, k in ipairs(d.skip) do
-            if type(k) == "string" and #k < 120 and #H.skip < 200 then H.skip[k] = true end
-        end
-    end
-    local why
-    if tracer.hair_suspect then
-        if type(tracer.hair_key) == "string" then H.skip[tracer.hair_key:sub(1, 119)] = true end
-        why = "the last session ended while the script was working on Mia's hair physics (" .. tostring(tracer.hair_key) .. ")"
-    elseif type(d) == "table" and d.session ~= tracer.session and d.standing == true then
-        why = "the last session ended while a hair physics component was standing on Mia's copy"
-    end
-    if why then
-        H.on, H.broken = false, why
-        H.standing, H.state_cleared = nil, false
-        say("hair physics: switched off, because " .. why .. ". Tick it again in 'Other player's body' to try again; the call that ended the session is skipped.")
-        H.clear("reported at the next start")
-    end
-end
-
--- Text for a value in the debug file (never raw userdata).
-function CFG.hair.show(v)
-    local t = type(v)
-    if t == "number" then
-        if v ~= v or v == math.huge or v == -math.huge then return tostring(v) end
-        return math.floor(v * 1000 + 0.5) / 1000
-    end
-    if t == "boolean" then return v end
-    if t == "string" then return v:sub(1, 100) end
-    if t == "nil" then return "nil" end
-    local txt = CFG.mprobe.text(v)
-    if txt and txt ~= "" then return "<" .. txt:sub(1, 100) .. ">" end
-    return dump_value(v)
-end
-
--- Read-only: every zero-argument getter of the object (and its parent types up to via.Component) and every field, with the value they give.
--- Returns { label, type, props = { {name, value} }, fields = { {name, type, value} }, skipped }, and a table name -> raw value for copying.
-function CFG.hair.props(obj, label)
-    local H = CFG.hair
-    local out = { label = label, props = {}, fields = {}, skipped = {}, at_s = math.floor(os.clock()) }
-    local raw = {}
-    local ok, err = pcall(function()
-        local td = obj:get_type_definition()
-        out.type = td:get_full_name()
-        local t, n = td, 0
-        while t and n < H.MAX_PROPS do
-            local tname = t:get_full_name()
-            if tname:find("^System%.") or tname == "via.Component" or tname:find("^via%.Behavior") then break end
-            for _, m in ipairs(t:get_methods() or {}) do
-                if n >= H.MAX_PROPS then break end
-                local name = m:get_name()
-                if name:sub(1, 4) == "get_" and not H.NEVER[name:sub(5)] then
-                    local okm, static, params = pcall(function() return m:is_static(), m:get_param_types() end)
-                    if okm and not static and #(params or {}) == 0 then
-                        local key = out.type .. "." .. name
-                        if H.skip[key] then
-                            out.skipped[#out.skipped + 1] = name
-                        else
-                            pcall(tracer.crumb, "hair", key)
-                            local okv, v = pcall(function() return obj:call(name) end)
-                            n = n + 1
-                            if okv then raw[name:sub(5)] = v end
-                            out.props[#out.props + 1] = { name = name:sub(5), value = okv and H.show(v) or "(error)" }
-                        end
-                    end
-                end
-            end
-            t = t:get_parent_type()
-        end
-        local t2, nf = td, 0
-        while t2 and nf < H.MAX_FIELDS do
-            local tname = t2:get_full_name()
-            if tname:find("^System%.") or tname == "via.Component" or tname:find("^via%.Behavior") then break end
-            for _, f in ipairs(t2:get_fields() or {}) do
-                if nf >= H.MAX_FIELDS then break end
-                if not f:is_static() then
-                    local fname = f:get_name()
-                    local ft = f:get_type()
-                    local key = tname .. "." .. fname
-                    local val = "(skipped)"
-                    if not H.skip[key] then
-                        pcall(tracer.crumb, "hair", key)
-                        local okv, v = pcall(function() return obj:get_field(fname) end)
-                        val = okv and H.show(v) or "(unreadable)"
-                    end
-                    nf = nf + 1
-                    out.fields[#out.fields + 1] = { name = fname, type = ft and ft:get_full_name() or "?", value = val }
-                end
-            end
-            t2 = t2:get_parent_type()
-        end
-    end)
-    pcall(tracer.crumb, "clean", "hair read")
-    if not ok then out.error = tostring(err):sub(1, 100) end
-    H.probes[#H.probes + 1] = out
-    while #H.probes > H.MAX_PROBES do table.remove(H.probes, 1) end
-    return out, raw
-end
-
--- Read-only (the panel's button, and once when the copy is made): the hair / cloth components of the scene's own corrupted Mia.
-function CFG.hair.probe_scene()
-    local H, B = CFG.hair, CFG.body
-    local found = B.scene_parts(H.PROBE_OBJECTS)
-    local n = 0
-    for _, nm in ipairs(H.PROBE_OBJECTS) do
-        local p = found[nm]
-        if p and p.go then
-            for _, tn in ipairs(H.PROBE_TYPES) do
-                local okc, comp = pcall(function() return p.go:call("getComponent(System.Type)", sdk.typeof(tn)) end)
-                if okc and comp ~= nil then
-                    H.props(comp, nm .. " / " .. tn)
-                    n = n + 1
-                end
-            end
-        end
-    end
-    H.last = n > 0 and string.format("probe: %d component(s) of the scene's own Mia read (health.hair.probes in the debug file)", n)
-        or "probe: the scene has no Em2000ChainHair / hair objects with such components (a corrupted Mia has to be in the scene)"
-    H.note(H.last)
-    return n
-end
-
--- A value that may be copied onto the new component: numbers, booleans, text, and references to resources (shared, not copied).
-function CFG.hair.copyable(v)
-    local t = type(v)
-    if t == "number" then return v == v and v ~= math.huge and v ~= -math.huge end
-    if t == "boolean" or t == "string" then return true end
-    if t == "userdata" then
-        local ok, name = pcall(function() return v:get_type_definition():get_full_name() end)
-        return ok and type(name) == "string" and (name:find("Resource", 1, true) ~= nil or name:find("Holder", 1, true) ~= nil)
-    end
-    return false
-end
-
--- One hair part of the copy has joined the body: give it its via.motion.Chain, copied from the original's.
-function CFG.hair.attach(rec)
-    local H = CFG.hair
-    rec.hair_tried = true
-    H.tried = H.tried + 1
-    local orig = rec.orig_go
-    if not orig then
-        H.last = rec.name .. ": there is no corrupted Mia in the scene to copy its chain physics from, so the hair hangs still"
-        H.note(H.last)
-        return false
-    end
-    local okc, oc = pcall(function() return orig:call("getComponent(System.Type)", sdk.typeof(H.CHAIN)) end)
-    if not okc or oc == nil then
-        H.last = rec.name .. ": the original has no " .. H.CHAIN .. " to copy"
-        H.note(H.last)
-        return false
-    end
-    local probe, raw = H.props(oc, rec.name .. " / " .. H.CHAIN .. " (the original)")
-    if H.skip["createComponent " .. H.CHAIN] then
-        H.last = rec.name .. ": creating the component ended a session before, so it is not tried again"
-        H.note(H.last)
-        return false
-    end
-    pcall(tracer.crumb, "hair", "createComponent " .. H.CHAIN)
-    local okn, nc = pcall(function() return rec.go:call("createComponent", sdk.typeof(H.CHAIN)) end)
-    if not okn or nc == nil then
-        H.failed = H.failed + 1
-        H.last = rec.name .. ": the game would not create a " .. H.CHAIN .. " on the copy (" .. (okn and "it answered nothing" or tostring(nc):sub(1, 60)) .. ")"
-        H.note(H.last)
-        pcall(tracer.crumb, "clean", "hair create failed")
-        return false
-    end
-    H.stand()
-    rec.hair_copy = nc
-    local set, failed, skipped = 0, 0, 0
-    local names = {}
-    for _, p in ipairs(probe.props) do names[#names + 1] = p.name end
-    for _, name in ipairs(names) do
-        local v = raw[name]
-        local key = H.CHAIN .. ".set_" .. name
-        if set >= H.MAX_SET then break end
-        if H.NEVER[name] or name == "Enabled" or H.skip[key] or not H.copyable(v) then
-            skipped = skipped + 1
-        else
-            pcall(tracer.crumb, "hair", key)
-            local oks = pcall(function() nc:call("set_" .. name, v) end)
-            if oks then set = set + 1 else failed = failed + 1 end
-        end
-    end
-    pcall(tracer.crumb, "hair", H.CHAIN .. ".set_Enabled")
-    pcall(function() nc:call("set_Enabled", true) end)
-    pcall(tracer.crumb, "clean", "hair copied")
-    -- read back what took (the debug file shows both sides)
-    local back, differ = {}, 0
-    for _, name in ipairs(names) do
-        if raw[name] ~= nil and H.copyable(raw[name]) and type(raw[name]) ~= "userdata" and not H.NEVER[name] and name ~= "Enabled" and not H.skip[H.CHAIN .. ".get_" .. name] then
-            local okb, v2 = pcall(function() return nc:call("get_" .. name) end)
-            if okb and H.show(v2) ~= H.show(raw[name]) then
-                differ = differ + 1
-                if #back < 12 then back[#back + 1] = { name = name, original = H.show(raw[name]), copy = H.show(v2) } end
-            end
-        end
-    end
-    pcall(tracer.crumb, "clean", "hair read back")
-    H.copied = H.copied + 1
-    H.last_copy = { part = rec.name, properties_set = set, set_calls_that_failed = failed, left_alone = skipped, read_back_differs = differ, differing = back }
-    H.last = string.format("%s: %s created on the copy; %d properties copied, %d set calls failed, %d left alone, %d read back differently", rec.name, H.CHAIN, set, failed, skipped, differ)
-    H.note(H.last)
-    return true
-end
-
--- Every frame (B.apply): a hair part that has joined the body gets its component once (when the box is ticked); a component that has run fine
--- for a while is trusted (hairstate.json is cleared).
-function CFG.hair.tick(now)
-    local H, B = CFG.hair, CFG.body
-    if H.standing and H.standing_at and now - H.standing_at >= H.VERIFY_AFTER then
-        H.verified = H.verified + 1
-        H.clear("ran fine for " .. H.VERIFY_AFTER .. " s")
-    end
-    if not H.on or H.broken then return end
-    for _, rec in ipairs(B.kids) do
-        if rec.hair_role and rec.joined and not rec.waiting and not rec.hair_tried then
-            local ok, err = pcall(H.attach, rec)
-            if not ok then
-                H.failed, H.errors = H.failed + 1, H.errors + 1
-                H.last_error = tostring(err):sub(1, 100)
-                H.last = "error: " .. H.last_error
-                H.note(H.last)
-                if H.errors >= 3 then H.broken = "errors: " .. H.last_error end
-            end
-        end
-    end
-end
-
--- The box in the panel. Unticking switches the copied components off (they are destroyed with the body).
-function CFG.hair.set_on(v)
-    local H, B = CFG.hair, CFG.body
-    H.on = v == true
-    if H.on then
-        H.broken = nil
-        for _, rec in ipairs(B.kids) do
-            if rec.hair_role and not rec.hair_copy then rec.hair_tried = nil end -- (tried again)
-        end
-    else
-        for _, rec in ipairs(B.kids) do
-            if rec.hair_copy then pcall(function() rec.hair_copy:call("set_Enabled", false) end) end
-        end
-    end
-end
-
-function CFG.hair.line()
-    local H = CFG.hair
-    return string.format("Hair physics: %s. %s", H.broken and ("off for now (" .. H.broken .. ")") or (H.on and "on" or "off"), H.last)
-end
-
-function CFG.hair.report()
-    local H = CFG.hair
-    return { on = H.on, switched_off_because = H.broken, last = H.last, tried = H.tried, copied = H.copied, failed = H.failed, errors = H.errors, last_error = H.last_error,
-        last_copy = H.last_copy, component_standing_now = H.standing == true, components_trusted = H.verified, calls_skipped_after_a_crash = H.skip_list(),
-        previous_session_ended_inside = tracer.hair_suspect == true, log = H.log, probes = H.probes,
-        about = "health.hair.probes: the properties and fields the scene's own Mia's hair / cloth components hold (press 'Read her hair components' with a corrupted Mia in the scene)" }
-end
+-- (10.23) Mia's hair physics was removed (EXPERIMENTAL, it shipped unticked: a via.motion.Chain copied onto the copy of her chain hair). The real
+-- Mia can now be moved to where she is wanted (enemy mode 3), so a copy no longer needs hair of its own. Her chain hair is still added as a still
+-- mesh by the head parts above. 'Hide hair parts' (the real body's box) is a different thing and stays.
 
 function CFG.body.add_parts()
     local B = CFG.body
@@ -5302,6 +5469,7 @@ end
 function CFG.body.remove()
     local B = CFG.body
     B.follow, B.hold = false, false
+    if CFG.wmesh then pcall(CFG.wmesh.drop, "the body is being taken down") end -- (10.15) the weapon on its hand goes first (a copy left behind stays stuck on the next body)
     if B.joint_obj and B.base then pcall(function() B.joint_obj:call("set_LocalEulerAngle", Vector3f.new(B.base[1], B.base[2], B.base[3])) end) end
     B.joint_obj, B.joint_name, B.base = nil, nil, nil
     local function destroy(go, label)
@@ -5314,7 +5482,6 @@ function CFG.body.remove()
     if B.go then destroy(B.go, B.NAME) end
     B.go, B.xf, B.mc, B.kids, B.scene = nil, nil, nil, {}, nil
     if B.from_file then B.from_file = nil CFG.load.clear("the body was taken down") end -- (9.32) a body made from files is no longer up
-    pcall(CFG.hair.clear, "the body was taken down") -- (9.35) a hair component went with it
 end
 
 -- The scene changed under me: the game took the objects down with it, so the references are dropped and never used.
@@ -5324,11 +5491,11 @@ function CFG.body.guard()
     local now_key = B.scene_key()
     if now_key ~= nil and now_key ~= B.scene then
         B.note("The scene changed: the game took my objects down with it, so I let go of them (nothing is destroyed by me)")
+        if CFG.wmesh then pcall(CFG.wmesh.forget, "the scene changed") end -- (10.15)
         B.go, B.xf, B.mc, B.kids, B.scene = nil, nil, nil, {}, nil
         B.follow, B.hold, B.joint_obj, B.joint_name, B.base = false, false, nil, nil, nil
         B.dropped = B.dropped + 1
         if B.from_file then B.from_file = nil CFG.load.clear("the scene changed") end
-        pcall(CFG.hair.clear, "the scene changed") -- (9.35)
     end
 end
 
@@ -5494,6 +5661,13 @@ end
 -- camera by about CROUCH_DROP, and a clip that carries the Hip's position (every clip recorded since 9.26) lowers the hips by itself: the
 -- crouch clip's Hip is 0.38 m up against 0.99 m standing, so the hips ended up 0.12 m BELOW the floor. While such a clip plays, the body is
 -- stood back up by how far the camera sank, so its feet stay on the floor. A clip without a hip position (the legs only bend) keeps the old rule.
+-- (10.4) metres a body is stood up per character (the other developer's mod found Zoe's feet in the ground by 0.04)
+CFG.body.LIFT = { pl3400 = 0.04 }
+function CFG.body.model_lift()
+    local fam = CFG.ids.family((CFG.real and CFG.real.built_model) or "")
+    return fam and CFG.body.LIFT[fam] or 0
+end
+
 function CFG.body.crouch_lift()
     local B = CFG.body
     local C = CFG.clip
@@ -5501,6 +5675,19 @@ function CFG.body.crouch_lift()
     local clip = P and P.clip
     if not (C and C.play and clip and clip.body and clip.body.hip and P.hipj and not P.hip_off) then return 0 end
     local cr = math.max(0, math.min(1, (state.pose and state.pose.crouch) or 0))
+    -- (10.9) Ethan's friend: its camera is pinned at the STANDING height above its floor (CFG.friend.body.adjust), so nothing sank and nothing has to be put back:
+    -- the 10.8 build stood it up by CROUCH_DROP (0.5 m) + the slider anyway, which is why it floated ("he is still flying a bit"). Its own slider adds to nothing.
+    local FBl = CFG.friend and CFG.friend.body
+    if FBl and FBl.own_on() then
+        -- (10.10) ... and the 10.9 number was too small ("the model goes into the ground"): the friend's feet are measured and put on the floor; the slider is a fine tune on top
+        local lift = (CFG.friend.crouch_lift or 0) * cr
+        local G = CFG.friend.ground
+        if G and G.on and B.xf then
+            local okg, g = pcall(G.update, B.xf, cr, os.clock())
+            if okg and type(g) == "number" then lift = lift + g end
+        end
+        return lift
+    end
     return (CFG.CROUCH_DROP + (B.crouch_extra or 0)) * cr
 end
 
@@ -5511,13 +5698,20 @@ function CFG.body.apply(now)
     pcall(B.join_pending, now) -- 9.32: parts made from files join when their meshes are loaded
     pcall(B.apply_hidden)
     pcall(B.face_materials_tick, now) -- 9.33: the layers of Mia's head
-    pcall(CFG.hair.tick, now) -- 9.35: Mia's hair physics (only when its box is ticked)
     if B.follow then
         local pos, fwd = state.render_pos, state.render_fwd
         if pos and fwd and state.remote then
             local ok, err = pcall(function()
                 local hidden = remote_hidden(now) ~= nil or state.show_figure == false -- (9.29: "Show other player" off hides the real body too)
-                B.xf:call("set_Position", Vector3f.new(pos.x, hidden and -10000 or (pos.y - CFG.EYE_HEIGHT + B.crouch_lift()), pos.z))
+                local lowh = CFG.low and CFG.low.remote(now) or nil -- (10.12) crawling / lying: stood on the floor the sender measured
+                local by
+                if lowh then
+                    by = pos.y - lowh + B.model_lift()
+                    CFG.low.applied = CFG.low.applied + 1
+                else
+                    by = pos.y - CFG.EYE_HEIGHT + B.crouch_lift() + B.model_lift()
+                end
+                B.xf:call("set_Position", Vector3f.new(pos.x, hidden and -10000 or by, pos.z))
                 B.xf:call("set_EulerAngle", Vector3f.new(0, math.atan(fwd[1], fwd[3]) + CFG.MODEL_YAW_OFFSET, 0))
             end)
             if not ok then B.follow = false B.errors = B.errors + 1 B.note("Follow stopped: " .. tostring(err):sub(1, 100), true) end
@@ -5562,6 +5756,7 @@ function CFG.body.tick(phase)
     if B.PHASES[B.phase] ~= phase then return end
     B.ticks = B.ticks + 1
     local t0 = os.clock()
+    CFG.perf.lap_t = t0
     if #B.queue > 0 then
         local q = B.queue
         B.queue = {}
@@ -5569,11 +5764,19 @@ function CFG.body.tick(phase)
             local ok, err = pcall(w.fn)
             if not ok then B.errors = B.errors + 1 B.note(w.label .. ": error " .. tostring(err):sub(1, 120), true) end
         end
+        pcall(CFG.perf.lap, "phase: queued steps") -- (10.20: the game-phase tick in laps, so a file says which of its six parts is slow)
     end
     pcall(B.guard)
     pcall(B.apply, os.clock())
+    pcall(CFG.perf.lap, "phase: body guard + apply")
+    if CFG.gmot then pcall(CFG.gmot.tick, os.clock()) end -- (10.2: the game's own clips, before the recorded one would be played)
+    pcall(CFG.perf.lap, "phase: the game's clips")
     pcall(CFG.clip.tick, os.clock())
+    pcall(CFG.perf.lap, "phase: recorded clips")
     if CFG.pup then pcall(CFG.pup.tick, os.clock()) end -- (9.31: the enemy models stand where their enemies are)
+    pcall(CFG.perf.lap, "phase: enemy models")
+    if CFG.wmesh then pcall(CFG.wmesh.tick, os.clock()) end -- (10.15: the other player's weapon on their body)
+    pcall(CFG.perf.lap, "phase: weapon mesh")
     -- (9.36: the game-phase work is timed on its own; the "UI frame" choice runs inside the frame callback, which times it as "body frame")
     if phase ~= "UI frame" then pcall(CFG.perf.add, "game-phase tick (" .. tostring(phase) .. ")", os.clock() - t0) end
 end
@@ -5629,7 +5832,7 @@ CFG.real = { on = CFG.REAL_BODY_DEFAULT == true, touched = false, model = "Pl000
     body = nil, owns = false, set_follow = false, set_play = false, parts_done = false, sized = false, size_tries = 0, size_at = 0,
     err_b = 0, err_c = 0, restarts = 0, failures = 0, errors = 0, last_error = nil, since = 0, clips_ok = false, clip_at = 0, built_model = nil,
     TICK = 0.2, SIZE_TRIES = 3,
-    READY_WAIT = 10,    -- 9.32: seconds a body's mesh may take to load (made from files) before the body is given up
+    READY_WAIT = 30,    -- 9.32: seconds a body's mesh may take to load (made from files) before the body is given up (10.9: 10 -> 30: Pete's mesh needed longer the first time)
     ready_since = nil, load_failed = nil } -- load_failed: the model whose FILE body failed (the character module then moves on to the next model)
 
 function CFG.real.note(text) CFG.body.note("Real body: " .. text, true) end
@@ -5741,11 +5944,13 @@ function CFG.real.run_make()
         end
     else
         local from_file = B.from_file
+        local was_pack = from_file and CFG.pack and CFG.pack.active(from_file)
         if from_file and why == "mesh" then
             CFG.load.mark_bad(from_file, "the game would not take the mesh made from its file")
             R.load_failed = R.model
         end
         R.fail("making the body failed at step " .. tostring(why) .. " (see the lines below)")
+        if was_pack and why == "mesh" then pcall(CFG.pack.failed, R.model, "the game would not take the mesh") end -- (10.1)
     end
 end
 
@@ -5793,7 +5998,8 @@ end
 -- once, even during the timer, and is ready when the timer ends. Returns the reason to wait, or nil.
 function CFG.real.file_body_waits(now)
     local R, B = CFG.real, CFG.body
-    if B.ETHAN_NAMES[R.model] == true then return nil end -- Ethan is never made from files: nothing to wait for
+    local packed = CFG.pack and CFG.pack.active(R.model) -- (10.1) from the full model pack: made from files, Ethan too
+    if B.ETHAN_NAMES[R.model] == true and not packed then return nil end -- Ethan is never made from files (without the pack): nothing to wait for
     if not (CFG.load and CFG.load.on) then return nil end
     local why
     if now < state.hidden_until then
@@ -5804,7 +6010,7 @@ function CFG.real.file_body_waits(now)
         return nil
     end
     local ok, src = pcall(B.find_one, R.model, true) -- the scene only
-    if ok and type(src) == "table" and src.object ~= nil and src.root ~= nil and src.root.holder ~= nil then return nil end -- it is in the scene: copied at once
+    if not packed and ok and type(src) == "table" and src.object ~= nil and src.root ~= nil and src.root.holder ~= nil then return nil end -- it is in the scene: copied at once
     return "the body of " .. R.model .. " would be made from its files, which is done when the other player is drawn (" .. why .. ")"
 end
 
@@ -5850,11 +6056,13 @@ function CFG.real.update(now)
                 R.ready_since = R.ready_since or now
                 if now - R.ready_since > R.READY_WAIT then
                     local reason = tostring(okr and why or ready)
+                    local was_pack = B.from_file and CFG.pack and CFG.pack.active(B.from_file)
                     if B.from_file then
-                        CFG.load.mark_bad(B.from_file, "its mesh was still not loaded after " .. R.READY_WAIT .. " s", 25)
+                        CFG.load.mark_bad(B.from_file, "its mesh was still not loaded after " .. R.READY_WAIT .. " s", 6) -- (10.9) 25 -> 6 s: the game goes on loading it, so the next try soon finds it
                         R.load_failed = R.model
                     end
                     R.fail("the model's mesh was not ready after " .. R.READY_WAIT .. " s (" .. reason .. ")")
+                    if was_pack then pcall(CFG.pack.failed, R.model, "the mesh was not loaded after " .. R.READY_WAIT .. " s") end -- (10.1) the old models take over
                     return
                 end
                 R.set_status("working", "waiting for the game to load the model's mesh")
@@ -5871,7 +6079,7 @@ function CFG.real.update(now)
             R.stage = "parts"
             R.set_status("working", "body made; adding its parts")
         else
-            if not peer_present(now) then R.set_status("waiting", "no other player (or loopback bot) yet") return end
+            if not peer_present(now) then R.set_status("waiting", "no other player (or Ethan's friend) yet") return end
             if not B.scene_key() then R.set_status("waiting", "not in a game scene") return end
             local wait_why = R.file_body_waits(now)
             if wait_why then
@@ -6035,6 +6243,163 @@ end
 -- The player picks a clip from what the other player is doing (the pose flags and the speed that are already sent) and eases from
 -- one clip to the next. No network message is needed: both players need the same clip files.
 ----------------------------------------------------------------------------------------------
+-- (10.12) LOW (crawling, lying down: "the leg cutoff animations play but it is too far down into the ground to see, like the crawling"). The other player's body
+-- stands at (their camera height - 1.6 m), right for standing and (with the clip's own hips) for a crouch. Crawling, or lying after the legs are cut off, puts the
+-- camera some 0.4-0.8 m above the floor: the body ended up a metre in the ground. The sender knows its own floor (the player object's y), so it says how high its camera
+-- is above it ("low", in centimetres, only while it is under LOW m, and "0" when it is not) and the body is stood on THAT floor.
+CFG.low = { on = true, EVERY = 0.25, SEND_EVERY = 1.5, TTL = 4.0, LOW = 0.9, MIN = 0.15, NEAR = 0.8, read_at = -100, mine_h = nil, sent_key = nil, sent_at = -100, sent = 0,
+    received = 0, remote_h = nil, remote_at = -100, reads = 0, failures = 0, last_error = nil, applied = 0, last = "has not run yet" }
+
+-- My camera's height above my own feet while it is low (the player object's y), or nil. Called every frame; reads about 4 times a second.
+function CFG.low.mine(now)
+    local L = CFG.low
+    if not L.on then return nil end
+    if now - L.read_at < L.EVERY then return L.mine_h end
+    L.read_at = now
+    local lp = state.local_pos
+    L.mine_h = nil
+    if not lp then return nil end
+    local ok, v = pcall(function()
+        local om = sdk.get_managed_singleton("app.ObjectManager")
+        local p = om and om:get_field("PlayerObj")
+        if p == nil then return nil end
+        local xf = p:call("get_Transform")
+        local pos = xf and xf:call("get_Position")
+        return pos and { x = tonumber(pos.x), y = tonumber(pos.y), z = tonumber(pos.z) }
+    end)
+    if not ok then
+        L.failures, L.last_error = L.failures + 1, tostring(v):sub(1, 100)
+        return nil
+    end
+    if type(v) ~= "table" or v.y == nil or v.x == nil or v.z == nil then return nil end
+    L.reads = L.reads + 1
+    local h = lp.y - v.y
+    local flat = math.sqrt((lp.x - v.x) ^ 2 + (lp.z - v.z) ^ 2)
+    -- a camera that is not on the player (a cutscene camera) says nothing about lying down
+    if flat <= L.NEAR and h >= L.MIN and h <= L.LOW then L.mine_h = h end
+    return L.mine_h
+end
+
+-- Tell the other player (when it changes by 4 cm or more, now and then while it lasts, and once more when it ends).
+function CFG.low.tick(now)
+    local L = CFG.low
+    if not L.on then return end
+    local h = L.mine(now)
+    local arg = h and tostring(math.floor(h * 100 + 0.5)) or "0"
+    if L.sent_key == nil and arg == "0" then return end -- never been low: nothing to say
+    local was_low = L.sent_key ~= nil and L.sent_key ~= "0"
+    local changed = (arg ~= "0") ~= was_low or (arg ~= "0" and math.abs(tonumber(arg) - tonumber(L.sent_key)) >= 4)
+    if peer_present(now) and L.send and (changed or (h and now - L.sent_at >= L.SEND_EVERY)) and now - L.sent_at >= 0.2 then
+        L.sent_key, L.sent_at, L.sent = arg, now, L.sent + 1
+        pcall(L.send, "low", arg) -- (L.send is H.send_event, set where the health module is defined: it is a local further down)
+    end
+end
+
+function CFG.low.on_remote(arg, now)
+    local L = CFG.low
+    local cm = tonumber(arg)
+    if not cm then return end
+    L.received = L.received + 1
+    if cm <= 0 then L.remote_h = nil return end
+    L.remote_h, L.remote_at = math.max(L.MIN, math.min(L.LOW, cm / 100)), now
+end
+
+-- How high the other player's camera is above their floor while they are low, or nil (standing, crouching: the old rules). Not for Ethan's friend (it has its own body).
+function CFG.low.remote(now)
+    local L = CFG.low
+    if not L.on or L.remote_h == nil then return nil end
+    if now - L.remote_at > L.TTL then L.remote_h = nil return nil end
+    local FB = CFG.friend and CFG.friend.body
+    if FB and FB.own_on() then return nil end
+    return L.remote_h
+end
+
+function CFG.low.report()
+    local L = CFG.low
+    return { on = L.on, my_height_m = L.mine_h, sent = L.sent, received = L.received, their_height_m = L.remote_h, applied_frames = L.applied, reads = L.reads,
+        failures = L.failures, last_error = L.last_error, about = "10.12: a camera lower than 0.9 m above the floor (crawling, lying) is sent as 'low' and the other player's body is stood on that floor" }
+end
+
+-- (10.12) RUN OR WALK. "When another player is running, the walk animation plays" (10.11 notes). The clips recorded from the real Ethan say why it was
+-- fragile: walk 2.54 m/s, run 4.02 m/s, and the script switched at 2.4, i.e. below the walking speed, so the label depended on camera noise. Now:
+--   * the sender says "running" in the flags (POSE_RUN, bit 13): its own speed (over 0.2 s steps, smoothed) against ON, and it stays running until OFF;
+--   * the receiver runs the run clip when that bit is set, or when its own estimate of the other player's speed is above ON (older build on the other side);
+--   * ON / OFF are the middle of the two recorded clips' speeds when both exist (3.28), 3.3 / 2.9 otherwise.
+CFG.run = { ON = 3.3, OFF = 2.9, EVERY = 0.2, mine_speed = 0, mine_running = false, mine_pos = nil, mine_at = nil, rem_running = false, rem_flag = false,
+    n = { flag_seen = 0, from_speed = 0, switched_run = 0, switched_walk = 0, sent_run = 0 } }
+
+function CFG.run.limits()
+    local R = CFG.run
+    local on, off = R.ON, R.OFF
+    local okc, ws, rs = pcall(function()
+        local w, r = CFG.clip.get("walk"), CFG.clip.get("run")
+        return w and tonumber(w.speed), r and tonumber(r.speed)
+    end)
+    if okc and ws and rs and ws > 0.5 and rs > ws + 0.5 then
+        local mid = (ws + rs) / 2
+        on, off = mid, mid - 0.4
+    end
+    return on, off
+end
+
+-- My own speed (called with every flags build, about 25 times a second; works in 0.2 s steps). Crouched: never running.
+function CFG.run.mine(now, crouched)
+    local R = CFG.run
+    local lp = state.local_pos
+    if not lp then
+        R.mine_pos, R.mine_at, R.mine_speed, R.mine_running = nil, nil, 0, false
+        return false
+    end
+    if R.mine_pos == nil or R.mine_at == nil or now - R.mine_at > 1.0 then
+        R.mine_pos, R.mine_at = { x = lp.x, z = lp.z }, now
+        return R.mine_running
+    end
+    local dt = now - R.mine_at
+    if dt >= R.EVERY then
+        local v = math.sqrt((lp.x - R.mine_pos.x) ^ 2 + (lp.z - R.mine_pos.z) ^ 2) / dt
+        if v >= 12 then v = R.mine_speed end -- a teleport, not running
+        R.mine_speed = R.mine_speed + (v - R.mine_speed) * 0.5
+        R.mine_pos, R.mine_at = { x = lp.x, z = lp.z }, now
+        local on, off = CFG.run.limits()
+        if R.mine_running then R.mine_running = R.mine_speed >= off else R.mine_running = R.mine_speed >= on end
+    end
+    if crouched then return false end
+    if R.mine_running then R.n.sent_run = R.n.sent_run + 1 end
+    return R.mine_running
+end
+
+-- The other player: running or not (their bit, or their speed from where they were seen).
+function CFG.run.remote(now, speed)
+    local R = CFG.run
+    local flag = false
+    local okf, rf = pcall(remote_flags_now, now)
+    if okf and type(rf) == "number" then flag = has(rf, CFG.POSE_RUN) end
+    if flag and not R.rem_flag then R.n.flag_seen = R.n.flag_seen + 1 end
+    R.rem_flag = flag
+    local on, off = CFG.run.limits()
+    local was = R.rem_running
+    if flag then
+        R.rem_running = true
+    elseif (speed or 0) >= on then
+        R.rem_running = true
+        if not was then R.n.from_speed = R.n.from_speed + 1 end
+    elseif (speed or 0) < off then
+        R.rem_running = false
+    end
+    if R.rem_running and not was then R.n.switched_run = R.n.switched_run + 1 end
+    if was and not R.rem_running then R.n.switched_walk = R.n.switched_walk + 1 end
+    return R.rem_running
+end
+
+function CFG.run.report()
+    local R = CFG.run
+    pcall(CFG.run.remote, os.clock(), state.speed) -- (what the other player is doing right now, even when no body asked)
+    local on, off = CFG.run.limits()
+    local function r(x) return math.floor((tonumber(x) or 0) * 100 + 0.5) / 100 end
+    return { on = r(on), off = r(off), my_speed = r(R.mine_speed), i_am_running = R.mine_running, their_speed = r(state.speed), they_run_flag = R.rem_flag,
+        they_are_running = R.rem_running, counts = R.n }
+end
+
 CFG.clip = { enabled = false, rec = nil, lib = {}, src = {}, builtin_only = false, lines = {}, errors = 0, saved = 0, ticks = 0, scanned = false,
     label = 1, memo = "", secs = 8, hands = true, hotkey = 0x79, key_was_down = false, -- F10
     play = false, preview = 1, P = { joints = {}, cand = nil, label = nil, clip = nil, t = 0 },
@@ -6144,7 +6509,7 @@ function CFG.clip.ids(go)
 end
 
 -- (9.32) The FIRST animation layer of an object's Motion component as numbers: bank, id, frame (nil when it can't be read).
--- The cutscene probe uses it to tell gameplay (the player idles, walks, runs) from a cutscene.
+-- (It was made for the cutscene recorder, taken out in 10.22; nothing calls it now. It reads only.)
 function CFG.clip.motion0(go)
     if go == nil then return nil end
     local ok, bank, id, fr = pcall(function()
@@ -6164,7 +6529,7 @@ function CFG.clip.motion0(go)
 end
 
 -- Starts a recording (runs in the chosen game phase; see CFG.body.later).
--- 9.28: `opt` (the cutscene probe): { label = file label, secs = length, ignore_scene = true, note = text }. Returns true when it started.
+-- 9.28: `opt` { label = file label, secs = length, ignore_scene = true, note = text }: the keys the cutscene recorder used (taken out in 10.22; the recorder panel passes none). Returns true when it started.
 function CFG.clip.start(opt)
     local C, B = CFG.clip, CFG.body
     if type(opt) ~= "table" then opt = nil end -- (the body lab's queue calls this with nothing)
@@ -6310,20 +6675,22 @@ function CFG.clip.auto_label(flags, speed)
     if flags.guard then return "guard" end
     if flags.shoot then return "gun_shoot" end
     if flags.aim then return "gun_aim" end
+    -- (10.12) the run / walk bar is the middle of the two recorded speeds (CFG.run.limits), not 2.4 (which was below the recorded walk, 2.54)
+    local run_on = CFG.run.limits()
     if flags.gun then
         if flags.crouch then return "gun_crouch" end
         if speed < 0.3 then return "gun_idle" end
-        return speed < 2.4 and "gun_walk" or "gun_run"
+        return speed < run_on and "gun_walk" or "gun_run"
     end
     if flags.crouch then return speed > 0.3 and "crouch_walk" or "crouch" end
     if speed < 0.3 then return "idle" end
-    if speed < 2.4 then return "walk" end
+    if speed < run_on then return "walk" end
     return "run"
 end
 
 -- Stops, builds the clip, writes re7mp/clips/<label>.json.
--- (9.32) Cuts a recording off at `t` seconds: the frames, the id lines and the path after it are dropped (the cutscene probe trims the
--- idle / walking that came after the cutscene).
+-- (9.32) Cuts a recording off at `t` seconds: the frames, the id lines and the path after it are dropped (the cutscene recorder trimmed the
+-- idle / walking that came after the cutscene; it is gone since 10.22 and nothing calls this now).
 function CFG.clip.trim(rec, t)
     for _, blk in pairs(rec.blocks) do
         local keep = {}
@@ -6350,7 +6717,7 @@ function CFG.clip.finish()
     local rec = C.rec
     C.rec = nil
     if not rec then return end
-    -- (9.32) how it ended is remembered (the cutscene probe reads it): "time" = the length ran out
+    -- (9.32) how it ended is remembered: "time" = the length ran out (the cutscene recorder read it; it is gone since 10.22)
     C.ended = { label = rec.file_label, why = rec.stop_why or "time", at = os.clock() }
     if rec.discard then
         C.note("Record: " .. tostring(rec.discard_why or "nothing worth keeping") .. ": nothing saved", true)
@@ -6463,6 +6830,17 @@ end
 -- What the other player is doing: a label.
 function CFG.clip.choose()
     local P, sp = state.pose or {}, state.speed or 0
+    local C = CFG.clip
+    C.arms = nil
+    local act = CFG.mbank and CFG.mbank.action_label(os.clock()) -- (10.1) a reload or a melee swing: the flags cannot say them, Ethan's own clip pair can
+    if act then return act end
+    -- (10.7) crouched, a block or the inventory shows the crouch (there is no crouched block or inventory clip; the pose is what counts)
+    -- (10.8) ...with the ARMS of the saved block / inventory clip over it (C.arms; the legs and back stay the crouch's)
+    if (P.crouch or 0) > 0.5 and (P.heal or 0) <= 0.5 and (P.gun or 0) <= 0.5 and (P.aim or 0) <= 0.5 and (P.shoot or 0) <= 0.5
+        and ((P.menu or 0) > 0.5 or (P.guard or 0) > 0.5) then
+        C.arms = (P.guard or 0) > 0.5 and "guard" or "inventory"
+        return sp > 0.3 and "crouch_walk" or "crouch"
+    end
     if (P.menu or 0) > 0.5 then return "inventory" end
     if (P.heal or 0) > 0.5 then return "heal" end
     if (P.guard or 0) > 0.5 then return "guard" end
@@ -6471,12 +6849,11 @@ function CFG.clip.choose()
     if (P.gun or 0) > 0.5 then
         if (P.crouch or 0) > 0.5 then return "gun_crouch" end
         if sp < 0.3 then return "gun_idle" end
-        return sp < 2.4 and "gun_walk" or "gun_run"
+        return CFG.run.remote(os.clock(), sp) and "gun_run" or "gun_walk"
     end
     if (P.crouch or 0) > 0.5 then return sp > 0.3 and "crouch_walk" or "crouch" end
     if sp < 0.3 then return "idle" end
-    if sp < 2.4 then return "walk" end
-    return "run"
+    return CFG.run.remote(os.clock(), sp) and "run" or "walk" -- (10.12) their running bit, or their speed with a bar to stay running
 end
 
 -- The pose of a block at time t of a looping clip, as thousandths: the last XFADE seconds are blended into the first so it has no seam.
@@ -6498,14 +6875,66 @@ function CFG.clip.pose_at(blk, rate, dur, t)
     return p
 end
 
+-- (10.8) THE ARMS OF ANOTHER SAVED CLIP OVER THE ONE THAT PLAYS (a crouched block, a crouched inventory: the legs and back are the crouch clip's, the arms and
+-- hands the saved block / inventory clip's, both recorded from the owner's Ethan). `p` is the pose about to be written (flat thousandths, `blk.names` order); the
+-- arm joints of it are blended towards the same joints of the other clip by a weight that rises in 0.25 s and falls the same way when the state ends.
+CFG.clip.ARM_PARTS = { Shoulder = true, UpperArm = true, Forearm = true, Hand = true, Palm = true, Thumb = true, IndexF = true, MiddleF = true, RingF = true, PinkyF = true }
+function CFG.clip.arm_joint(nm)
+    local part = type(nm) == "string" and nm:match("^[LR]_(%a+)%d?$")
+    return part ~= nil and CFG.clip.ARM_PARTS[part] == true
+end
+
+function CFG.clip.arms_over(blk, p, dt)
+    local C, P = CFG.clip, CFG.clip.P
+    local want = C.arms
+    if want then P.arm_label = want end
+    local target = want and 1 or 0
+    P.arm_w = P.arm_w or 0
+    if P.arm_w < target then P.arm_w = math.min(target, P.arm_w + dt / C.BLEND) elseif P.arm_w > target then P.arm_w = math.max(target, P.arm_w - dt / C.BLEND) end
+    if P.arm_w <= 0 then
+        P.arm_label, P.arm_t = nil, 0
+        C.arms_active = nil
+        return
+    end
+    local ac = P.arm_label and C.get(P.arm_label) or nil
+    if not (ac and ac.body and ac.body.names and ac.body.frames and #ac.body.frames > 0) then C.arms_active = nil return end
+    P.arm_t = (P.arm_t or 0) + dt
+    local q = C.pose_at(ac.body, ac.rate, ac.dur, P.arm_t)
+    local idx = blk._idx
+    if not idx then
+        idx = {}
+        for i, nm in ipairs(blk.names) do idx[nm] = i end
+        blk._idx = idx
+    end
+    local n = 0
+    for j, nm in ipairs(ac.body.names) do
+        local i = idx[nm]
+        if i and C.arm_joint(nm) then
+            for k = 0, 2 do
+                local a, b = p[3 * i - 2 + k], q[3 * j - 2 + k]
+                if a ~= nil and b ~= nil then
+                    local d = b - a
+                    if d > 3141.6 then d = d - 6283.2 elseif d < -3141.6 then d = d + 6283.2 end
+                    p[3 * i - 2 + k] = a + d * P.arm_w
+                end
+            end
+            n = n + 1
+        end
+    end
+    C.arms_active = { label = P.arm_label, joints = n, weight = math.floor(P.arm_w * 100) / 100 }
+    C.arms_count = (C.arms_count or 0) + 1
+end
+
 -- Every tick of the chosen game phase while playing: pick the clip, move along it, ease from the old pose, write the joints.
 function CFG.clip.play_tick(now)
     local C, B = CFG.clip, CFG.body
     local P = C.P
     if not (B.go and B.xf) then P.clip, P.last, P.label, P.joints, P.xf, P.last_at = nil, nil, nil, {}, nil, nil return end
     if P.xf ~= B.xf then P.xf, P.joints, P.hipj, P.warned, P.hip_off = B.xf, {}, nil, nil, nil end
+    if CFG.gmot and CFG.gmot.drives() then P.clip, P.last, P.last_at = nil, nil, now return end -- (10.2) the game's own clip animates the body now
     local dt = P.last_at and math.max(0, math.min(now - P.last_at, 0.1)) or 0
     P.last_at = now
+    if C.preview > 1 then C.arms = nil end
     local want = C.preview > 1 and C.LABELS[C.preview] or C.choose()
     if want ~= P.cand then P.cand, P.cand_at = want, now end
     if P.label == nil or now - P.cand_at >= 0.2 or C.preview > 1 then P.label = P.cand end
@@ -6535,6 +6964,7 @@ function CFG.clip.play_tick(now)
         P.blend = math.min(1, P.blend + dt / C.BLEND)
         p = C.lerp(P.from, p, P.blend, blk.na, #p)
     end
+    pcall(C.arms_over, blk, p, dt) -- (10.8) the arms of the saved block / inventory clip over a crouch
     P.last = p
     local ok, err = pcall(function()
         for i, nm in ipairs(blk.names) do
@@ -6567,8 +6997,7 @@ function CFG.clip.tick(now)
     if C.play then C.play_tick(now) end
 end
 
--- Every render frame: the F10 key. (9.32) F10 STOPS a running recording whatever started it (the cutscene probe's recordings too, which
--- never needed the recorder switched on: before 9.32 the key did nothing there); it STARTS one only while the recorder is switched on.
+-- Every render frame: the F10 key. (9.32) F10 STOPS a running recording whatever started it; it STARTS one only while the recorder is switched on.
 function CFG.clip.update()
     local C, B = CFG.clip, CFG.body
     local okk, down = pcall(function() return reframework:is_key_down(C.hotkey) end)
@@ -6602,7 +7031,8 @@ function CFG.clip.report()
         end
     end
     return { enabled = C.enabled, recording = C.rec ~= nil, play = C.play, playing = C.P.label, saved = C.saved, errors = C.errors,
-        builtin_only = C.builtin_only, defaults = CFG.defaults.report(), ticks = C.ticks, library = lib, lines = C.lines }
+        builtin_only = C.builtin_only, defaults = CFG.defaults.report(), ticks = C.ticks, library = lib, lines = C.lines,
+        arms_over_the_crouch = { about = "10.8: a crouched block / inventory shows the crouch clip with the ARMS of the saved block / inventory clip (recorded from your Ethan) over it", now = C.arms_active, ticks = C.arms_count or 0 } }
 end
 
 give.id_getters = { "getItemDataId", "get_ItemDataId", "getItemId", "get_ItemId", "getName", "get_Name", "getItemName", "get_ItemName" }
@@ -6732,6 +7162,7 @@ local function on_item_focus(args)
     local id, src, why = item_id_of(item)
     local count, known = item_count_of(item)
     give.focus = { item = item, id = id, src = src, why = why, count = count, count_known = known, at = os.clock() }
+    if id and items.cat_cache[id] == nil then pcall(items.category_of, item, id) end -- (10.12: so a drop of it can be refused if it is a key item or a weapon)
     if not id and os.clock() - give.auto_dump_at > 120 then give.want_dump = "the pointed-at item's name could not be read" end
 end
 
@@ -6832,6 +7263,220 @@ local function inventory_items()
     return out, note
 end
 
+-- (10.5) ETHAN'S FRIEND (the "loopback bot" until 10.4): an AI helper you play the game with, alone. It is NOT a network player: no real peer is
+-- involved, re7mp.exe plays it over 127.0.0.1 in its "Ethan's friend" mode (the old exe calls it "Loopback Bot": both names are accepted), and
+-- nothing in this module runs while a real player is connected (CFG.friend.present() is false then).
+--   * Its look is chosen in re7mp.exe ("Appear as", the exe says "char" for it); your own character is not touched.
+--   * (10.8) IT HAS ITS OWN WEAPONS AND AMMO. Before 10.8 weapons and ammo were shared with you and it had none; now a weapon or ammo you give it (F7,
+--     within 3 m) leaves your inventory and is kept by it, like everything else, and it shoots with them (CFG.friend.fight below).
+--   * It has its OWN inventory: what you give it (F7, or the panel) leaves yours and is kept here, in re7mp/friend.json, so a restart does not lose it.
+--     It uses healing items on itself and on you; weapons and ammo go into its shots. Nothing comes back out yet (it does not hand items back: later).
+CFG.friend = {
+    NAME = "Ethan's friend", OLD_NAME = "Loopback Bot",
+    SHARED = {}, -- (10.8) was { [1] = true, [2] = true, [8] = true }: weapons and ammo were shared with you and refused as gifts. Now it carries and uses its own: nothing is shared
+    inv = {}, loaded = false, taken = 0, refused_shared = 0, refused_unread = 0, last = "nothing given to it yet", last_refused = nil, saves = 0, save_errors = 0,
+    MAX_KINDS = 60,
+    -- (10.9) its crouching body: how high it stands above its floor (m, -2 .. 0.6; its camera is pinned at the standing height, so 0 = feet on the floor) and how fast it gets down
+    crouch_lift = 0.0, CROUCH_BLEND = 16.0,
+}
+
+function CFG.friend.is_name(n) return n == CFG.friend.NAME or n == CFG.friend.OLD_NAME end
+
+-- Is the other player Ethan's friend right now (and not a real player)?
+function CFG.friend.present() return CFG.friend.is_name(state.remote_name) end
+
+-- (10.10) "the crouch is in the ground again; it works for a second or 2 when I start crouching but then the model goes into the ground".
+-- A fixed number of metres cannot be right: how deep a crouch clip puts the feet below the root depends on the clip, the model and the size (10.8 stood
+-- the body up 0.5 m + the slider and it floated; 10.9 stood it up by the slider alone, 0 m, and it sank; your 0.4 in the old slider no longer reached the
+-- friend). So the friend now MEASURES its own feet: while it is crouched, the lowest of its toe joints is read (world height, from the body I made) and the body
+-- is stood up until that toe is as high above the floor as it was when the friend was standing (the median of its last standing readings; 0.03 m before
+-- there is one). The slider is added on top as a fine tune. The numbers are in friend.json / debug.json (crouch.feet).
+CFG.friend.ground = {
+    on = true, MAX_UP = 1.2, MAX_DOWN = -0.3, SMOOTH = 14.0, RING_EVERY = 0.25, RING_N = 24, SOLE_TOES = 0.03, SOLE_FEET = 0.08, CR_MIN = 0.05,
+    SETS = { { key = "toes", names = { "R_Toe", "L_Toe" } }, { key = "feet", names = { "R_Foot", "L_Foot" } } },
+    xf = nil, set = nil, joints = nil, ring = {}, ring_at = -10, ref = nil, low = nil, need = 0, lift = 0, at = -10, reads = 0, failures = 0,
+    standing_samples = 0, crouch_logged = false, why = "no reading yet", last_err = nil, notes = 0,
+}
+
+do
+    local G = CFG.friend.ground
+
+    local function median(t)
+        local c = {}
+        for i, v in ipairs(t) do c[i] = v end
+        table.sort(c)
+        local n = #c
+        if n == 0 then return nil end
+        if n % 2 == 1 then return c[(n + 1) / 2] end
+        return (c[n / 2] + c[n / 2 + 1]) / 2
+    end
+    G.median = median
+
+    -- The lowest foot joint of the body, in metres above the body object's own position (world metres: the size is in it). Returns the number and the joint set used.
+    function G.read(xf)
+        if G.xf ~= xf then -- a new body: nothing of the old one is kept
+            G.xf, G.set, G.joints, G.ring, G.ref, G.ring_at = xf, nil, nil, {}, nil, -10
+        end
+        if G.joints == nil then
+            for _, S in ipairs(G.SETS) do
+                local js = {}
+                for _, nm in ipairs(S.names) do
+                    local ok, j = pcall(function() return xf:call("getJointByName", nm) end)
+                    if ok and j then js[#js + 1] = j end
+                end
+                if #js > 0 then G.joints, G.set = js, S.key break end
+            end
+            if G.joints == nil then return nil, "none" end
+        end
+        local root = xf:call("get_Position")
+        local low
+        for _, j in ipairs(G.joints) do
+            local y = j:call("get_Position").y - root.y
+            if type(y) == "number" and y == y and (low == nil or y < low) then low = y end
+        end
+        return low, G.set
+    end
+
+    function G.sole()
+        return G.set == "feet" and G.SOLE_FEET or G.SOLE_TOES
+    end
+
+    -- Every frame the friend's body is placed (from CFG.body.crouch_lift): cr is 0 standing .. 1 crouched. Returns the lift (m) that is wanted now.
+    function G.update(xf, cr, now)
+        if not G.on or not xf then G.need, G.lift, G.why = 0, 0, G.on and "no body" or "switched off" return 0 end
+        if now - G.at < 0.004 then return G.lift end -- already read this frame (the report asks too)
+        local dt = math.max(0.001, math.min(0.1, now - G.at))
+        G.at = now
+        local ok, low, set = pcall(G.read, xf)
+        if not ok then
+            G.failures = G.failures + 1
+            G.last_err = tostring(low):sub(1, 90)
+            G.xf, G.joints = nil, nil -- the joints may be gone with the old mesh: look them up again
+            G.need, G.why = 0, "the feet could not be read (" .. G.last_err .. ")"
+            G.lift = G.lift + (0 - G.lift) * (1 - math.exp(-G.SMOOTH * dt))
+            return G.lift
+        end
+        if low == nil then
+            G.need, G.why = 0, "the body has no foot joints (yet)"
+            G.lift = G.lift + (0 - G.lift) * (1 - math.exp(-G.SMOOTH * dt))
+            return G.lift
+        end
+        G.reads, G.low = G.reads + 1, low
+        local need = 0
+        if cr >= G.CR_MIN then
+            local ref = G.ref or G.sole()
+            need = math.max(G.MAX_DOWN, math.min(G.MAX_UP, ref - low))
+            G.why = string.format("crouched: lowest %s %.2f m above its place, %.2f m where it stood: lifting %.2f m", set, low, ref, need)
+            if not G.crouch_logged and cr > 0.6 then
+                G.crouch_logged = true
+                G.notes = G.notes + 1
+                pcall(CFG.body.note, string.format("Friend crouch: its lowest %s is %.2f m above the body's origin (%.2f m when it stood%s): the body is stood up %.2f m so its feet are on the floor",
+                    set, low, ref, G.ref and "" or ", the default: no standing reading yet", need), true)
+            end
+        else
+            G.crouch_logged = false
+            G.why = "standing: its feet are read for the place of the floor"
+            if now - G.ring_at >= G.RING_EVERY then -- a standing reading: what the lowest toe is when it is on the floor (walking too: the foot that is down)
+                G.ring_at = now
+                G.ring[#G.ring + 1] = low
+                if #G.ring > G.RING_N then table.remove(G.ring, 1) end
+                G.standing_samples = G.standing_samples + 1
+                G.ref = median(G.ring)
+            end
+        end
+        G.need = need
+        G.lift = G.lift + (need - G.lift) * (1 - math.exp(-G.SMOOTH * dt))
+        return G.lift
+    end
+
+    function G.report()
+        local function r(v) return v and math.floor(v * 100 + 0.5) / 100 or nil end
+        return { on = G.on, joints = G.set, lowest_above_origin_m = r(G.low), standing_value_m = r(G.ref), wanted_lift_m = r(G.need), lift_m = r(G.lift),
+            readings = G.reads, standing_readings = G.standing_samples, failures = G.failures, last_error = G.last_err, now = G.why }
+    end
+end
+
+function CFG.friend.load()
+    local F = CFG.friend
+    if F.loaded then return end
+    F.loaded = true
+    local ok, d = pcall(FILES.read, "friend")
+    if not ok or type(d) ~= "table" or type(d.inventory) ~= "table" then return end
+    for id, n in pairs(d.inventory) do
+        if type(id) == "string" and id:match("^[%w_]+$") and #id <= 48 and tonumber(n) and tonumber(n) >= 1 and tonumber(n) <= 9999 then F.inv[id] = math.floor(tonumber(n)) end
+    end
+end
+
+function CFG.friend.save()
+    local F = CFG.friend
+    local ok, err = pcall(json.dump_file, FILES.path("friend"), { build = CFG.BUILD,
+        about = "re7mp: what Ethan's friend carries (items you gave it: weapons and ammo it shoots with, healing items it uses). They left your inventory when you gave them.", inventory = F.inv })
+    if ok then F.saves = F.saves + 1 else F.save_errors, F.last_error = F.save_errors + 1, tostring(err):sub(1, 100) end
+end
+
+-- Is this item a weapon or ammo (shared with the friend)? true and the kind's name, or false (and the name, when it could be read).
+-- A kind that can't be read is NOT refused: the friend simply carries it.
+function CFG.friend.shared_kind(id)
+    local n = items.cat_cache[id]
+    if n == nil then
+        local list = inventory_items()
+        if list then
+            for _, e in ipairs(list) do
+                if e.id == id and e.item ~= nil then n = items.category_of(e.item, id) break end
+            end
+        end
+    end
+    if n ~= nil and CFG.friend.SHARED[n] then return true, items.category_name(n) end
+    return false, n ~= nil and items.category_name(n) or nil
+end
+
+-- A gift of `id`: should it be refused because it is shared? Returns true and the words for the screen.
+function CFG.friend.refuse_gift(id)
+    local F = CFG.friend
+    local ok, shared, kind = pcall(F.shared_kind, id)
+    if not ok then F.refused_unread = F.refused_unread + 1 return false end
+    if not shared then return false end
+    F.refused_shared, F.last_refused = F.refused_shared + 1, string.format("%s (%s)", id, tostring(kind))
+    return true, string.format("%s is %s: weapons and ammo are shared with %s, which uses yours, so there is nothing to give. You keep it", id, tostring(kind), F.NAME)
+end
+
+-- The friend confirmed a gift and it left your inventory: it is in the friend's inventory now.
+function CFG.friend.take(id, n)
+    local F = CFG.friend
+    F.load()
+    local kinds = 0
+    for _ in pairs(F.inv) do kinds = kinds + 1 end
+    if F.inv[id] == nil and kinds >= F.MAX_KINDS then F.last = string.format("%s x%d: the friend's list is full (%d kinds)", id, n, F.MAX_KINDS) return false end
+    F.inv[id] = (F.inv[id] or 0) + n
+    F.taken = F.taken + n
+    F.last = string.format("took %s x%d (now %d)", id, n, F.inv[id])
+    F.save()
+    return true
+end
+
+function CFG.friend.report()
+    local F = CFG.friend
+    F.load()
+    local list = {}
+    for id, n in pairs(F.inv) do list[#list + 1] = { id = id, count = n } end
+    table.sort(list, function(a, b) return a.id < b.id end)
+    local okh, helps = pcall(function() return F.ai and F.ai.report() or nil end)
+    if not okh then helps = { error = tostring(helps):sub(1, 120) } end
+    local okb, body = pcall(function() return F.body and F.body.report() or nil end)
+    if not okb then body = { error = tostring(body):sub(1, 120) } end
+    local okf, fights = pcall(function() return F.fight and F.fight.report() or nil end)
+    if not okf then fights = { error = tostring(fights):sub(1, 120) } end
+    local okv, after_over = pcall(function() return F.over and F.over.report() or nil end)
+    if not okv then after_over = { error = tostring(after_over):sub(1, 120) } end
+    return { name = F.NAME, is_here_now = F.present(), about = "the friend is not a network player; everything it carries is listed here (10.8: its own weapons and ammo too; nothing is shared with you)",
+        fights = fights, -- (10.8) its shooting, its ammo, its health and what it did about it
+        after_game_over = after_over, -- (10.9) it gets up at full health and is put next to you once the reload after a game over has finished
+        body = body, -- (10.7) what its body does for itself: block, facing, the height it stands at, the trail it reads it from
+        helps = helps, -- (10.6) revive and heal: the switches, the threshold, what it is doing, the healing items it carries, what it did
+        carries = list, items_taken = F.taken, gifts_refused_as_shared = F.refused_shared, last_refused = F.last_refused, gifts_with_unreadable_kind = F.refused_unread,
+        last = F.last, file_saves = F.saves, file_errors = F.save_errors, last_error = F.last_error }
+end
+
 local function raw_int(v)
     v = sdk.to_int64(v) % 4294967296
     if v >= 2147483648 then v = v - 4294967296 end
@@ -6895,6 +7540,7 @@ function give.on_discard_item(args)
     local id = item and item_id_of(item)
     local n = item and item_count_of(item) or 1
     give.discard_calls = (give.discard_calls or 0) + 1
+    if item and id and items.cat_cache[id] == nil then pcall(items.category_of, item, id) end -- (10.12: the category is read while the item is still in the inventory)
     give.discarding = { id = id, n = n, at = os.clock() }
 end
 
@@ -7209,7 +7855,37 @@ end
 
 -- Puts an item on the ground (at x, y, z, or just in front of the player's feet if they are nil).
 -- Returns true plus where it ended up, or nil plus the reason. Only an object that came back, and is drawn, counts as done.
+-- (10.12) "key item crashed the game when dropped in the main house". createDropItemInstance only makes a proper pickup for the consumables (ammo, healing, materials);
+-- for a key item or a weapon it makes a bare item object (the other mod found the same and refuses them), and the game fell over on it. So only what is KNOWN to be a
+-- consumable is put on the ground: by the category the game gave when such an item was last picked up here, else by its name. A key item, a weapon, a file, a map, or
+-- anything unknown is left to the game's own discard (nothing is made, nothing is sent).
+give.DROP_CATEGORIES = { [0] = true, [2] = true, [3] = true, [7] = true } -- other, ammo, heal, material
+-- Names that are never made for the ground whatever the category says (the other player's older build sends everything; a key item's category is learned only
+-- when the item has been seen here). A name that is on neither list is left to its category, and with no category it goes through.
+give.KEEP_WORDS = { "key", "fuse", "cutter", "crank", "valve", "handle", "bolt", "card", "dog", "head", "file", "map", "gem", "shard", "mail", "license", "lisence", "note", "memo",
+    "photo", "tape", "disc", "statue" } -- (a weapon is refused by its category once that is known: the names of guns are too many to list)
+function give.droppable(id)
+    local c = items and items.cat_cache and items.cat_cache[id]
+    if c ~= nil then
+        if give.DROP_CATEGORIES[c] then return true end
+        return false, "a " .. tostring(items.CATEGORY[c] or ("category " .. tostring(c)))
+    end
+    local low = tostring(id):lower()
+    if low:find("bullet", 1, true) or low:find("shell", 1, true) or low:find("powder", 1, true) or low:find("herb", 1, true) then return true end
+    for _, w in ipairs(give.KEEP_WORDS) do
+        if low:find(w, 1, true) then return false, "a key item by its name" end
+    end
+    return true
+end
+
 local function spawn_world_item(id, n, x, y, z)
+    local okd, whyd = give.droppable(id)
+    if not okd then
+        give.drops_refused = give.drops_refused + 1
+        give.last_refused_drop = string.format("%s x%d: %s", tostring(id), tonumber(n) or 0, tostring(whyd))
+        give.drop_note(string.format("%s x%d is not put on the ground: %s (the game's own discard stands)", tostring(id), tonumber(n) or 0, tostring(whyd)))
+        return nil, "not put on the ground: " .. tostring(whyd)
+    end
     if not give.ground then -- the ground route is off: nothing is created, so nothing can be put on the ground
         give.refused = give.refused + 1
         return nil, "the ground route is switched off"
@@ -7342,7 +8018,7 @@ function give.ground_report()
         c.at = nil
         drops[i] = c
     end
-    return { on = give.ground, made = give.ground_made, failed = give.ground_failed, picked_up_by_me = give.ground_picked,
+    return { on = give.ground, made = give.ground_made, failed = give.ground_failed, refused_not_consumable = give.drops_refused, last_refused = give.last_refused_drop, picked_up_by_me = give.ground_picked,
         not_found_after_2s = give.ground_gone, look_again_after_s = give.GROUND_LOOK_AFTER, drops = drops }
 end
 
@@ -7494,6 +8170,14 @@ local function give_item(id, n)
         return false
     end
     if not id or n < 1 then return false end
+    -- (10.5) Ethan's friend shares your weapons and ammo: nothing to hand over, you keep them
+    if CFG.friend.present() then
+        local refused, why = CFG.friend.refuse_gift(id)
+        if refused then
+            give_note(why)
+            return false
+        end
+    end
     -- (9.32) the 3 m rule
     do
         local dist = give.distance()
@@ -7683,6 +8367,7 @@ net_on(GIVE_ACK_MSG, function(payload)
                 elseif okr and resr ~= false then
                     give.sent = give.sent + 1
                     give_note(string.format("%s has %s x%d (%s): it left your inventory", who, id, n, how))
+                    if CFG.friend.present() then pcall(CFG.friend.take, id, n) end -- (10.5) Ethan's friend carries it now
                 else
                     give.failed = give.failed + 1
                     give_note(string.format("%s has %s x%d (%s) but the game would not take it out of your inventory: you both have it now", who, id, n, how))
@@ -7773,26 +8458,26 @@ local function draw_give_hint(now)
 end
 
 -- 9.36: "when the inventory is open, say that discarding an item drops it on the ground for the other player". Shown only while an inventory-like menu is
--- open (CFG.menu.in_inventory), another player (or the loopback bot) is there and the ground route is on, i.e. when a discard really is put on the ground for them.
+-- open (CFG.menu.in_inventory), another player (or Ethan's friend) is there and the ground route is on, i.e. when a discard really is put on the ground for them.
 -- It follows the same box as the [F7] hint ("Show the [F7] give hint while the inventory is open").
 function give.inventory_note(now)
     if not give.hint or not give.ground or not give.drop_on_discard then return end
     if not (CFG.menu and CFG.menu.in_inventory()) or not peer_present(now) then return end
     local sz = { x = 1920, y = 1080 }
     pcall(function() local d = imgui.get_display_size() if d and d.x and d.x > 100 then sz = d end end)
-    local x, y = math.floor(sz.x * 0.5 - 330), math.floor(sz.y - 96)
+    local x, y = math.floor(sz.x * 0.5 - 330), 24 -- (10.3: at the top of the screen, in the middle; it was at the bottom)
     local gold = 0xFF00D7FF
     pcall(draw.text, "Discarding an item here DROPS it on the ground for the other player too (they can pick it up).", x, y, gold)
     pcall(draw.text, "To hand an item over instead, click the item to select it, then press [F7].", x, y + 22, gold)
 end
 
 ----------------------------------------------------------------------------------------------
--- Enemy sync, version 1 (EXPERIMENTAL). The TCP host's game is the authority.
+-- Enemy sync. The TCP host's game is the authority.
 --
 -- The scene scan showed the enemies are root objects named Em#### (Em2000 ... Em6100), each with its own
 -- Think/Status/Order components. Every 0.1 s the HOST reads those objects' position, rotation, health (if a
 -- health field can be found) and animation ids, and sends them as one text blob through re7mp.exe
--- (TCP only, latest wins). The JOINER draws them as red ghosts. Optionally (EXPERIMENTAL) the joiner's own
+-- (TCP only, latest wins). The JOINER draws them as red ghosts and (mode 3, the default since 10.22) the joiner's own
 -- enemies with the same names are moved onto the host's positions each frame.
 -- Not built yet: damage dealt by the joiner reaching the host, enemy deaths, spawning, animation mirroring.
 -- The "Enemy details" button in the debug section writes what is needed to build those.
@@ -7801,10 +8486,10 @@ end
 local ENEMY_MODES = {
     "Off",
     "Show the host's enemies as red ghosts",
-    "Ghosts, and move my own enemies onto the host's (EXPERIMENTAL)",
+    "Ghosts, and move my own enemies onto the host's",
 }
 local enemy = {
-    mode = 2,
+    mode = 3,           -- (10.22: the third mode is the default: ghosts, and my own enemies are moved onto the host's. It was 2, ghosts only, until 0.10)
     drive_ai = false,   -- mode 3 only: also switch off my enemies' own AI components
     seq = 0, last_scan = 0, last_send = 0, last_read = 0,
     roots = {},         -- host: { name, go, xf }
@@ -7821,7 +8506,9 @@ local enemy = {
     local_roots = {}, local_scan = 0,
     hp_logged = {},
     -- what is carried from one scan's record of an enemy to the next (found by the health search; see find_enemy_roots)
-    KEEP = { "dmg_comp", "status", "no_is_dead", "hp_checked", "hp_tries", "hp_retry_at", "hp_field", "hp_comp", "hp_call", "hp_where", "hp_fail" },
+    FAST_EVERY = 1 / 15, FAST_MAX = 8, -- (10.12) the host's snapshot interval with few / many enemies
+    KEEP = { "dmg_comp", "status", "no_is_dead", "no_dc_dead", "hp_checked", "hp_tries", "hp_retry_at", "hp_field", "hp_comp", "hp_call", "hp_where", "hp_fail",
+        "max_val", "max_at" },
 }
 
 local function enemy_note(text)
@@ -7829,15 +8516,292 @@ local function enemy_note(text)
     say("enemy sync: " .. text)
 end
 
--- Root objects named Em#### in the current scene (they sit at the top of the scene, so only the roots are visited).
-local function find_enemy_roots()
+-- (10.12) THE JOINER'S TIMELINE ("the enemy sync could be better"). The 10.11 joiner chased the newest snapshot (a = 1 - exp(-12 dt)): at 10 snapshots a second
+-- an enemy moved in steps and slowed down before every one. Now every snapshot is a point on a timeline and the enemies are drawn a short, adaptive time BEHIND
+-- the host (the other mod's "playback delay": the gap between snapshots plus a little for the network), always between two real positions, so the motion is
+-- the host's own: constant speed, no steps, the right facing. The host puts its clock in the snapshot ("T<seconds>" as its first entry; an older joiner skips it,
+-- an older host simply sends none and the arrival time is used). The clock offset is the smallest "arrived - sent" seen (the best delivery), drifting up slowly.
+enemy.tl = { off = nil, last_ht = nil, iv = 0.1, delay = 0.24, MIN_DELAY = 0.15, MAX_DELAY = 0.5, EXTRAP = 0.2, MAX_SAMPLES = 10, SNAP = 8.0, DRIFT = 0.01,
+    snapshots = 0, with_clock = 0, without_clock = 0, resets = 0, jumps = 0, extrapolated = 0, held = 0, interpolated = 0, host_every = 0.1 }
+
+function enemy.tl.clock(ht, now)
+    local T = enemy.tl
+    T.snapshots = T.snapshots + 1
+    if not ht then
+        T.without_clock = T.without_clock + 1
+        if T.last_arrival then
+            local iv = now - T.last_arrival
+            if iv > 0.001 and iv < 1 then T.iv = T.iv + (iv - T.iv) * 0.1 end
+        end
+        T.last_arrival = now
+        T.delay = T.delay + (math.max(T.MIN_DELAY, math.min(T.MAX_DELAY, 2 * T.iv + 0.1)) - T.delay) * 0.1
+        return now
+    end
+    T.with_clock = T.with_clock + 1
+    local o = now - ht
+    if T.last_ht and (ht < T.last_ht - 0.5 or ht > T.last_ht + 30) then -- the host's clock jumped (a restarted game): start the timeline again
+        T.off, T.resets = nil, T.resets + 1
+        for _, e in pairs(enemy.remote) do e.buf = nil end
+    end
+    if T.off == nil or o < T.off then T.off = o else T.off = T.off + (o - T.off) * T.DRIFT end
+    if T.last_ht and ht > T.last_ht then
+        local iv = ht - T.last_ht
+        if iv < 1 then T.iv = T.iv + (iv - T.iv) * 0.2 end
+    end
+    T.last_ht = ht
+    T.delay = T.delay + (math.max(T.MIN_DELAY, math.min(T.MAX_DELAY, 2 * T.iv + 0.04)) - T.delay) * 0.1
+    return ht + T.off
+end
+
+-- A new point for this enemy at local time `st`.
+function enemy.tl.push(e, st, x, y, z, qx, qy, qz, qw)
+    local T = enemy.tl
+    local b = e.buf
+    if not b then b = {} e.buf = b end
+    local last = b[#b]
+    if last then
+        if st <= last.t then st = last.t + 0.001 end
+        if (x - last.x) ^ 2 + (z - last.z) ^ 2 > T.SNAP ^ 2 or math.abs(y - last.y) > T.SNAP then -- a spawn or a warp: nothing to slide through
+            for i = #b, 1, -1 do b[i] = nil end
+            T.jumps = T.jumps + 1
+        end
+    end
+    b[#b + 1] = { t = st, x = x, y = y, z = z, qx = qx, qy = qy, qz = qz, qw = qw }
+    while #b > T.MAX_SAMPLES do table.remove(b, 1) end
+end
+
+-- Where the enemy is at timeline time rt: x, y, z and the facing quaternion, or nil with no samples.
+function enemy.tl.sample(e, rt)
+    local T = enemy.tl
+    local b = e.buf
+    local n = b and #b or 0
+    if n == 0 then return nil end
+    local c = b[n]
+    if n == 1 or rt <= b[1].t then
+        T.held = T.held + 1
+        local f = b[1]
+        return f.x, f.y, f.z, f.qx, f.qy, f.qz, f.qw
+    end
+    if rt >= c.t then -- ahead of the newest point (late data): carry on at the last speed for a moment, then stand
+        local a = b[n - 1]
+        local span = c.t - a.t
+        local dt = math.min(rt - c.t, T.EXTRAP)
+        T.extrapolated = T.extrapolated + 1
+        if span > 1e-4 and dt > 0 then
+            local k = dt / span
+            return c.x + (c.x - a.x) * k, c.y + (c.y - a.y) * k, c.z + (c.z - a.z) * k, c.qx, c.qy, c.qz, c.qw
+        end
+        return c.x, c.y, c.z, c.qx, c.qy, c.qz, c.qw
+    end
+    for i = n - 1, 1, -1 do
+        local a = b[i]
+        if rt >= a.t then
+            local d = b[i + 1]
+            local span = d.t - a.t
+            local u = span > 1e-6 and (rt - a.t) / span or 1
+            T.interpolated = T.interpolated + 1
+            local sgn = (a.qx * d.qx + a.qy * d.qy + a.qz * d.qz + a.qw * d.qw) < 0 and -1 or 1
+            local qx, qy, qz, qw = a.qx + (sgn * d.qx - a.qx) * u, a.qy + (sgn * d.qy - a.qy) * u, a.qz + (sgn * d.qz - a.qz) * u, a.qw + (sgn * d.qw - a.qw) * u
+            local l = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+            if l > 1e-6 then qx, qy, qz, qw = qx / l, qy / l, qz / l, qw / l else qx, qy, qz, qw = d.qx, d.qy, d.qz, d.qw end
+            return a.x + (d.x - a.x) * u, a.y + (d.y - a.y) * u, a.z + (d.z - a.z) * u, qx, qy, qz, qw
+        end
+    end
+    local f = b[1]
+    return f.x, f.y, f.z, f.qx, f.qy, f.qz, f.qw
+end
+
+function enemy.tl.report()
+    local T = enemy.tl
+    local function r(x, k) k = k or 1000 return x and math.floor(x * k + 0.5) / k or nil end
+    return { about = "10.12: the joiner draws the host's enemies a short time behind, between two real snapshots (position and facing); the host's clock rides in the snapshot",
+        delay_s = r(T.delay), snapshot_gap_s = r(T.iv), host_sends_every_s = r(T.host_every), clock_offset_s = r(T.off), snapshots = T.snapshots, with_host_clock = T.with_clock,
+        without_host_clock = T.without_clock, timeline_restarts = T.resets, jumps_snapped = T.jumps, frames_interpolated = T.interpolated, frames_extrapolated = T.extrapolated,
+        frames_held = T.held }
+end
+
+----------------------------------------------------------------------------------------------
+-- (10.15) THE MOLDED ("lets make sure the molded enemies are synced too from the research"). Molded Together (the other mod) found why a walk over the
+-- top level of the scene never sees the Molded: every Molded body sits in a pool, a child of /MoldedGenerator/MoldedPool, so only the game's spawn points
+-- know which body is out: app.EnemySpawnInfo has the body (field EnemyInstance) and a GUID (field MyGUID) that is the same in both games. (The five Em4000
+-- of Chapter 3's "Moldeads" folder have no EnemySave, so "folder path / name" gave them all one id.) So here:
+--   * every second the spawn points are read (scene:findComponents(app.EnemySpawnInfo), the call their scan makes once a second). A point that has a
+--     body which is an Em#### object gives an enemy record named <Em4000>_<12 hex characters of the GUID>, e.g. Em4000_3fa91c2e9b4d. That name is the
+--     wire name: the joiner keys its enemies, models, boxes and hits by it, and CFG.molded can ask its own spawn point with the same 12 characters.
+--   * a body whose object is asleep (get_Update false) is not an enemy to fight: the game puts a Molded to sleep when no player is near its zone. It is
+--     not sent, so it is drawn nowhere. (A body the scene-root walk found too keeps its record: its flags say what it is.)
+--   * two scene-root objects with one name (any enemy) are told apart by a suffix from their address: one no longer overwrites the other on the joiner
+--     (a parked placeholder with a live enemy's name used to hide the live one).
+-- Reading only. At most MAX bodies from the spawn points per scan. A scan that cannot read the spawn points keeps the list it had.
+----------------------------------------------------------------------------------------------
+CFG.mold = {
+    on = true,
+    MAX = 14, POINTS_EVERY = 0.9, SAY_MAX = 30,
+    points = {}, points_at = -100, points_err = nil,
+    said = 0, seen = {},
+    n = { scans = 0, unreadable = 0, points = 0, with_body = 0, bodies = 0, asleep_skipped = 0, capped = 0, renamed_duplicates = 0 },
+    last = "no Molded looked for yet",
+}
+
+-- The model family an enemy's wire name stands for: "Em4000_3fa91c2e9b4d" and "Em4000" are both "Em4000".
+function enemy.base(name)
+    local s = tostring(name)
+    return s:match("^([Ee][Mm]%d%d%d%d)") or s
+end
+
+-- (10.21) Does THIS game have its own real body of the host's enemy `name`, standing on the host's right now? Two ways it can: mode 3 moved my own enemy of that name onto the
+-- host's (enemy.driven, put there within the last 1.5 s: a stale entry does not count), or a Molded body of this game is the copy of it (CFG.molded). Your 22 Nov screenshot of the
+-- Mia fight: the real Mia stood on the host's and the stand-in model (a T-pose, no animation) was drawn a second time beside her, because nothing asked this question.
+enemy.REAL_FRESH_S = 1.5
+function enemy.real_body(name, now)
+    now = now or os.clock()
+    local d = enemy.driven[name]
+    if d and type(d.moved_at) == "number" and now - d.moved_at <= enemy.REAL_FRESH_S then return true end
+    return CFG.molded ~= nil and CFG.molded.copies ~= nil and CFG.molded.copies[name] ~= nil
+end
+
+-- The elements of a managed array: get_elements, else get_Count / get_Item (about one array in 50 has no get_elements, and every one on the title screen).
+function CFG.mold.items(arr)
+    if arr == nil then return nil end
+    local ok, list = pcall(function() return arr:get_elements() end)
+    if ok and type(list) == "table" then return list end
+    local okn, n = pcall(function() return arr:call("get_Count") end)
+    if not okn or type(n) ~= "number" then return nil end
+    local out = {}
+    for i = 0, math.min(n, 400) - 1 do
+        local oki, it = pcall(function() return arr:call("get_Item", i) end)
+        if oki and it ~= nil then out[#out + 1] = it end
+    end
+    return out
+end
+
+-- 12 hex characters of a GUID (its first two fields): enough to tell the spawn points of one scene apart, short enough for the wire. nil for an empty GUID.
+function CFG.mold.id_of(g)
+    if g == nil then return nil end
+    local ok, a, b = pcall(function() return g:get_field("mData1"), g:get_field("mData2") end)
+    if not ok or type(a) ~= "number" or type(b) ~= "number" then return nil end
+    local ia, ib = math.tointeger(a), math.tointeger(b)
+    if ia == nil or ib == nil or (ia == 0 and ib == 0) then return nil end
+    return string.format("%08x%04x", ia & 0xFFFFFFFF, ib & 0xFFFF)
+end
+
+-- The spawn points of the scene: { { id, s, inst } } (inst = the body that is out, or nil). At most every POINTS_EVERY seconds; an unreadable answer keeps the old list.
+function CFG.mold.read_points(scene, now)
+    local M = CFG.mold
+    if now - M.points_at < M.POINTS_EVERY then return M.points end
+    M.points_at = now
+    M.n.scans = M.n.scans + 1
+    local okf, arr = pcall(function() return scene:call("findComponents(System.Type)", sdk.typeof("app.EnemySpawnInfo")) end)
+    local list = okf and M.items(arr) or nil
+    if list == nil then
+        M.n.unreadable = M.n.unreadable + 1
+        M.points_err = okf and "the list had no readable elements" or tostring(arr):sub(1, 80)
+        return M.points
+    end
+    M.points_err = nil
+    local out = {}
+    for _, s in ipairs(list) do
+        local okg, g = pcall(function() return s:get_field("MyGUID") end)
+        local id = okg and M.id_of(g) or nil
+        if id then
+            local oki, inst = pcall(function() return s:get_field("EnemyInstance") end)
+            out[#out + 1] = { id = id, s = s, inst = oki and inst or nil }
+        end
+    end
+    M.points, M.n.points = out, #out
+    return out
+end
+
+-- Adds the bodies the spawn points name to the records the root walk made (out), and renames a spawn body to <Em4000>_<id>.
+function CFG.mold.add(scene, out, old, now)
+    local M = CFG.mold
+    if not M.on then return end
+    if CFG.busy and CFG.busy.busy then return end -- a load: the game is moving objects about, nothing is touched
+    local by_addr = {}
+    for _, r in ipairs(out) do if r.addr then by_addr[r.addr] = r end end
+    local with_body, added = 0, 0
+    for _, p in ipairs(M.read_points(scene, now)) do
+        local inst = p.inst
+        if inst ~= nil then
+            with_body = with_body + 1
+            local okn, base = pcall(function() return inst:call("get_Name") end)
+            local oka, addr = pcall(inst.get_address, inst)
+            if okn and oka and type(base) == "string" and type(addr) == "number" and base:match("^[Ee][Mm]%d%d%d%d$") then
+                local rec = by_addr[addr]
+                local okup, up = pcall(function() return inst:call("get_Update") end)
+                if rec == nil and okup and up == false then
+                    M.n.asleep_skipped = M.n.asleep_skipped + 1
+                elseif rec == nil and added >= M.MAX then
+                    M.n.capped = M.n.capped + 1
+                else
+                    if rec == nil then
+                        local okx, xf = pcall(function() return inst:call("get_Transform") end)
+                        if okx and xf ~= nil then
+                            rec = { name = base, go = inst, xf = xf, addr = addr }
+                            local prev = old and old[addr]
+                            if prev and (prev.family or prev.name) == base then
+                                for _, k in ipairs(enemy.KEEP) do rec[k] = prev[k] end
+                            end
+                            out[#out + 1] = rec
+                            by_addr[addr] = rec
+                            added = added + 1
+                        end
+                    end
+                    if rec then
+                        rec.spawn, rec.family = p.id, base
+                        if base:match("^[Ee][Mm]4%d%d%d$") then rec.name = base .. "_" .. p.id end
+                        if not M.seen[rec.name] then
+                            M.seen[rec.name] = now
+                            M.last = string.format("%s is out (spawn point %s)", rec.name, p.id)
+                            if M.said < M.SAY_MAX then
+                                M.said = M.said + 1
+                                say("molded: " .. M.last)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    M.n.with_body, M.n.bodies = with_body, added
+end
+
+-- Scene roots that share a name get a suffix from their address (the same object has the same name at every scan).
+function CFG.mold.rename_duplicates(out)
+    local M = CFG.mold
+    local count = {}
+    for _, r in ipairs(out) do
+        if not r.spawn then count[r.name] = (count[r.name] or 0) + 1 end
+    end
+    for _, r in ipairs(out) do
+        if not r.spawn and (count[r.name] or 0) > 1 and type(r.addr) == "number" then
+            r.family = r.family or r.name
+            r.name = r.name .. "_" .. string.format("%x", r.addr % 0x1000000)
+            M.n.renamed_duplicates = M.n.renamed_duplicates + 1
+        end
+    end
+end
+
+function CFG.mold.report()
+    local M = CFG.mold
+    local names = {}
+    for name in pairs(M.seen) do names[#names + 1] = name end
+    table.sort(names)
+    while #names > 40 do table.remove(names) end
+    return { about = "10.15: the Molded sit in a pool, so the scene-root walk never saw them. The spawn points (app.EnemySpawnInfo: EnemyInstance, MyGUID) name the bodies that are out; each gets the wire name <Em4000>_<12 hex characters of the GUID>. Asleep bodies are not sent.",
+        on = M.on, counts = M.n, points_error = M.points_err, last = M.last, names_seen = names }
+end
+
+-- Root objects named Em#### in the current scene (they sit at the top of the scene, so only the roots are visited), and (10.15) the Molded bodies
+-- the spawn points name (CFG.mold.add), with every enemy that shares a name with another given a name of its own.
+local function find_enemy_roots(prev_list)
     local out = {}
     local scene = scene_object()
     if not scene then return out end
     -- the records are rebuilt on every scan, so what was learned about an enemy's health is carried over by the
     -- object's address; before this, the whole health search ran again for every enemy every second
     local old = {}
-    for _, o in ipairs(enemy.roots or {}) do
+    for _, o in ipairs(prev_list or enemy.roots or {}) do
         if o.addr then old[o.addr] = o end
     end
     local xf = scene:call("get_FirstTransform")
@@ -7853,7 +8817,7 @@ local function find_enemy_roots()
                 if oka and type(addr) == "number" then
                     rec.addr = addr
                     local prev = old[addr]
-                    if prev and prev.name == name then
+                    if prev and (prev.family or prev.name) == name then
                         for _, k in ipairs(enemy.KEEP) do rec[k] = prev[k] end
                     end
                 end
@@ -7862,6 +8826,8 @@ local function find_enemy_roots()
         end
         xf = xf:call("get_Next")
     end
+    pcall(CFG.mold.add, scene, out, old, os.clock())
+    pcall(CFG.mold.rename_duplicates, out)
     return out
 end
 
@@ -7954,11 +8920,12 @@ find_health = function(e)
         end
     end)
     local found = e.hp_field ~= nil or e.hp_call ~= nil
-    local logged = enemy.hp_logged[e.name]
+    local nm = e.family or e.name -- (10.15: the model's name, not the wire name: one line for every Molded, not one for each)
+    local logged = enemy.hp_logged[nm]
     if logged == nil or (logged == "none" and found) then
-        enemy.hp_logged[e.name] = found and "found" or "none"
-        say(found and ("enemy sync: health of " .. e.name .. " is read from " .. (e.hp_where and (e.hp_where .. ".") or "") .. (e.hp_field or (e.hp_call .. "()")))
-            or ("enemy sync: no health field found for " .. e.name .. " (use 'Enemy details' to list its fields)"))
+        enemy.hp_logged[nm] = found and "found" or "none"
+        say(found and ("enemy sync: health of " .. nm .. " is read from " .. (e.hp_where and (e.hp_where .. ".") or "") .. (e.hp_field or (e.hp_call .. "()")))
+            or ("enemy sync: no health field found for " .. nm .. " (use 'Enemy details' to list its fields)"))
     end
 end
 enemy.best_health_field = best_health_field -- the player health module (below) looks for health the same way
@@ -7987,6 +8954,7 @@ local function read_health(e)
     if e.hp_fail >= 3 then
         e.hp_comp, e.hp_field, e.hp_call, e.hp_where, e.status, e.dmg_comp = nil, nil, nil, nil, nil, nil
         e.hp_checked, e.hp_tries, e.hp_fail = false, 0, 0
+        e.no_is_dead, e.no_dc_dead = nil, nil -- (10.15: the components are looked for again, so the death questions are asked again too)
     end
     return -1
 end
@@ -8004,6 +8972,10 @@ local function inactive_flags(e, motion, p)
         local ok, started = pcall(function() return e.status:get_field("<isStarted>k__BackingField") end)
         if ok and started == false then parked = true end
     end
+    if e.spawn and not parked then -- (10.15) a Molded the game has put to sleep (no player near its zone): its object does not update, it is not there to fight
+        local oku, up = pcall(function() return e.go:call("get_Update") end)
+        if oku and up == false then parked = true end
+    end
     if parked then f = f + 2 end
     if math.abs(p.x) < 0.01 and math.abs(p.y) < 0.01 and math.abs(p.z) < 0.01 then f = f + 8 end
     return f
@@ -8019,13 +8991,20 @@ end
 
 -- true when the game says the enemy is dead (Em2000Status / Em3000Status have get_IsDead)
 local function enemy_is_dead(e)
-    if not e.status or e.no_is_dead then return false end
-    local ok, dead = pcall(function() return e.status:call("get_IsDead") end)
-    if not ok then
+    if e.status and not e.no_is_dead then
+        local ok, dead = pcall(function() return e.status:call("get_IsDead") end)
+        if ok then return dead == true end
         e.no_is_dead = true -- this Status type has no such method (only Em2000Status / Em3000Status were seen): stop asking
-        return false
     end
-    return dead == true
+    -- (10.15) every enemy has a DamageController, and the other mod reads "get_isDead" from it for all of them (the Molded included, whose Status has
+    -- no get_IsDead: until now a dead Molded was sent as alive for good). Not answered (an error): asked no more for this record.
+    local dc = e.dmg_comp
+    if dc and not e.no_dc_dead then
+        local ok, dead = pcall(function() return dc:call("get_isDead") end)
+        if ok and type(dead) == "boolean" then return dead end
+        e.no_dc_dead = true
+    end
+    return false
 end
 
 -- bank, motion id and frame of the first animation layer (diagnostic: sent along, not applied yet)
@@ -8050,38 +9029,59 @@ local function snapshot_one(e)
     if hp ~= hp or hp > 1e9 or hp < -1e9 then hp = -1 end
     local bank, motion, frame = read_motion(e)
     if frame ~= frame or frame > 1e7 or frame < -1e7 then frame = 0 end
-    if CFG.eanim then pcall(CFG.eanim.seen, e.name, e.go, bank, motion, frame, "host") end -- (9.41: the table of banks and clips)
+    if CFG.eanim then pcall(CFG.eanim.seen, e.family or e.name, e.go, bank, motion, frame, "host") end -- (9.41: the table of banks and clips; 10.15: per model, not per Molded)
     local flags = inactive_flags(e, motion, p) + (enemy_is_dead(e) and 0 or 1) -- bit 0: alive
     e.last_flags = flags
-    return string.format("%s,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.1f", e.name, p.x, p.y, p.z,
-        q.x, q.y, q.z, q.w, math.floor(hp), flags, bank, motion, frame)
+    -- (10.15) the enemy's maximum health goes along as a 14th field (an older joiner reads 13 and ignores it): the joiner shows "health / maximum" and keeps its own copy's
+    -- SHARE of the pool equal when the two games run different difficulties. Not sent when the game gave none.
+    local okm, mx = pcall(CFG.pool.max_of, e, os.clock())
+    if not okm then mx = nil end
+    e.last_hp, e.last_max, e.last_x, e.last_y, e.last_z = hp, mx, p.x, p.y, p.z -- (the host's own boss bar reads these)
+    return string.format("%s,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.1f%s", e.name, p.x, p.y, p.z,
+        q.x, q.y, q.z, q.w, math.floor(hp), flags, bank, motion, frame, mx and string.format(",%d", math.floor(mx + 0.5)) or "")
 end
 
 -- HOST: scan once a second, send ten times a second.
 local function enemy_host_update(now)
     if enemy.mode < 2 or state.role ~= "host" or state.transport ~= "tcp" then return end
     if not peer_present(now) then return end
+    if CFG.limb then pcall(CFG.limb.update, now) end -- (10.21) the host's Molded: a head or limb lost here is told to the joiner, and the joiner's are removed here (every 0.5 s)
     if now - enemy.last_scan >= 1.0 then
         enemy.last_scan = now
+        CFG.perf.mark("enemy host: before the scan") -- (10.20: the scene scan on its own, so a file says whether it or the snapshots are the cost)
         local ok, roots = pcall(find_enemy_roots)
         if ok then enemy.roots = roots else enemy_note("scan failed: " .. tostring(roots)) end
+        CFG.perf.mark("enemy host: scene scan (once a second)")
     end
-    if now - enemy.last_send < 0.1 then return end
+    -- (10.12) 15 snapshots a second while there are few enemies to read (the reading is the cost), 10 with many
+    local every = (#enemy.roots <= enemy.FAST_MAX) and enemy.FAST_EVERY or 0.1
+    enemy.tl.host_every = every
+    if now - enemy.last_send < every - 0.004 then return end -- (a little early is fine: at 60 frames a second four frames are 66.7 ms, and a float of that is just short of 1/15)
     enemy.last_send = now
     local parts = {}
     for i = #enemy.roots, 1, -1 do
-        local ok, text = pcall(snapshot_one, enemy.roots[i])
-        if ok then
-            parts[#parts + 1] = text
+        if (CFG.own and CFG.own.peer[enemy.roots[i].name]) or (CFG.carsync and CFG.carsync.jack_held(enemy.roots[i].name)) then
+            -- (10.18) an enemy the joiner runs (the hand-over): the joiner's own game sends its state, not mine
         else
-            table.remove(enemy.roots, i) -- gone or unreadable: the next scan will find it again if it is real
+            local ok, text = pcall(snapshot_one, enemy.roots[i])
+            if ok then
+                parts[#parts + 1] = text
+            else
+                table.remove(enemy.roots, i) -- gone or unreadable: the next scan will find it again if it is real
+            end
         end
     end
-    local payload = #parts > 0 and table.concat(parts, ";") or "-"
-    if #payload > 2900 then
+    if CFG.carsync then -- (10.19) the garage car's line goes FIRST, so the size cut below never takes it
+        local okx, ex = pcall(CFG.carsync.extra_parts, now)
+        if okx and ex then for i = #ex, 1, -1 do table.insert(parts, 1, ex[i]) end end
+    end
+    local payload = #parts > 0 and table.concat(parts, ";") or ""
+    if #payload > 2880 then
         local cut = payload:find(";[^;]*$")
         if cut then payload = payload:sub(1, cut - 1) end
     end
+    -- (10.12) the host's clock first ("T12.345"): an older joiner finds no enemy in an entry with no commas and skips it
+    payload = string.format("T%.3f", now) .. (payload ~= "" and (";" .. payload) or "")
     enemy.seq = enemy.seq + 1
     enemy.sent = enemy.sent + 1
     json.dump_file(FILES.STATE_OUT_FILE, { seq = enemy.seq, p = payload })
@@ -8101,14 +9101,17 @@ local function enemy_read(now)
     enemy.received = tonumber(d.n) or (enemy.received + 1)
     enemy.remote_at = now
     local seen, count = {}, 0
+    local ht = tonumber(d.p:match("^T(%-?[%d%.]+)")) -- (10.12) the host's clock, when it sends one
+    local st = enemy.tl.clock(ht, now)
+    if CFG.carsync then pcall(CFG.carsync.on_payload, d.p, st, now) end -- (10.19) the garage car line, when the host runs the car
     if d.p ~= "-" then
         for entry in d.p:gmatch("[^;]+") do
             local f = {}
             for field in entry:gmatch("[^,]+") do f[#f + 1] = field end
             local name = f[1]
             local v = {}
-            for i = 2, 13 do v[i] = tonumber(f[i]) end
-            if name and #f >= 13 and name:match("^[%w_]+$") and finite(v[2]) and finite(v[3]) and finite(v[4]) then
+            for i = 2, 14 do v[i] = tonumber(f[i]) end -- (10.15: field 14 is the maximum health; an older host sends 13 fields)
+            if name and #f >= 13 and name:match("^[%w_]+$") and finite(v[2]) and finite(v[3]) and finite(v[4]) and not (CFG.own and CFG.own.mine[name]) and not (CFG.carsync and CFG.carsync.jack_held(name)) then -- (10.18: not an enemy I run myself; 10.19: nor Jack while I run the car)
                 count = count + 1
                 if count > 40 then break end
                 local e = enemy.remote[name]
@@ -8118,8 +9121,10 @@ local function enemy_read(now)
                 end
                 e.x, e.y, e.z = v[2], v[3], v[4]
                 e.qx, e.qy, e.qz, e.qw = v[5] or 0, v[6] or 0, v[7] or 0, v[8] or 1
+                pcall(enemy.tl.push, e, st, e.x, e.y, e.z, e.qx, e.qy, e.qz, e.qw) -- (10.12) a point on this enemy's timeline
                 local fl = math.floor(v[10] or 1)
                 e.hp, e.alive = v[9] or -1, fl % 2 == 1
+                e.max = (finite(v[14]) and v[14] > 0) and v[14] or nil -- (10.15) the host's maximum health for this enemy, when it sent one
                 -- a snapshot sent just before the host applied our hit still carries the old health: for a moment the host's answer wins
                 if e.ack_hp and now < (e.ack_until or 0) and e.hp > e.ack_hp then e.hp = e.ack_hp end
                 e.inactive = fl >= 2 and flags_reason(fl) or nil -- parked / placeholder objects (see inactive_flags)
@@ -8156,23 +9161,27 @@ local DRIVE_OFF = {
     "^app%.Command%.CommandRequester$",
 }
 
-start_driving = function(name, root)
-    local d = { go = root.go, xf = root.xf, disabled = {} }
-    if enemy.drive_ai then
-        pcall(function()
-            local comps = root.go:call("get_Components")
-            for _, c in ipairs(comps:get_elements()) do
-                local full = c:get_type_definition():get_full_name()
-                for _, pat in ipairs(DRIVE_OFF) do
-                    if full:find(pat) then
-                        local ok = pcall(function() c:call("set_Enabled", false) end)
-                        if ok then d.disabled[#d.disabled + 1] = c end
-                        break
-                    end
+-- (10.18) the components that run an enemy's own AI, switched off; returns the ones that were (the hand-over uses it for the host's body of an enemy the joiner runs)
+enemy.drive_off = function(root)
+    local disabled = {}
+    pcall(function()
+        local comps = root.go:call("get_Components")
+        for _, c in ipairs(comps:get_elements()) do
+            local full = c:get_type_definition():get_full_name()
+            for _, pat in ipairs(DRIVE_OFF) do
+                if full:find(pat) then
+                    local ok = pcall(function() c:call("set_Enabled", false) end)
+                    if ok then disabled[#disabled + 1] = c end
+                    break
                 end
             end
-        end)
-    end
+        end
+    end)
+    return disabled
+end
+
+start_driving = function(name, root)
+    local d = { go = root.go, xf = root.xf, disabled = enemy.drive_ai and enemy.drive_off(root) or {} }
     enemy.driven[name] = d
     say(string.format("enemy sync: now moving my %s onto the host's (%d components switched off)", name, #d.disabled))
 end
@@ -8231,23 +9240,35 @@ end
 local function enemy_update(now, dt)
     if enemy.mode < 2 or not receiving_enemies() then
         if next(enemy.driven) then enemy_release_all() end
+        if CFG.molded and next(CFG.molded.copies) then pcall(CFG.molded.release_all, "the enemy data is off") end -- (10.15)
         return
     end
     if now - enemy.last_read >= 0.05 then enemy_read(now) end
+    -- (10.12) the timeline: every enemy is where the host's was `delay` seconds ago (between two real snapshots); with no timeline (nothing sampled) the old chase
+    local rt = now - enemy.tl.delay
     local a = 1 - math.exp(-12 * dt)
     for _, e in pairs(enemy.remote) do
         if e.x then
-            local dx, dz = e.x - e.rx, e.z - e.rz
-            if dx * dx + dz * dz > 64 then
-                e.rx, e.ry, e.rz = e.x, e.y, e.z
+            local ok, x, y, z, qx, qy, qz, qw = pcall(enemy.tl.sample, e, rt)
+            if ok and x then
+                e.rx, e.ry, e.rz = x, y, z
+                e.rqx, e.rqy, e.rqz, e.rqw = qx, qy, qz, qw
             else
-                e.rx = e.rx + (e.x - e.rx) * a
-                e.ry = e.ry + (e.y - e.ry) * a
-                e.rz = e.rz + (e.z - e.rz) * a
+                local dx, dz = e.x - e.rx, e.z - e.rz
+                if dx * dx + dz * dz > 64 then
+                    e.rx, e.ry, e.rz = e.x, e.y, e.z
+                else
+                    e.rx = e.rx + (e.x - e.rx) * a
+                    e.ry = e.ry + (e.y - e.ry) * a
+                    e.rz = e.rz + (e.z - e.rz) * a
+                end
             end
         end
     end
     pcall(enemy_walls_update, now)
+    if CFG.molded then pcall(CFG.molded.update, now, dt) end -- (10.15) copies of the host's Molded in this game (off unless ticked)
+    if CFG.kill then pcall(CFG.kill.update, now) end -- (10.21) my copy died while the host's lives: ask the host to kill it (CFG.kill; also in mode 2, where Molded copies work)
+    if CFG.limb then pcall(CFG.limb.update, now) end -- (10.21) a head or limb lost on a copy here is told to the host, and the host's are removed here (CFG.limb)
     if enemy.mode < 3 or now - enemy.remote_at > 3 then
         if next(enemy.driven) then enemy_release_all() end
         return
@@ -8259,26 +9280,34 @@ local function enemy_update(now, dt)
     end
     for _, root in ipairs(enemy.local_roots) do
         local e = enemy.remote[root.name]
-        if e and e.alive and not e.inactive then
+        -- (10.15) a Molded out of its pool (root.spawn) is not moved here: a position set on a pooled body is undone, and switching its components off broke
+        -- the Molded for the other mod. CFG.molded (its own switch) takes those out of the pool first.
+        if e and e.alive and not e.inactive and not root.spawn then
             if not enemy.driven[root.name] then start_driving(root.name, root) end
             local d = enemy.driven[root.name]
             local ok, err = pcall(function()
                 d.xf:call("set_Position", Vector3f.new(e.rx, e.ry, e.rz))
-                local f = rotate({ x = e.qx, y = e.qy, z = e.qz, w = e.qw }, { 0, 0, 1 })
+                local f = rotate({ x = e.rqx or e.qx, y = e.rqy or e.qy, z = e.rqz or e.qz, w = e.rqw or e.qw }, { 0, 0, 1 })
                 d.xf:call("set_EulerAngle", Vector3f.new(0, math.atan(f[1], f[3]), 0))
             end)
             if not ok then
                 enemy.driven[root.name] = nil
                 enemy_note("could not move " .. root.name .. ": " .. tostring(err))
+            else
+                d.moved_at, d.hx, d.hy, d.hz = now, e.rx, e.ry, e.rz -- (10.15) when and where it was last put on the host's enemy
+                pcall(CFG.pool.follow, root, e, now) -- (10.15) and its health becomes the host's
             end
+        elseif e and not e.alive and not e.inactive and not root.spawn and enemy.driven[root.name] then
+            pcall(CFG.pool.finish, root, e, now) -- (10.15) the host's enemy is dead: so is my copy of it
         end
     end
 end
 
 local function unit_quat(e)
-    local l = math.sqrt(e.qx * e.qx + e.qy * e.qy + e.qz * e.qz + e.qw * e.qw)
+    local qx, qy, qz, qw = e.rqx or e.qx, e.rqy or e.qy, e.rqz or e.qz, e.rqw or e.qw -- (10.12) the facing of the timeline, else the newest snapshot's
+    local l = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
     if l < 1e-6 then return { x = 0, y = 0, z = 0, w = 1 } end
-    return { x = e.qx / l, y = e.qy / l, z = e.qz / l, w = e.qw / l }
+    return { x = qx / l, y = qy / l, z = qz / l, w = qw / l }
 end
 
 local function draw_enemies(now)
@@ -8293,7 +9322,8 @@ local function draw_enemies(now)
             local ax, ay, az = rotate(q, { 1, 0, 0 }), rotate(q, { 0, 1, 0 }), rotate(q, { 0, 0, 1 })
             local foot = { e.rx, e.ry, e.rz }
             local center = vadd(foot, vscale(ay, 0.95))
-            local modelled = CFG.pup and CFG.pup.covers(name) -- (9.31) its model is there: the box is only the fallback
+            local modelled = (CFG.pup and CFG.pup.covers(name)) or (CFG.molded and CFG.molded.copies[name] ~= nil) -- (9.31) its model is there: the box is only the fallback; (10.15) or this game's own body of it
+                or enemy.real_body(name, now) -- (10.21) mode 3 has put my own enemy of that name on it: that body is the picture, no box over it
             if modelled then
                 -- no box, no nose: the model shows where it is and which way it faces
             elseif e.inactive then -- only drawn when "show parked" is on: grey, with the reason in the label
@@ -8308,7 +9338,9 @@ local function draw_enemies(now)
             local tag = project({ e.rx, e.ry + 2.05, e.rz })
             if tag then
                 local who = CFG.ids and CFG.ids.label(name)
-                local label = e.hp and e.hp >= 0 and string.format("%s  HP %d", name, e.hp) or name
+                local shown = enemy.base(name) -- (10.15: "Em4000", not the whole wire name of one Molded of several)
+                local label = e.hp and e.hp >= 0 and string.format("%s  HP %d", shown, e.hp) or shown
+                if e.hp and e.hp >= 0 and e.max then label = string.format("%s  HP %d/%d", shown, e.hp, e.max) end -- (10.15)
                 if e.inactive then label = label .. "  (" .. e.inactive .. ")" end
                 if who then label = label .. "  - " .. who end -- (9.31: what the id is)
                 draw.text(label, tag.x - #label * 3.5, tag.y - 14, e.inactive and 0xFFB0B0B0 or 0xFF4040FF)
@@ -8316,6 +9348,765 @@ local function draw_enemies(now)
         end
     end
 end
+
+----------------------------------------------------------------------------------------------
+-- (10.16) THE QUIET CHECK (CFG.guard). Your 20 Nov report: "crash after mia fight, crash when fighting jack". The journal of the Mia crash (10.15) shows the pool code writing the boss's
+-- health (setHealth) 1.4 s after the cutscene c01e04_00 started and again at 3.7 s, a health number that did not even match (host maximum 2000, mine 700: "700 -> 245"), and
+-- three damage calls of 3000 at a boss the game's own script was about to take away ("mine would not die after 3 hits", then "Enemy model gone: Em2000"). The other mod's notes (its
+-- v0.36: "scripted damage 1300 + requestDamageAction on Em2000 during c01e04_00, 'VMContext was already corrupted', c0000005 18 s later") record the same kind of crash and the same
+-- fix: nothing is written to a boss while a scripted moment plays. This is the check the pool, the weapon model and the boss hits use. It only reads. A "scripted moment" is:
+--   * the loading gate (CFG.busy) is shut;
+--   * the story hook saw a requestEvent less than EVENT_S seconds ago (any event, the game's own too; only while the hook is installed);
+--   * a cutscene is running: GameManager._GameEventMan.RunningEventControllers has entries AND MenuManager.isPlayingEvent is not false (the other mod's notes: a long background event
+--     such as c01e01_01 stays "running" during the Mia fight and only counts when isPlayingEvent says so), read every READ_EVERY s;
+--   * a cutscene ended less than ENDED_S seconds ago.
+-- UNVERIFIED in this script's own game session: whether those two fields read here as they did there. `health.guard` says what was readable, so the next file tells.
+----------------------------------------------------------------------------------------------
+CFG.guard = {
+    EVENT_S = 4, ENDED_S = 4, READ_EVERY = 0.25,
+    read_at = -100, running = nil, playing = nil, was_running = false, ended_at = nil, source = "not read yet", last_why = nil, last_at = nil,
+    n = { checks = 0, quiet = 0, loading = 0, event_started = 0, cutscene = 0, just_ended = 0, reads = 0, read_ok = 0, read_failed = 0, cutscene_starts = 0 },
+}
+
+do
+local G = CFG.guard
+
+-- Is a cutscene running? true / false, or nil when the game would not say. Read at most every READ_EVERY seconds.
+function G.cutscene(now)
+    if now - G.read_at < G.READ_EVERY then return G.running end
+    G.read_at = now
+    G.n.reads = G.n.reads + 1
+    local ok, count, why = pcall(function()
+        local gm = sdk.get_managed_singleton("app.GameManager")
+        if gm == nil then return nil, "no GameManager" end
+        local em
+        local okf, v = pcall(function() return gm:get_field("_GameEventMan") end)
+        if okf and v ~= nil then em = v end
+        if em == nil then
+            local td = sdk.find_type_definition("app.GameManager")
+            local fd = td and td:get_field("_GameEventMan")
+            local okd, d = pcall(function() return fd and fd:get_data(nil) end)
+            if okd and d ~= nil then em = d end
+        end
+        if em == nil then return nil, "no _GameEventMan" end
+        local list = em:get_field("RunningEventControllers")
+        if list == nil then return nil, "no RunningEventControllers" end
+        local okc, c = pcall(function() return list:call("get_Count") end)
+        if okc and type(c) == "number" then return c end
+        local oks, s = pcall(function() return list:get_field("_size") end)
+        if oks and type(s) == "number" then return s end
+        return nil, "the list has no count"
+    end)
+    local running
+    if ok and type(count) == "number" then
+        running = count > 0
+        if running then -- (a background event is not a cutscene: the game says so with isPlayingEvent)
+            local okp, pv = pcall(function()
+                local mm = sdk.get_managed_singleton("app.MenuManager")
+                if mm == nil then return nil end
+                local r = mm:call("isPlayingEvent")
+                if r == nil then r = mm:call("get_isPlayingEvent") end
+                return r
+            end)
+            G.playing = okp and pv or nil
+            if okp and pv == false then running = false end
+        end
+        G.n.read_ok = G.n.read_ok + 1
+        G.source = "RunningEventControllers.Count = " .. count .. (G.playing ~= nil and (", isPlayingEvent " .. tostring(G.playing)) or "")
+    else
+        G.n.read_failed = G.n.read_failed + 1
+        G.source = "unreadable: " .. tostring(ok and why or count):sub(1, 60)
+        running = nil
+    end
+    if running == true and not G.was_running then G.n.cutscene_starts = G.n.cutscene_starts + 1 end
+    if G.was_running and running ~= true then G.ended_at = now end
+    G.was_running = running == true
+    G.running = running
+    return running
+end
+
+-- Why this is NOT a quiet moment ("loading", "an event just started", "a cutscene is playing", "a cutscene just ended"), or nil when it is.
+function G.why(now)
+    now = now or os.clock()
+    G.n.checks = G.n.checks + 1
+    local w
+    if CFG.busy and CFG.busy.busy then
+        w = "loading"
+        G.n.loading = G.n.loading + 1
+    else
+        local S = CFG.story
+        if S and S.hooked and type(S.last_event_at) == "number" and now - S.last_event_at < G.EVENT_S and now >= S.last_event_at then
+            w = "an event just started"
+            G.n.event_started = G.n.event_started + 1
+        elseif G.cutscene(now) == true then
+            w = "a cutscene is playing"
+            G.n.cutscene = G.n.cutscene + 1
+        elseif G.ended_at and now - G.ended_at < G.ENDED_S then
+            w = "a cutscene just ended"
+            G.n.just_ended = G.n.just_ended + 1
+        end
+    end
+    if w then G.last_why, G.last_at = w, now else G.n.quiet = G.n.quiet + 1 end
+    return w
+end
+
+function G.report()
+    return { about = "10.16: the quiet check the pool, the weapon model and the boss hits wait for (the loading gate, an event that just started, a running cutscene, a cutscene that just ended). It only reads.",
+        source = G.source, running = G.running, is_playing_event = G.playing, counts = G.n, last_not_quiet = G.last_why,
+        last_not_quiet_s_ago = G.last_at and math.floor((os.clock() - G.last_at) * 10) / 10 or nil, event_quiet_s = G.EVENT_S, ended_quiet_s = G.ENDED_S }
+end
+end -- do
+
+----------------------------------------------------------------------------------------------
+-- The garage car probe (10.16; READS ONLY, nothing is sent, nothing is written to the game).
+-- The notes of the other mod say "Garage fight: CarInGarage not synced; a friend driving shows as their character moving at seat height", and nothing records what the type
+-- is. This writes it down: the type definition of app.CarInGarage (every field with its type, every method with its parameter count and return type), and, while an object of
+-- it exists in the scene (the garage), three readings of its plain fields (numbers, booleans, text, vectors; an object field only says what type it is and whether it is set),
+-- the game object it sits on (name, position, component types) and which fields CHANGED between the readings (the candidates for "where the car is" and "who drives it").
+-- Off at every start (a box in the panel, not remembered). One scene look every 2 s while it waits; three readings (now, +5 s, +15 s); then it stops until "Probe again".
+-- Result: re7mp/car_probe.json and health.car_probe.
+----------------------------------------------------------------------------------------------
+CFG.car = {
+    -- (10.27) The 10.26 dump stopped at exactly 220 fields (its cap), 12 short of the end of the car's list: IsEnemyDriving, IsPlayerDriving, FlagWindowBroken, the crash counters and
+    -- the tyre flags were all beyond it. The cap is 520 now. The other three types are the car's two controllers (Strike = hits on the car, Damage = its damage; both are on the car) and
+    -- the delegate type of CurrentAction / NextAction; they only get their type dumped (small caps) and, for the two controllers, their fields read.
+    TYPES = { "app.CarInGarage", "app.CarDamageControllerInGarage", "app.CarStrikeControllerInGarage", "app.CarInGarage.Action" },
+    CONTROLLERS = { "app.CarDamageControllerInGarage", "app.CarStrikeControllerInGarage" }, SMALL_FIELDS = 120, SMALL_METHODS = 120,
+    EVERY = 2, READ_AT = { 0, 5, 15 }, MAX_FIELDS = 520, MAX_METHODS = 400, MAX_INSTANCES = 3, MAX_COMPONENTS = 40,
+    on = false, status = "off", look_at = -100, first_at = nil, readings = 0, started_at = nil,
+    result = nil, n = { looks = 0, instances_seen = 0, type_reads = 0, writes = 0, errors = 0 }, last_error = nil,
+}
+do
+local C = CFG.car
+
+local function tname(t)
+    if t == nil then return nil end
+    local ok, v = pcall(function() return t:get_full_name() end)
+    return ok and v or nil
+end
+
+-- The type: fields (name, type, static), methods (name, parameter count, return type), up to the first System. / via.Component parent
+function C.type_dump(tn, max_fields, max_methods)
+    max_fields, max_methods = max_fields or C.MAX_FIELDS, max_methods or C.MAX_METHODS
+    local td = sdk.find_type_definition(tn)
+    if td == nil then return { type = tn, found = false } end
+    local out = { type = tn, found = true, parent = nil, fields = {}, methods = {} }
+    local okp, par = pcall(function() return td:get_parent_type() end)
+    if okp and par then out.parent = tname(par) end
+    local t, hops = td, 0
+    while t and hops < 4 do
+        local name = tname(t) or "?"
+        if hops > 0 and (name:find("^System%.") or name:find("^via%.Component") or name:find("^via%.Behavior")) then break end
+        local okf, fl = pcall(function() return t:get_fields() end)
+        for _, f in ipairs(okf and fl or {}) do
+            if #out.fields < max_fields then
+                local okn, fname = pcall(function() return f:get_name() end)
+                if okn then
+                    local oks, st = pcall(function() return f:is_static() end)
+                    out.fields[#out.fields + 1] = { name = fname, type = tname(select(2, pcall(function() return f:get_type() end))), static = oks and st or nil, declared_in = name }
+                end
+            end
+        end
+        local okm, ml = pcall(function() return t:get_methods() end)
+        for _, m in ipairs(okm and ml or {}) do
+            if #out.methods < max_methods then
+                local okn, mname = pcall(function() return m:get_name() end)
+                if okn then
+                    local okc, np = pcall(function() return m:get_num_params() end)
+                    local okr, rt = pcall(function() return m:get_return_type() end)
+                    out.methods[#out.methods + 1] = { name = mname, params = okc and np or nil, returns = okr and tname(rt) or nil, declared_in = name }
+                end
+            end
+        end
+        local okq, up = pcall(function() return t:get_parent_type() end)
+        t = okq and up or nil
+        hops = hops + 1
+    end
+    out.fields_total, out.methods_total = #out.fields, #out.methods
+    out.cut = (#out.fields >= max_fields or #out.methods >= max_methods) or nil -- (10.27) true when a cap was hit: the list may go on
+    return out
+end
+
+-- The plain fields of one object (at most max of them; the cap of the car itself by default)
+function C.read_fields(obj, max)
+    max = max or C.MAX_FIELDS
+    local out = {}
+    local okt, td = pcall(function() return obj:get_type_definition() end)
+    if not okt or td == nil then return out end
+    local t, hops = td, 0
+    while t and hops < 4 and #out < max do
+        local name = tname(t) or "?"
+        if hops > 0 and (name:find("^System%.") or name:find("^via%.Component") or name:find("^via%.Behavior")) then break end
+        local okf, fl = pcall(function() return t:get_fields() end)
+        for _, f in ipairs(okf and fl or {}) do
+            if #out < max then
+                local okn, fname = pcall(function() return f:get_name() end)
+                local oks, st = pcall(function() return f:is_static() end)
+                if okn and not (oks and st) then
+                    local ft = tname(select(2, pcall(function() return f:get_type() end))) or "?"
+                    local okv, v = pcall(function() return obj:get_field(fname) end)
+                    local entry = { name = fname, type = ft }
+                    if not okv then
+                        entry.error = true
+                    elseif v == nil then
+                        entry.set = false
+                    elseif type(v) == "number" or type(v) == "boolean" then
+                        entry.value = v
+                    elseif type(v) == "string" then
+                        entry.value = v:sub(1, 80)
+                    elseif type(v) == "userdata" or type(v) == "table" then
+                        local okx, x, y, z = pcall(function() return v.x, v.y, v.z end)
+                        if okx and type(x) == "number" and type(y) == "number" and type(z) == "number" then
+                            entry.value = string.format("%.3f %.3f %.3f", x, y, z)
+                        else
+                            entry.set = true
+                        end
+                    end
+                    out[#out + 1] = entry
+                end
+            end
+        end
+        local okq, up = pcall(function() return t:get_parent_type() end)
+        t = okq and up or nil
+        hops = hops + 1
+    end
+    return out
+end
+
+-- (10.27) What an object is, without assuming: its type, its text (ToString) and, when it is a delegate, which method it holds (get_Method().get_Name()), the type that method is in and
+-- the type it is bound to (get_Target). CurrentAction of the car is such a thing (the 10.26 probe only said "set"); the car has a process<Mode> method for each of its modes.
+function C.describe(obj)
+    if obj == nil then return { set = false } end
+    local d = { set = true }
+    local okt, td = pcall(function() return obj:get_type_definition() end)
+    if okt and td ~= nil then d.type = tname(td) end
+    local oks, txt = pcall(function() return obj:call("ToString()") end)
+    if oks and txt ~= nil then d.text = tostring(as_text(txt) or txt):sub(1, 120) end
+    local okm, mi = pcall(function() return obj:call("get_Method") end)
+    if okm and mi ~= nil then
+        local okn, nm = pcall(function() return mi:call("get_Name") end)
+        if okn and nm ~= nil then d.method = tostring(as_text(nm) or nm):sub(1, 80) end
+        local okd, dt = pcall(function() return mi:call("get_DeclaringType") end)
+        if okd and dt ~= nil then
+            local okf, fname = pcall(function() return dt:call("get_FullName") end)
+            if okf and fname ~= nil then d.method_in = tostring(as_text(fname) or fname):sub(1, 80) end
+        end
+    end
+    local okg, tg = pcall(function() return obj:call("get_Target") end)
+    if okg and tg ~= nil then
+        local okx, tdx = pcall(function() return tg:get_type_definition() end)
+        d.target = okx and tname(tdx) or "set"
+    end
+    return d
+end
+
+-- (10.27) The state machine's current state, read both ways: through the car's own Fsm field and through the game object's getComponent. The 10.26 car module read the field's one and got
+-- nothing all session while the actor probe, reading the other, saw 19 changes. Each answer is written with its text or the reason it gave none, and whether the two are the same object.
+function C.read_state(comp, go)
+    local out = {}
+    local function ask(fsm)
+        if fsm == nil then return { got = "no object" } end
+        local a = {}
+        local okt, td = pcall(function() return fsm:get_type_definition() end)
+        if okt and td ~= nil then a.type = tname(td) end
+        local oka, addr = pcall(function() return fsm:get_address() end)
+        if oka then a.address = addr end
+        local ok, v = pcall(function() return fsm:call("getCurrentState(System.UInt32)", 0) end)
+        if not ok then a.got = "error: " .. tostring(v):sub(1, 80)
+        elseif v == nil then a.got = "nothing"
+        else
+            a.got = "text"
+            a.state = tostring(as_text(v) or ""):sub(1, 60)
+            a.lua_type = type(v)
+        end
+        return a
+    end
+    local okf, f1 = pcall(function() return comp:get_field("Fsm") end)
+    out.field = ask(okf and f1 or nil)
+    local okc, f2 = pcall(function() return go:call("getComponent(System.Type)", sdk.typeof("via.fsm.Fsm")) end)
+    out.component = ask(okc and f2 or nil)
+    if out.field.address and out.component.address then out.same_object = out.field.address == out.component.address end
+    return out
+end
+
+-- One object of the type: its game object (name, position, component types) and its fields
+function C.read_instance(obj)
+    local rec = { fields = {} }
+    pcall(tracer.crumb, "recorder", "car probe: reading an object of " .. tostring(tname((select(2, pcall(function() return obj:get_type_definition() end))))))
+    local okg, go = pcall(function() return obj:call("get_GameObject") end)
+    if okg and go ~= nil then
+        local okn, nm = pcall(function() return go:call("get_Name") end)
+        if okn then rec.game_object = as_text(nm) end
+        local okp, pos = pcall(function() return go:call("get_Transform"):call("get_Position") end)
+        if okp and pos and type(pos.x) == "number" then rec.position = string.format("%.3f %.3f %.3f", pos.x, pos.y, pos.z) end
+        local okc, comps = pcall(function() return go:call("get_Components") end)
+        local list = okc and CFG.mold.items(comps) or nil
+        if list then
+            rec.components = {}
+            for _, c in ipairs(list) do
+                if #rec.components < C.MAX_COMPONENTS then
+                    local okt, td = pcall(function() return c:get_type_definition() end)
+                    rec.components[#rec.components + 1] = okt and tname(td) or "?"
+                end
+            end
+        end
+    end
+    rec.fields = C.read_fields(obj)
+    -- (10.27) the things the 10.26 file could not tell: the delegates described, the state machine read both ways, the car's two controllers (fields only; they are on the car's game object)
+    local function field_of(name)
+        local ok, v = pcall(function() return obj:get_field(name) end)
+        return ok and v or nil
+    end
+    rec.current_action = C.describe(field_of("CurrentAction"))
+    rec.next_action = C.describe(field_of("NextAction"))
+    if okg and go ~= nil then
+        rec.state = C.read_state(obj, go)
+        rec.controllers = {}
+        for _, tn in ipairs(C.CONTROLLERS) do
+            local okc, comp = pcall(function() return go:call("getComponent(System.Type)", sdk.typeof(tn)) end)
+            rec.controllers[#rec.controllers + 1] = (okc and comp ~= nil) and { type = tn, fields = C.read_fields(comp, C.SMALL_FIELDS) } or { type = tn, found = false }
+        end
+    end
+    return rec
+end
+
+-- The objects of the type in the scene (at most MAX_INSTANCES); nil when the scene would not say
+function C.instances(tn, max)
+    local scene = scene_object()
+    if not scene then return nil end
+    local okf, arr = pcall(function() return scene:call("findComponents(System.Type)", sdk.typeof(tn)) end)
+    if not okf then return nil, tostring(arr):sub(1, 80) end
+    local list = CFG.mold.items(arr)
+    if list == nil then return {} end
+    local out = {}
+    for _, o in ipairs(list) do
+        if #out < (max or C.MAX_INSTANCES) then out[#out + 1] = o end
+    end
+    return out, nil, #list
+end
+
+-- Which fields' values differ between the first and the last reading of the first object
+function C.changed(res)
+    local first, last = res.readings[1], res.readings[#res.readings]
+    if not first or not last or #res.readings < 2 then return nil end
+    local a, b = first.instances[1], last.instances[1]
+    if not a or not b then return nil end
+    local by = {}
+    for _, f in ipairs(a.fields) do by[f.name] = f.value end
+    local out = {}
+    for _, f in ipairs(b.fields) do
+        if f.value ~= nil and by[f.name] ~= nil and by[f.name] ~= f.value and #out < 80 then
+            out[#out + 1] = { name = f.name, type = f.type, first = by[f.name], last = f.value }
+        end
+    end
+    if a.position and b.position and a.position ~= b.position then out[#out + 1] = { name = "(game object position)", first = a.position, last = b.position } end
+    return out
+end
+
+function C.save()
+    local res = C.result
+    if not res then return end
+    res.changed_between_first_and_last = C.changed(res)
+    res.written_at = os.time()
+    local ok, where = CFG.save_json(FILES.MAP.car_probe[1], FILES.MAP.car_probe[2], res)
+    C.n.writes = C.n.writes + 1
+    if not ok then C.n.errors = C.n.errors + 1 C.last_error = tostring(where):sub(1, 100) end
+end
+
+-- A new probe: the type now (written at once), the readings as soon as an object exists
+function C.start(why)
+    C.n.type_reads = C.n.type_reads + 1
+    C.readings, C.first_at, C.started_at = 0, nil, os.clock()
+    C.result = { about = "re7mp 10.16 garage car probe: reads only. Send this file.", build = CFG.BUILD, why = why, types = {}, readings = {}, scene = nil }
+    for i, tn in ipairs(C.TYPES) do
+        local small = i > 1 -- (10.27) the car itself gets the big caps, the helper types the small ones
+        local ok, d = pcall(C.type_dump, tn, small and C.SMALL_FIELDS or nil, small and C.SMALL_METHODS or nil)
+        C.result.types[#C.result.types + 1] = ok and d or { type = tn, error = tostring(d):sub(1, 100) }
+    end
+    local t = C.result.types[1]
+    C.status = (t and t.found) and "the type is read; waiting for a CarInGarage object in the scene (go to the garage)" or "the game has no type app.CarInGarage"
+    C.save()
+    say("garage car probe: " .. C.status)
+end
+
+function C.set_on(v)
+    C.on = v == true
+    if C.on then
+        C.start("the box was ticked")
+    else
+        C.status = "off"
+    end
+end
+
+function C.update(now)
+    if not C.on or not C.result then return end
+    if C.readings >= #C.READ_AT then return end
+    local t1 = C.result.types and C.result.types[1]
+    if t1 and t1.found == false then return end -- (no such type in this game: there is nothing to look for)
+    if C.first_at and now - C.first_at < C.READ_AT[C.readings + 1] then return end
+    if now - C.look_at < C.EVERY then return end
+    C.look_at = now
+    C.n.looks = C.n.looks + 1
+    local list, err, total = C.instances(C.TYPES[1])
+    if list == nil then
+        C.status = "the scene would not say" .. (err and (": " .. err) or "")
+        return
+    end
+    if #list == 0 then
+        if C.first_at then C.status = "the object is gone (scene changed); " .. C.readings .. " of " .. #C.READ_AT .. " readings" end
+        return
+    end
+    C.n.instances_seen = math.max(C.n.instances_seen, total or #list)
+    C.first_at = C.first_at or now
+    local reading = { at_s = math.floor((now - C.first_at) * 10) / 10, instances = {}, total = total or #list }
+    for _, o in ipairs(list) do
+        local ok, rec = pcall(C.read_instance, o)
+        reading.instances[#reading.instances + 1] = ok and rec or { error = tostring(rec):sub(1, 100) }
+        if not ok then C.n.errors = C.n.errors + 1 C.last_error = tostring(rec):sub(1, 100) end
+    end
+    C.result.readings[#C.result.readings + 1] = reading
+    C.readings = C.readings + 1
+    C.status = string.format("reading %d of %d done (%d object(s) of the type)", C.readings, #C.READ_AT, reading.total)
+    C.save()
+    say("garage car probe: " .. C.status)
+    if C.readings >= #C.READ_AT then
+        C.status = "done: " .. C.readings .. " readings written to re7mp/car_probe.json (tick the box or press Probe again to repeat)"
+    end
+end
+
+function C.report()
+    local t = C.result and C.result.types and C.result.types[1]
+    return { about = "10.16: the garage car probe (reads only; off at every start; result in re7mp/car_probe.json)", on = C.on, status = C.status,
+        type_found = t and t.found or nil, fields = t and t.fields_total or nil, methods = t and t.methods_total or nil,
+        readings = C.readings, counts = C.n, last_error = C.last_error }
+end
+end -- do
+
+----------------------------------------------------------------------------------------------
+-- One health pool for both players (10.15: "both players boss health pool should be the same too, just to make sure they sync").
+--
+-- The HOST's game runs the enemies, so the host's health number IS the pool: every hit the joiner makes goes to the host (kind 9) and lowers it
+-- there, and the host's snapshots carry it back (field 9; from 10.15 the enemy's maximum is field 14). What was missing:
+--   1. The JOINER's own copy of the enemy (mode 3, "move my own enemies onto the host's") kept a health number of its own: a shot that landed on
+--      it lowered that one, and nothing lowered it when the host's enemy lost health, or finished it when the host's died. Now, for every copy
+--      that is being moved onto a host enemy, every EVERY seconds (CFG.pool.follow):
+--        - mine is higher than the host's -> mine is set to the host's at once with setHealth(health, max), the call the other mod uses;
+--        - mine is lower (my own shot landed a moment before the host's answer came back) -> the host's number is put back only after the
+--          difference has stood for RAISE_AFTER seconds, so a hit that was just sent is not undone before the host has applied it;
+--        - the two maxima differ (a different difficulty) -> the same SHARE of the pool, not the same number;
+--        - never below 1: setHealth(0) marks an enemy dead without the death (the other mod: "sets isDead but the enemy keeps walking"). The host's
+--          death is finished the way their kills are: one hit far above the health through the game's damage call, up to three times (finish).
+--   2. A boss health bar at the top of the screen on BOTH screens (name, health / maximum, share), from the host's reading, so that the two
+--      numbers can be seen to be the same. A boss is a family of CFG.pool.BOSS, or anything with a maximum of BOSS_MAX or more.
+-- Nothing is written to an enemy that is not being moved (mode 3), and a copy is only finished within KILL_WINDOW seconds of the last time it was
+-- put on the host's enemy, so another enemy of the same name in the joiner's own scene is left alone.
+-- UNVERIFIED in the real game: setHealth(System.Single, System.Single) is the other mod's call (coop_enemies.lua on_ehp); the kill is theirs too.
+----------------------------------------------------------------------------------------------
+CFG.pool = {
+    on = true,                -- JOINER: my copy of the host's enemy takes the host's health, and dies with it (remembered)
+    bar = true,               -- both: the boss health bar (remembered)
+    bosses = false,           -- (10.16) JOINER: also write the host's health into my copy of a BOSS (EXPERIMENTAL; off at every start, not remembered; see "THE QUIET CHECK")
+    EVERY = 0.25,             -- the most often one copy's health is written
+    TOL_FRAC = 0.004,         -- a difference under this share of the maximum (and under 2 points) is left alone
+    RAISE_AFTER = 1.5,        -- a copy that is LOWER than the host's waits this long (seconds) for the host's answer before it is raised
+    KILL_AFTER = 1.0,         -- the host's enemy must have been dead this long before mine is finished
+    KILL_EVERY = 0.6, KILL_TRIES = 3, KILL_WINDOW = 20, KILL_NEAR = 8,
+    MAX_EVERY = 2,            -- host: how often an enemy's maximum is read
+    BOSS_MAX = 2000, BAR_RANGE = 70, BAR_MAX = 2,
+    BOSS = { em2000 = true, em2100 = true, em3000 = true, em3100 = true, em3200 = true, em3300 = true, em3600 = true, em6000 = true,
+        em8000 = true, em8100 = true, em8500 = true, em8900 = true },
+    recs = {},                -- copy name -> { set_at, low_since, max, max_at, fails, dead_since, tries, tried_at, finished }
+    n = { lowered = 0, raised = 0, same = 0, unread = 0, errors = 0, killed = 0, kill_tries = 0, kill_failed = 0, finish_far = 0, no_max = 0, scaled = 0,
+        held_not_quiet = 0, boss_not_written = 0, boss_max_differs = 0, boss_raise_skipped = 0, boss_finish_skipped = 0, host_boss_hits_refused = 0 },
+    said = 0, SAY_MAX = 40, say_at = {},
+    last = "nothing to follow yet", shown = 0, rects = 0,
+}
+
+do
+local P = CFG.pool
+
+function P.rec(name)
+    local r = P.recs[name]
+    if not r then
+        r = {}
+        P.recs[name] = r
+    end
+    return r
+end
+
+function P.is_boss(name, max)
+    local fam = CFG.ids and CFG.ids.family(name)
+    if fam and P.BOSS[fam] then return true end
+    return type(max) == "number" and max >= P.BOSS_MAX
+end
+
+-- HOST: an enemy's maximum health (its DamageController's get_maxHealth), read every MAX_EVERY seconds and kept on the record. nil when not known.
+function P.max_of(e, now)
+    now = now or os.clock()
+    if e.max_at and now - e.max_at < P.MAX_EVERY then return e.max_val end
+    e.max_at = now
+    local dc = e.dmg_comp
+    if not dc then return e.max_val end -- (the health search has not found one yet)
+    local ok, v = pcall(dc.call, dc, "get_maxHealth")
+    if ok and type(v) == "number" and v == v and v > 0 and v < 1e9 then
+        e.max_val = v
+    elseif not ok then
+        e.max_val = nil
+    end
+    return e.max_val
+end
+
+-- JOINER: the maximum health of my own copy, read every 2 seconds.
+function P.local_max(root, r, now)
+    if r.max_at and now - r.max_at < 2 then return r.max end
+    r.max_at = now
+    local dc = root.dmg_comp
+    if dc then
+        local ok, v = pcall(dc.call, dc, "get_maxHealth")
+        if ok and type(v) == "number" and v == v and v > 0 and v < 1e9 then r.max = v end
+    end
+    return r.max
+end
+
+local function note(name, text, now, force)
+    P.last = text
+    -- (force: the end of a story, a kill or a give-up, is always said; the repeating lines wait two seconds)
+    if P.said < P.SAY_MAX and (force or now - (P.say_at[name] or -10) >= 2) then
+        P.say_at[name] = now
+        P.said = P.said + 1
+        say("health pool: " .. text)
+    end
+end
+
+-- Write a health number into my copy. Returns how (nil when nothing worked).
+function P.write(root, target, lmax)
+    local dc = root.dmg_comp
+    if dc and lmax then
+        local ok = pcall(function() return dc:call("setHealth(System.Single, System.Single)", target + 0.0, lmax + 0.0) end)
+        if ok then return "setHealth" end
+    end
+    if dc then
+        local ok = pcall(function() dc:call("getHealthInfo"):call("set_health", target + 0.0) end)
+        if ok then return "set_health" end
+    end
+    if root.hp_comp and root.hp_field then
+        local ok = pcall(function() root.hp_comp:set_field(root.hp_field, target + 0.0) end)
+        if ok then return "health field" end
+    end
+    return nil
+end
+
+-- JOINER, called for every copy that was just put on the host's enemy `e` (an entry of enemy.remote, alive).
+function P.follow(root, e, now)
+    if not P.on or tracer.pool_suspect then return end
+    local r = P.rec(root.name)
+    r.dead_since, r.tries, r.finished = nil, 0, nil -- (alive on the host again: a later death starts afresh)
+    if r.give_up then return end
+    local host_hp = e.hp
+    if type(host_hp) ~= "number" or host_hp < 0 then return end -- the host could not read it
+    local boss = P.is_boss(root.name, e.max)
+    -- (10.16) a boss is only written when the box says so (EXPERIMENTAL, off at every start): its health is run by the game's own script, and the 10.15 crash after the Mia fight
+    -- came right after writes to it during a cutscene
+    if boss and not P.bosses then
+        P.n.boss_not_written = P.n.boss_not_written + 1
+        r.host_hp, r.at = host_hp, now
+        return
+    end
+    if r.set_at and now - r.set_at < P.EVERY then return end
+    -- (10.16) nothing is written while the game loads, plays a cutscene or has just started an event
+    local quiet = CFG.guard and CFG.guard.why(now)
+    if quiet then
+        P.n.held_not_quiet = P.n.held_not_quiet + 1
+        r.held, r.held_why = now, quiet
+        return
+    end
+    local mine = read_health(root)
+    if type(mine) ~= "number" or mine < 0 then
+        P.n.unread = P.n.unread + 1
+        return
+    end
+    if enemy_is_dead(root) then return end -- (a dead copy is not brought back; the host's own death is finish()'s)
+    local lmax = P.local_max(root, r, now)
+    local target = host_hp
+    if e.max and lmax and lmax > 0 and math.abs(e.max - lmax) > 0.01 * lmax then
+        if boss then
+            -- (10.16) two games that disagree on a BOSS's maximum are in different phases of the fight (the journal of the Mia crash: host 700 of 2000, mine 700: "700 -> 245"),
+            -- not on two difficulties: nothing is written
+            P.n.boss_max_differs = P.n.boss_max_differs + 1
+            r.host_hp, r.mine, r.at, r.max_differs = host_hp, mine, now, string.format("host %.0f, mine %.0f", e.max, lmax)
+            return
+        end
+        target = host_hp / e.max * lmax -- two difficulties: the same share of the pool
+        P.n.scaled = P.n.scaled + 1
+    elseif not e.max then
+        P.n.no_max = P.n.no_max + 1
+    end
+    if target < 1 then target = 1 end -- 0 would mark it dead without the death
+    if lmax and lmax > 0 and target > lmax then target = lmax end
+    local tol = math.max(2, (lmax or mine) * P.TOL_FRAC)
+    local diff = mine - target
+    r.host_hp, r.mine, r.target, r.at = host_hp, mine, target, now
+    if math.abs(diff) <= tol then
+        r.low_since = nil
+        P.n.same = P.n.same + 1
+        return
+    end
+    local how
+    if diff > 0 then
+        how = "lowered"
+    else
+        if boss then -- (10.16) a boss's health is never raised (the journal: "raised 1 -> 350" on a boss the game's script had brought down)
+            P.n.boss_raise_skipped = P.n.boss_raise_skipped + 1
+            return
+        end
+        r.low_since = r.low_since or now
+        if now - r.low_since < P.RAISE_AFTER then return end
+        how = "raised"
+    end
+    r.set_at, r.low_since = now, nil
+    pcall(tracer.crumb, "pool", string.format("%s %s %.0f -> %.0f", root.name, how, mine, target))
+    local via = P.write(root, target, lmax)
+    pcall(tracer.crumb, "clean", "health pool: written")
+    if via then
+        r.fails = 0
+        P.n[how] = P.n[how] + 1
+        note(root.name, string.format("%s %s %.0f -> %.0f (the host's %.0f%s) by %s", root.name, how, mine, target, host_hp, e.max and string.format(" of %.0f", e.max) or "", via), now)
+    else
+        P.n.errors = P.n.errors + 1
+        r.fails = (r.fails or 0) + 1
+        if r.fails >= 3 then
+            r.give_up = true
+            note(root.name, root.name .. ": nothing could write its health three times; left alone from now on", now, true)
+        end
+    end
+end
+
+-- JOINER, called for a copy whose host enemy is dead (and not parked): finish my copy, up to KILL_TRIES times.
+function P.finish(root, e, now)
+    if not P.on or tracer.pool_suspect then return end
+    local d = enemy.driven[root.name]
+    if not d and CFG.own and CFG.own.peer[root.name] then d = CFG.own.peer[root.name].d end -- (10.18: the host's body of an enemy the joiner runs)
+    if not d or not d.moved_at or now - d.moved_at > P.KILL_WINDOW then return end -- not a copy I put on that enemy a moment ago
+    local r = P.rec(root.name)
+    if r.finished then return end
+    -- (10.16) NEVER a damage call on a boss: the game's own script takes the boss away after its death (journal of the Mia crash: three hits of 3000 on the copy, then "Enemy model gone"
+    -- and the game closed). My copy is left to the story, which the other game's progress (and the story sync) moves on.
+    if P.is_boss(root.name, e.max) then
+        r.finished = true
+        P.n.boss_finish_skipped = P.n.boss_finish_skipped + 1
+        note(root.name, root.name .. ": the host's boss is dead; mine is left to the game's own story (no damage call on a boss)", now, true)
+        return
+    end
+    local quiet = CFG.guard and CFG.guard.why(now)
+    if quiet then
+        P.n.held_not_quiet = P.n.held_not_quiet + 1
+        r.held, r.held_why = now, quiet
+        return
+    end
+    r.dead_since = r.dead_since or now
+    if now - r.dead_since < P.KILL_AFTER then return end
+    if r.tried_at and now - r.tried_at < P.KILL_EVERY then return end
+    -- the copy has to be where I put it (the host's enemy's last place), or it is some other enemy with the same name
+    local okp, p = pcall(function() return root.xf:call("get_Position") end)
+    if okp and p and d.hx and ((p.x - d.hx) ^ 2 + (p.z - d.hz) ^ 2) > P.KILL_NEAR ^ 2 then
+        r.finished = true
+        P.n.finish_far = P.n.finish_far + 1
+        note(root.name, root.name .. ": the host's is dead but mine is not where I put it; left alone", now, true)
+        return
+    end
+    if enemy_is_dead(root) then
+        r.finished = true
+        P.n.killed = P.n.killed + 1
+        note(root.name, root.name .. ": dead on the host, and mine is dead too", now, true)
+        return
+    end
+    if (r.tries or 0) >= P.KILL_TRIES then
+        r.finished = true
+        P.n.kill_failed = P.n.kill_failed + 1
+        note(root.name, root.name .. ": the host's is dead, mine would not die after " .. P.KILL_TRIES .. " hits", now, true)
+        return
+    end
+    r.tried_at, r.tries = now, (r.tries or 0) + 1
+    local hp = read_health(root)
+    local dmg = math.max((type(hp) == "number" and hp > 0 and hp or 0) * 4 + 1000, 3000)
+    pcall(tracer.crumb, "pool", root.name .. " finish hit " .. dmg)
+    local ok, okc, how = pcall(enemy.hit.apply, root, dmg)
+    pcall(tracer.crumb, "clean", "health pool: hit done")
+    P.n.kill_tries = P.n.kill_tries + 1
+    note(root.name, string.format("%s: the host's is dead; hit mine for %d (try %d): %s", root.name, dmg, r.tries, ok and tostring(how) or tostring(okc)), now)
+end
+
+-- The boss rows to show: { name, hp, max, d2 }, the nearest first.
+function P.rows(now)
+    local rows = {}
+    local lp = state.local_pos
+    local function add(name, hp, max, x, z)
+        if type(hp) ~= "number" or hp < 0 or not P.is_boss(name, max) then return end
+        local d2 = (lp and x and z) and ((x - lp.x) ^ 2 + (z - lp.z) ^ 2) or 0
+        if d2 > P.BAR_RANGE ^ 2 then return end
+        rows[#rows + 1] = { name = name, hp = hp, max = max, d2 = d2 }
+    end
+    if state.role == "host" and not enemy.test_ghosts then
+        if enemy.mode >= 2 and peer_present(now) then
+            for _, r in ipairs(enemy.roots) do
+                if r.last_flags == 1 and r.last_hp then add(r.name, r.last_hp, r.last_max, r.last_x, r.last_z) end -- (flags 1 = alive and not parked; a dead boss has no bar)
+            end
+        end
+    elseif receiving_enemies() and now - enemy.remote_at <= 3 then
+        for name, e in pairs(enemy.remote) do
+            if e.alive and not e.inactive and e.rx then add(name, e.hp, e.max, e.rx, e.rz) end
+        end
+    end
+    table.sort(rows, function(a, b) if a.d2 ~= b.d2 then return a.d2 < b.d2 end return a.name < b.name end)
+    while #rows > P.BAR_MAX do table.remove(rows) end
+    return rows
+end
+
+function P.draw(now)
+    if not P.bar then
+        P.shown = 0
+        return
+    end
+    local rows = P.rows(now)
+    P.shown = #rows
+    if #rows == 0 then return end
+    local sz = { x = 1920, y = 1080 }
+    pcall(function() local d = imgui.get_display_size() if d and d.x and d.x > 100 then sz = d end end)
+    local w, h = 360, 10
+    local x, y = math.floor(sz.x * 0.5 - w * 0.5), 74
+    for _, r in ipairs(rows) do
+        local label = CFG.ids and CFG.ids.label(r.name) or enemy.base(r.name)
+        local frac = (r.max and r.max > 0) and math.max(0, math.min(1, r.hp / r.max)) or nil
+        local text = frac and string.format("%s   %d / %d   (%d%%)", label, math.floor(r.hp), math.floor(r.max), math.floor(frac * 100 + 0.5))
+            or string.format("%s   %d", label, math.floor(r.hp))
+        pcall(draw.text, text, x, y - 18, 0xFFFFFFFF)
+        if frac then
+            local okb = pcall(draw.filled_rect, x - 1, y - 1, w + 2, h + 2, 0xC0101010)
+            if okb then
+                pcall(draw.filled_rect, x, y, math.max(1, math.floor(w * frac)), h, 0xFF3030E0)
+                P.rects = P.rects + 1
+            end
+        end
+        y = y + 36
+    end
+end
+
+function P.report()
+    local copies = {}
+    for name, r in pairs(P.recs) do
+        copies[#copies + 1] = { name = name, host_hp = r.host_hp, mine = r.mine, target = r.target, max = r.max, finished = r.finished, tries = r.tries, gave_up = r.give_up or nil,
+            held_for = r.held_why, maxima = r.max_differs }
+    end
+    table.sort(copies, function(a, b) return a.name < b.name end)
+    while #copies > 12 do table.remove(copies) end
+    return { about = "10.15: one health pool. The host's number is the pool (field 9 of the enemy snapshot, the maximum is field 14). My own copy of a host enemy (mode 3) takes it: lowered at once, raised after "
+            .. P.RAISE_AFTER .. " s, never below 1, finished (one hit far above its health, up to " .. P.KILL_TRIES .. " times) when the host's is dead. The boss bar shows the host's reading on both screens. "
+            .. "10.16: a BOSS is only written when 'bosses_written' is on (a box, off at every start); then never raised, never written while the maxima differ, never hit; and nothing is written while the game loads or plays a cutscene (health.guard).",
+        follow_on = P.on, bar_on = P.bar, bosses_written = P.bosses, previous_session_ended_inside_it = tracer.pool_suspect == true,
+        counts = P.n, last = P.last, bar_rows_now = P.shown, bar_rects_drawn = P.rects, copies = copies }
+end
+
+end -- do
 
 ----------------------------------------------------------------------------------------------
 -- Damage dealt by the joiner . The joiner sees the host's enemies as red boxes, and its bullets pass through them.
@@ -8339,7 +10130,12 @@ enemy.hit = {
     -- hit really does to the enemy's health and corrects for the game's own multipliers (HIT.ratio below).
     damage = 210,     -- joiner: damage per hit (sent with the hit; the host clamps it to 1..1500)
     MAX = 1500,       -- the most one hit may carry (9.25: was 500)
-    by_gun = false,   -- 9.31: the damage follows the gun in hand (table damage x gun_scale) when it is known; otherwise the number above
+    -- 10.21: ON by default (your 22 Nov request: "since we can tell which gun does what damage we can sync the damage of each gun"). The table (CFG.wpn.DAMAGE) has been in the script since
+    -- 9.31 and the joiner's hit already took the held gun's number from it, but the box was off, so every shot was the flat number above. The gun in hand is read once a second
+    -- (CFG.wpn.held); a gun that is not in the table (or no gun known) still sends the flat number. Saved under hit_by_gun2: the old key held "false" for everybody.
+    by_gun = true,    -- the damage follows the gun in hand (table damage x gun_scale) when it is known; otherwise the number above
+    gun_sent = {},    -- 10.21: gun id -> { shots = n, damage = the last number sent }: what each gun really sent (the debug file's enemy_hits.sent_by_gun)
+    flat_shots = 0, unknown_gun_shots = 0, last_gun = nil,
     gun_scale = 2.1,  -- 9.31: the one real pistol shot measured 210 for a 100-damage bullet (9.25)
     ratio = nil,      -- host: (health lost) / (damage handed to the game) for the last measured hits, any enemy; nil until one was measured
     ratios = {},      -- 9.26: the same, per enemy name. The 0.8 test: Em2000 lost exactly what it was handed (x1.00, 8 hits), Em8000 lost 77 of each 110 (x0.70, 2 hits)
@@ -8444,7 +10240,15 @@ function HIT.fire(now, why)
     if HIT.by_gun and CFG.wpn.held and CFG.wpn.held.damage then -- (9.31) the gun in hand decides
         dmg = clampn(math.floor(CFG.wpn.held.damage * HIT.gun_scale + 0.5), 1, HIT.MAX)
         from_gun = CFG.wpn.held.id
+        local g = HIT.gun_sent[from_gun] or { shots = 0 } -- (10.21) what each gun really sent, for the debug file
+        g.shots, g.damage = g.shots + 1, dmg
+        HIT.gun_sent[from_gun] = g
+    elseif HIT.by_gun then
+        HIT.unknown_gun_shots = HIT.unknown_gun_shots + 1 -- (10.21) by gun is on but no gun with a known damage is in hand: the flat number goes (the debug file says how often)
+    else
+        HIT.flat_shots = HIT.flat_shots + 1
     end
+    HIT.last_gun = from_gun or (CFG.wpn.held and CFG.wpn.held.id) or "no gun known"
     local e = best.e
     net_send(HIT.MSG, string.format("x|%s|%d|%.2f|%.2f|%.2f", best.name, dmg, e.x, e.y, e.z))
     HIT.sent = HIT.sent + 1
@@ -8510,6 +10314,15 @@ function HIT.receive_hit(rest, now)
     end
     if state.role ~= "host" then return refuse("I am not the host") end
     if not HIT.accept then return refuse("hits from the other player are switched off") end
+    if CFG.own and CFG.own.peer[name] then return refuse("the joiner runs it (the hand-over): their own hits land in their game") end -- (10.18)
+    -- (10.16) no damage call on a boss while a cutscene plays or the game loads (the other mod's v0.36: scripted damage on Em2000 during c01e04_00, then a crash 18 s later)
+    if CFG.pool and CFG.pool.is_boss(name) then
+        local quiet = CFG.guard and CFG.guard.why(now)
+        if quiet then
+            CFG.pool.n.host_boss_hits_refused = CFG.pool.n.host_boss_hits_refused + 1
+            return refuse("not now: " .. quiet)
+        end
+    end
     for i = #HIT.recent, 1, -1 do
         if now - HIT.recent[i] > 1 then table.remove(HIT.recent, i) end
     end
@@ -8844,7 +10657,12 @@ function HIT.report()
     end
     local kinds = {}
     for _, w in ipairs(HIT.objs) do kinds[w.type] = (kinds[w.type] or 0) + 1 end
+    local by_gun = {}
+    for id, g in pairs(HIT.gun_sent) do by_gun[#by_gun + 1] = { gun = id, shots = g.shots, damage_sent = g.damage } end
+    table.sort(by_gun, function(a, b) return a.gun < b.gun end)
     return { joiner_hits_on = HIT.on, host_accepts = HIT.accept, damage_per_hit = HIT.damage,
+        by_gun = { on = HIT.by_gun, scale = HIT.gun_scale, sent_by_gun = by_gun, flat_number_shots = HIT.flat_shots, by_gun_on_but_no_known_gun_shots = HIT.unknown_gun_shots, last_gun = HIT.last_gun,
+            note = "10.21: with 'by gun' on, a shot sends (table damage of the gun in hand) x scale; a gun not in the table (or none known) sends the flat damage_per_hit. The host divides by what it measured the enemy really loses per point handed (effective_ratio, ratio_by_enemy)." },
         effective_ratio = HIT.ratio and math.floor(HIT.ratio * 1000 + 0.5) / 1000 or nil, ratio_measured = HIT.measured, ratio_last = HIT.ratio_last,
         ratio_by_enemy = (function() local t = {} for k, v in pairs(HIT.ratios) do t[k] = math.floor(v * 1000 + 0.5) / 1000 end return next(t) and t or nil end)(),
         shots_tested = HIT.shots, no_box_in_line = HIT.misses, behind_wall = HIT.walled, sent = HIT.sent, answered = HIT.acked,
@@ -8857,6 +10675,797 @@ function HIT.report()
             gap_between_the_two_calls_s = HIT.hook.gap_min and { min = HIT.hook.gap_min, max = HIT.hook.gap_max } or nil },
         learner = { status = L.status, candidates = L.candidates },
         weapon_components = kinds, first_weapon_number_fields = nums }
+end
+end -- do
+
+----------------------------------------------------------------------------------------------
+-- (10.21) KILLS BOTH WAYS (CFG.kill, message kind 21). Your 22 Nov request: "killing one persons molded should kill both persons regardless of host or joiner status".
+-- What already worked: the HOST's enemy dies -> its snapshot says dead -> the joiner's copy is finished (CFG.pool.finish for an ordinary enemy, CFG.molded.finish for a Molded).
+-- What was missing: the JOINER's own copy dies FIRST. With mode 3 / Molded copies a joiner's shot lands on a real body in the joiner's game, which takes the game's real damage (a
+-- headshot ...), while the host only ever got the table number (HIT.fire). The copy can be dead while the host's still has health, and nothing told the host: CFG.pool.follow
+-- returns early for a dead copy ("a dead copy is not brought back"), and a dead Molded copy was still moved and given the host's clips.
+-- JOINER (every 0.25 s): for each real body of mine that is the copy of a host enemy (an enemy mode 3 moved onto the host's, or a Molded copy): seen ALIVE first, then dead for
+--   DEAD_FOR seconds while the host's snapshot still says alive -> "k|name|x|z" to the host (again every RESEND_S until answered, MAX_SENDS times). Never a boss (Mia, Jack: their
+--   deaths belong to the game's script, and a kill written during a cutscene is what crashed the 10.15 build); never while the quiet check says loading / cutscene. A body that
+--   is first seen DEAD (an older save, another body) is not a kill of mine and asks nothing.
+-- HOST: only as host, with the hit box ticked; refuses a boss, an enemy the joiner runs (the hand-over has its own messages), a moment that is not quiet, more than HOST_PER_S a
+--   second, no such enemy, a parked one; an already dead one is answered "ok, already dead"; otherwise the finishing blow CFG.molded.finish and CFG.pool.finish give a copy: one hit
+--   far above the health through the game's own damage call, up to 3 times. Answers "a|name|ok|how" or "a|name|no|why". The host's snapshot then says dead, which is what ends the
+--   resending (and finishes whatever is left of the joiner's copy, nothing: it is dead).
+-- UNVERIFIED in the real game. A session that ended inside a kill switches this off (stage "kill").
+----------------------------------------------------------------------------------------------
+CFG.kill = {
+    MSG = 21,
+    on = true,               -- both players: the joiner asks, the host accepts (remembered as kill_sync)
+    SCAN_EVERY = 0.25, DEAD_FOR = 0.7, RESEND_S = 2.5, MAX_SENDS = 4, HOST_PER_S = 6, TRIES = 3,
+    recs = {},               -- joiner: copy name -> { addr, alive_seen, born_dead, dead_since, sends, sent_at, answer, why, final }
+    scan_at = -100, recent = {}, history = {},
+    n = { asked = 0, resent = 0, ok = 0, refused = 0, gave_up = 0, bosses_skipped = 0, born_dead = 0, not_quiet = 0, host_asked = 0, host_killed = 0, host_already_dead = 0,
+        host_refused = 0, host_failed = 0, errors = 0 },
+    last = "nothing yet",
+}
+
+do
+local K = CFG.kill
+
+local function note(text)
+    K.last = text
+    K.history[#K.history + 1] = string.format("%.0f s: %s", os.clock(), text)
+    while #K.history > 14 do table.remove(K.history, 1) end
+    say("kill sync: " .. text)
+end
+
+-- Is the game's own answer "dead"? true / false, nil when it could not be asked. read_health first: it finds the Status and DamageController the death question needs (once per record).
+local function dead_of(rec)
+    pcall(read_health, rec)
+    local ok, dead = pcall(enemy_is_dead, rec)
+    if not ok then return nil end
+    return dead == true
+end
+
+-- JOINER: the bodies of this game that are copies of a host enemy: { name, rec, c = the Molded copy or nil }
+function K.candidates()
+    local out = {}
+    for _, root in ipairs(enemy.local_roots or {}) do
+        if enemy.driven[root.name] and not root.spawn then out[#out + 1] = { name = root.name, rec = root } end
+    end
+    local M = CFG.molded
+    for name, c in pairs(M and M.copies or {}) do
+        c.krec = c.krec or c.rec or { name = name, go = c.go, xf = c.xf, family = enemy.base(name) }
+        out[#out + 1] = { name = name, rec = c.krec, c = c }
+    end
+    return out
+end
+
+-- JOINER: one body.
+function K.look(cand, now)
+    local name, rec = cand.name, cand.rec
+    local r = K.recs[name]
+    local addr = rec.addr or (cand.c and cand.c.addr)
+    if r and addr and r.addr and r.addr ~= addr then r = nil end -- another body under that name: its history starts again
+    if not r then
+        r = { addr = addr, sends = 0 }
+        K.recs[name] = r
+    end
+    local dead = dead_of(rec)
+    if dead == nil then return end
+    if not dead then
+        r.alive_seen, r.dead_since, r.born_dead = true, nil, nil
+        if cand.c then cand.c.dead_here = nil end
+        return
+    end
+    if not r.alive_seen then -- dead the first time it was looked at: not a kill of mine (an older save, a body of another time)
+        if not r.born_dead then
+            r.born_dead = true
+            K.n.born_dead = K.n.born_dead + 1
+        end
+        return
+    end
+    if cand.c then cand.c.dead_here = true end -- (CFG.molded.update no longer moves it or plays the host's clips on it)
+    r.dead_since = r.dead_since or now
+    local e = enemy.remote[name]
+    if not e or not e.alive or e.inactive then
+        r.final = "the host's is dead too"
+        return
+    end
+    if r.final or r.answer == "ok" then return end
+    if now - r.dead_since < K.DEAD_FOR then return end
+    if CFG.pool.is_boss(name, e.max) then
+        r.final = "a boss: the game's script decides"
+        K.n.bosses_skipped = K.n.bosses_skipped + 1
+        note(string.format("%s died here, but it is a boss: nothing is asked of the host", name))
+        return
+    end
+    if r.sends >= K.MAX_SENDS then
+        r.final = string.format("asked %d times, no answer that helped", r.sends)
+        K.n.gave_up = K.n.gave_up + 1
+        note(string.format("%s: %s", name, r.final))
+        return
+    end
+    if r.sent_at and now - r.sent_at < K.RESEND_S then return end
+    local quiet = CFG.guard and CFG.guard.why(now)
+    if quiet then
+        K.n.not_quiet = K.n.not_quiet + 1
+        r.held = quiet
+        return
+    end
+    r.sent_at, r.sends, r.held = now, r.sends + 1, nil
+    net_send(K.MSG, string.format("k|%s|%.1f|%.1f", name, e.x or 0, e.z or 0))
+    if r.sends == 1 then K.n.asked = K.n.asked + 1 else K.n.resent = K.n.resent + 1 end
+    note(string.format("%s died here while the host's is alive (%s of health): asked the host to kill it (%d)", name, e.hp and e.hp >= 0 and tostring(math.floor(e.hp)) or "?", r.sends))
+end
+
+-- JOINER, every frame (called by enemy_update): every SCAN_EVERY seconds.
+function K.update(now)
+    if not K.on or tracer.kill_suspect then return end
+    if now - K.scan_at < K.SCAN_EVERY then return end
+    K.scan_at = now
+    local seen = {}
+    for _, cand in ipairs(K.candidates()) do
+        seen[cand.name] = true
+        local ok, err = pcall(K.look, cand, now)
+        if not ok then
+            K.n.errors = K.n.errors + 1
+            K.last_error = tostring(err):sub(1, 100)
+        end
+    end
+    for name in pairs(K.recs) do
+        if not seen[name] then K.recs[name] = nil end
+    end
+end
+
+-- JOINER: the host's answer: "a|name|ok|how" or "a|name|no|why"
+function K.on_answer(rest)
+    local name, verdict, why = rest:match("^a|([%w_]+)|(%a+)|?(.*)$")
+    if not name then return end
+    local r = K.recs[name]
+    if verdict == "ok" then
+        K.n.ok = K.n.ok + 1
+        if r then r.answer, r.why = "ok", why end
+        note(string.format("%s: the host killed its own (%s)", name, why ~= "" and why or "ok"))
+    else
+        K.n.refused = K.n.refused + 1
+        if r then
+            r.why = why
+            if why:find("^not now") then r.answer = nil else r.final = "the host refused: " .. why end -- "not now" (a cutscene there) is asked again after RESEND_S
+        end
+        note(string.format("%s: the host did not kill it (%s)", name, why))
+    end
+end
+
+-- HOST: the finishing blow, up to TRIES times. Returns dead, how, tries.
+function K.host_kill(pick)
+    pcall(tracer.crumb, "kill", "killing " .. pick.name .. " for the joiner")
+    local dead, how, tries = false, nil, 0
+    for _ = 1, K.TRIES do
+        tries = tries + 1
+        local hp = read_health(pick)
+        local dmg = math.max((type(hp) == "number" and hp > 0 and hp or 0) * 4 + 1000, 3000)
+        local ok, okc, h = pcall(enemy.hit.apply, pick, dmg)
+        if ok and okc then how = h end
+        local okd, d = pcall(enemy_is_dead, pick)
+        if okd and d then dead = true break end
+    end
+    pcall(tracer.crumb, "clean", "kill done")
+    return dead, how, tries
+end
+
+-- HOST: "k|name|x|z" from the joiner.
+function K.on_ask(rest, now)
+    K.n.host_asked = K.n.host_asked + 1
+    local name, x, z = rest:match("^k|([%w_]+)|([%-%d%.]+)|([%-%d%.]+)$")
+    if not name then
+        K.n.host_refused = K.n.host_refused + 1
+        return
+    end
+    local function refuse(why)
+        K.n.host_refused = K.n.host_refused + 1
+        K.last = name .. ": not killed for the joiner (" .. why .. ")"
+        net_send(K.MSG, string.format("a|%s|no|%s", name, why))
+    end
+    if state.role ~= "host" then return refuse("I am not the host") end
+    if not K.on then return refuse("kill sharing is off here") end
+    if tracer.kill_suspect then return refuse("the last session ended inside a kill") end
+    if not enemy.hit.accept then return refuse("hits from the other player are switched off") end
+    if CFG.own and CFG.own.peer[name] then return refuse("the joiner runs it (the hand-over)") end
+    for i = #K.recent, 1, -1 do
+        if now - K.recent[i] > 1 then table.remove(K.recent, i) end
+    end
+    if #K.recent >= K.HOST_PER_S then return refuse("more than " .. K.HOST_PER_S .. " a second") end
+    K.recent[#K.recent + 1] = now
+    if #enemy.roots == 0 then
+        local okr, roots = pcall(find_enemy_roots)
+        if okr then enemy.roots = roots end
+    end
+    local px, pz = tonumber(x), tonumber(z)
+    local pick, pick_d
+    for _, e in ipairs(enemy.roots) do
+        if e.name == name then
+            local okp, p = pcall(function() return e.xf:call("get_Position") end)
+            local d = okp and p and ((p.x - px) ^ 2 + (p.z - pz) ^ 2) or 1e9
+            if not pick or d < pick_d then pick, pick_d = e, d end
+        end
+    end
+    if not pick then return refuse("no enemy called " .. name .. " here") end
+    if CFG.pool.is_boss(name, pick.last_max) then return refuse("a boss: the game's script decides") end
+    if (pick.last_flags or 1) >= 2 then return refuse(name .. " is not a live enemy (" .. flags_reason(pick.last_flags) .. ")") end
+    local quiet = CFG.guard and CFG.guard.why(now)
+    if quiet then return refuse("not now: " .. quiet) end
+    local okd, already = pcall(enemy_is_dead, pick)
+    if okd and already then
+        K.n.host_already_dead = K.n.host_already_dead + 1
+        K.last = name .. ": already dead here"
+        net_send(K.MSG, string.format("a|%s|ok|already dead", name))
+        return
+    end
+    local dead, how, tries = K.host_kill(pick)
+    if dead then
+        K.n.host_killed = K.n.host_killed + 1
+        K.last = string.format("%s: killed for the joiner (%s, %d hit%s)", name, tostring(how), tries, tries == 1 and "" or "s")
+        net_send(K.MSG, string.format("a|%s|ok|%s", name, tostring(how)))
+    else
+        K.n.host_failed = K.n.host_failed + 1
+        K.last = string.format("%s: could not be killed for the joiner (%d hits)", name, tries)
+        net_send(K.MSG, string.format("a|%s|no|would not die after %d hits", name, tries))
+    end
+    say("kill sync: " .. K.last)
+end
+
+net_on(K.MSG, function(payload)
+    local now = os.clock()
+    if payload:sub(1, 2) == "k|" then
+        local ok, err = pcall(K.on_ask, payload, now)
+        if not ok then K.n.errors, K.last_error = K.n.errors + 1, tostring(err):sub(1, 100) end
+    elseif payload:sub(1, 2) == "a|" then
+        pcall(K.on_answer, payload)
+    end
+end)
+
+function K.report()
+    local rows = {}
+    for name, r in pairs(K.recs) do
+        rows[#rows + 1] = { copy = name, seen_alive = r.alive_seen == true, dead_for_s = r.dead_since and math.floor((os.clock() - r.dead_since) * 10) / 10 or nil, asked = r.sends,
+            answer = r.answer, why = r.why, final = r.final, born_dead = r.born_dead, held = r.held }
+    end
+    table.sort(rows, function(a, b) return a.copy < b.copy end)
+    while #rows > 12 do table.remove(rows) end
+    return { about = "10.21: a kill either way (message kind 21). The host's death already finished the joiner's copy; new: my copy dying first asks the host to kill its own. Never a boss, never during a cutscene or a load, a body first seen dead asks nothing.",
+        on = K.on, crash_marker = tracer.kill_suspect or nil, counts = K.n, last = K.last, last_error = K.last_error, copies_watched = rows, history = K.history,
+        waits = { dead_for_s = K.DEAD_FOR, resend_s = K.RESEND_S, max_sends = K.MAX_SENDS, host_per_second = K.HOST_PER_S, host_hits = K.TRIES } }
+end
+end -- do
+
+-- =============================================================================================
+-- (10.21) MOLDED LIMBS AND HEADS (CFG.limb, message kind 22). Your 22 Nov request: "the molded also have not got synced limb and head removal".
+--
+-- WHAT IS KNOWN: the game keeps, per Molded, which parts are lost: enum app.MoldedActionController.LostPartsUnit.Type (Head 0, LeftArm 1, RightArm 2, LeftLeg 3, RightLeg 4, Body 5,
+-- Blade 6), a class ...LostPartsWork, a class app.EnemyLostPartsController, and per-family Em4000/4100/4200 LostPartsUserData. WHAT IS NOT KNOWN: the methods and fields of those
+-- classes (the dump I have lists names of types, not their members). So this module does not guess names. It
+--   1. reads the TYPE DEFINITIONS (reflection, no live object needed), one type per half second, and writes the members that matter to re7mp/limb_probe.json: send me that file;
+--   2. finds on each Molded body the components that could own the lost parts, and looks for ONE exact shape of method: "takes one LostPartsUnit.Type / LostPartsType, returns
+--      System.Boolean, has Lost in its name" (an "is this part lost" question), asked for the five parts Head, both arms, both legs;
+--   3. when such a question exists it can READ the mask here; a part lost on this side is sent as "l|name|mask" (bit = 1 << type), once per change and again every 10 s;
+--   4. the other side removes the part on its copy with a method of the shape "takes one LostPartsUnit.Type, has Lost in its name, is not is/has/get/can/check/set..." (up to
+--      3 candidates, in order of how likely the name is, the next one only when the part did not read as lost 1.5 s after the call);
+--   5. with no way to READ there is no way to know a part was lost, so nothing is sent or removed: the file and the debug section just say what was found.
+-- Never a body that is dead, never during a cutscene or a load (CFG.guard), a crash marker (stage "limb") switches it off at the next start.
+-- =============================================================================================
+CFG.limb = {
+    MSG = 22,
+    on = true,               -- both players (remembered as limb_sync)
+    SCAN_EVERY = 0.5, ANNOUNCE_S = 10, PENDING_S = 30, VERIFY_S = 1.5, PROBE_EVERY_S = 5, MAX_CANDIDATES = 3, HOST_PER_S = 20, CTL_RECHECK_S = 10,
+    SYNC_PARTS = { 0, 1, 2, 3, 4 }, SYNC_MASK = 31,
+    PART_NAMES = { [0] = "Head", [1] = "LeftArm", [2] = "RightArm", [3] = "LeftLeg", [4] = "RightLeg", [5] = "Body", [6] = "Blade" },
+    TYPES = {
+        "app.EnemyLostPartsController", "app.MoldedActionController", "app.MoldedActionController.LostPartsUnit", "app.MoldedActionController.LostPartsUnit.Type",
+        "app.MoldedActionController.LostPartsWork", "app.Em4000ActionController", "app.Em4100ActionController", "app.Em4200ActionController",
+        "app.AI.MoldedCommonBoard", "app.AI.MoldedCommonBoard.LostPartsUnit", "app.Em4000.Action.LostParts", "app.Em4000LostPartsUserData", "app.Em4000LostPartsUserData.Unit",
+        "app.Em4100LostPartsUserData", "app.Em4200LostPartsUserData", "app.CH9MoldedActionController", "app.CH9MoldedActionController.LostPartsWork",
+    },
+    PATS = { "^app%.Em4[012]00ActionController$", "^app%.MoldedActionController$", "^app%.CH%dMoldedActionController$", "EnemyLostPartsController$" },
+    recs = {},               -- body name -> { addr, ctls, ctls_at, mask, sent, sent_at, heard, apply = { [part] = state }, ... }
+    pending = {},            -- body name -> { mask, at }: what the other side said is lost, not yet (all) done here
+    how = {},                -- controller type name -> what was found in its definition
+    types_done = 0, scan_at = -100, recent = {}, history = {}, events = {},
+    probe = { types = {}, bodies = {} }, probe_dirty = false, probe_at = -100,
+    n = { read_ok = 0, read_none = 0, sent = 0, resent = 0, heard = 0, applied = 0, apply_unverified = 0, apply_failed = 0, no_apply_method = 0, not_quiet = 0, pending_gave_up = 0,
+        refused = 0, errors = 0, bodies_seen = 0 },
+    last = "nothing yet",
+}
+
+do
+local L = CFG.limb
+
+local function note(text)
+    L.last = text
+    L.history[#L.history + 1] = string.format("%.0f s: %s", os.clock(), text)
+    while #L.history > 16 do table.remove(L.history, 1) end
+    say("limb sync: " .. text)
+end
+
+local function tname(t)
+    if t == nil then return nil end
+    local ok, v = pcall(function() return t:get_full_name() end)
+    return ok and v or nil
+end
+
+local function event(text)
+    L.events[#L.events + 1] = string.format("%.0f s: %s", os.clock(), text)
+    while #L.events > 30 do table.remove(L.events, 1) end
+    L.probe_dirty = true
+end
+
+local function bit_of(part) return 1 << part end
+local function parts_text(mask)
+    local out = {}
+    for p = 0, 6 do if (mask >> p) & 1 == 1 then out[#out + 1] = L.PART_NAMES[p] end end
+    return #out > 0 and table.concat(out, "+") or "none"
+end
+
+-- The type and its parents (up to 4 hops, stopping at System.* / via.*): fn(typedef, name)
+local function walk_type(td, fn)
+    local t, hops = td, 0
+    while t and hops < 4 do
+        local name = tname(t) or "?"
+        if hops > 0 and (name:find("^System%.") or name:find("^via%.")) then break end
+        fn(t, name)
+        local ok, up = pcall(function() return t:get_parent_type() end)
+        t = ok and up or nil
+        hops = hops + 1
+    end
+end
+
+-- The plain values (bool / number / string) of an object's fields, and the type of the others: { { name, type, value } ... } (at most `cap`)
+function L.scalar_fields(obj, cap)
+    local out = {}
+    local okt, td = pcall(function() return obj:get_type_definition() end)
+    if not okt or td == nil then return out end
+    walk_type(td, function(t)
+        local okf, fl = pcall(function() return t:get_fields() end)
+        for _, f in ipairs(okf and fl or {}) do
+            if #out >= (cap or 60) then return end
+            local okn, fname = pcall(function() return f:get_name() end)
+            local oks, st = pcall(function() return f:is_static() end)
+            if okn and not (oks and st) then
+                local ft = tname(select(2, pcall(function() return f:get_type() end)))
+                local okv, v = pcall(function() return obj:get_field(fname) end)
+                local row = { name = fname, type = ft }
+                if okv and (type(v) == "boolean" or type(v) == "number" or type(v) == "string") then row.value = v end
+                out[#out + 1] = row
+            end
+        end
+    end)
+    return out
+end
+
+-- The elements of an array / List the game gave: get_elements, else get_Count + get_Item (at most 16).
+function L.elements(col)
+    local ok, els = pcall(function() return col:get_elements() end)
+    if ok and type(els) == "table" then return els end
+    local okc, n = pcall(function() return col:call("get_Count") end)
+    local out = {}
+    if okc and type(n) == "number" and n > 0 then
+        for i = 0, math.min(n, 16) - 1 do
+            local oki, it = pcall(function() return col:call("get_Item", i) end)
+            if oki and it ~= nil then out[#out + 1] = it end
+        end
+    end
+    return out
+end
+
+-- The components of a body that could own its lost parts: { { obj, tn } } (at most 4)
+function L.controllers(go)
+    local out = {}
+    local ok, comps = pcall(function() return go:call("get_Components"):get_elements() end)
+    if not ok or not comps then return out end
+    for _, c in ipairs(comps) do
+        local okn, full = pcall(function() return c:get_type_definition():get_full_name() end)
+        if okn and type(full) == "string" then
+            for _, pat in ipairs(L.PATS) do
+                if full:find(pat) then out[#out + 1] = { obj = c, tn = full } break end
+            end
+        end
+        if #out >= 4 then break end
+    end
+    return out
+end
+
+local function rank_read(n) return n:find("^is") and 1 or (n:find("^has") and 2 or 3) end
+local function rank_apply(n)
+    if n:find("^request") then return 1 end
+    if n:find("^[Ll]ost") then return 2 end
+    if n:find("^break") or n:find("^cut") or n:find("^remove") or n:find("^dismember") then return 3 end
+    if n:find("^start") or n:find("^exec") or n:find("^do") then return 4 end
+    return 5
+end
+
+-- What one controller type offers (looked at once per type): the "is this part lost" methods, the "make it lost" methods, the work collections.
+function L.learn(ctl)
+    local h = L.how[ctl.tn]
+    if h then return h end
+    h = { type = ctl.tn, read_methods = {}, apply_methods = {}, other_lost_methods = {}, work_fields = {}, apply_errors = {} }
+    L.how[ctl.tn] = h
+    local okd, td = pcall(function() return ctl.obj:get_type_definition() end)
+    if not okd or td == nil then h.error = "no type definition" return h end
+    walk_type(td, function(t, owner)
+        local okm, ml = pcall(function() return t:get_methods() end)
+        for _, m in ipairs(okm and ml or {}) do
+            local okn, mname = pcall(function() return m:get_name() end)
+            if okn and type(mname) == "string" and mname:find("[Ll]ost") then
+                local okc, np = pcall(function() return m:get_num_params() end)
+                local okr, rt = pcall(function() return m:get_return_type() end)
+                local rtn = okr and tname(rt) or nil
+                local pt
+                if okc and np == 1 then
+                    local okp, ps = pcall(function() return m:get_param_types() end)
+                    pt = okp and type(ps) == "table" and tname(ps[1]) or nil
+                end
+                if pt and (pt:find("LostPartsUnit%.Type$") or pt:find("LostPartsType$")) then
+                    if rtn == "System.Boolean" and not mname:find("^set") then
+                        h.read_methods[#h.read_methods + 1] = { name = mname, rank = rank_read(mname), owner = owner }
+                    elseif not (mname:find("^is") or mname:find("^has") or mname:find("^get") or mname:find("^can") or mname:find("^check") or mname:find("^on")) then
+                        h.apply_methods[#h.apply_methods + 1] = { name = mname, rank = rank_apply(mname), owner = owner, returns = rtn }
+                    end
+                elseif #h.other_lost_methods < 12 then
+                    h.other_lost_methods[#h.other_lost_methods + 1] = string.format("%s(%s params) -> %s", mname, tostring(okc and np or "?"), tostring(rtn))
+                end
+            end
+        end
+        local okf, fl = pcall(function() return t:get_fields() end)
+        for _, f in ipairs(okf and fl or {}) do
+            local okn, fname = pcall(function() return f:get_name() end)
+            local ft = okn and tname(select(2, pcall(function() return f:get_type() end))) or nil
+            if okn and ft and ft:find("LostPartsWork") and #h.work_fields < 4 then h.work_fields[#h.work_fields + 1] = { name = fname, type = ft, owner = owner } end
+        end
+    end)
+    local function by_rank(a, b) if a.rank ~= b.rank then return a.rank < b.rank end return a.name < b.name end
+    table.sort(h.read_methods, by_rank)
+    table.sort(h.apply_methods, by_rank)
+    while #h.apply_methods > L.MAX_CANDIDATES do table.remove(h.apply_methods) end
+    note(string.format("%s: %d 'is it lost' method(s) %s, %d 'make it lost' candidate(s) %s, %d lost-parts collection(s)", ctl.tn, #h.read_methods,
+        #h.read_methods > 0 and ("(first: " .. h.read_methods[1].name .. ")") or "", #h.apply_methods, #h.apply_methods > 0 and ("(first: " .. h.apply_methods[1].name .. ")") or "", #h.work_fields))
+    L.probe_dirty = true
+    return h
+end
+
+-- The mask of lost parts (bit = 1 << type, Head..RightLeg) of one controller, how it was read, or nil and why.
+function L.read_ctl(ctl)
+    local h = L.learn(ctl)
+    local m = h.read_methods[1]
+    if m then
+        local first = not h.read_crumbed
+        if first then -- (the first call of a method nobody has seen answer: named by a crash marker before it runs, cleared right after; the later calls are the same call)
+            h.read_crumbed = true
+            pcall(tracer.crumb, "limb", "first reading of lost parts: " .. ctl.tn .. "." .. m.name)
+        end
+        local mask, asked = 0, 0
+        for _, p in ipairs(L.SYNC_PARTS) do
+            local ok, v = pcall(function() return ctl.obj:call(m.name, p) end)
+            if ok and type(v) == "boolean" then
+                asked = asked + 1
+                if v then mask = mask | bit_of(p) end
+            end
+        end
+        if first then pcall(tracer.crumb, "clean", "limb first reading done") end
+        if asked == #L.SYNC_PARTS then return mask, "method " .. m.name end
+        return nil, "method " .. m.name .. " did not answer yes/no for every part"
+    end
+    for _, wf in ipairs(h.work_fields) do
+        local okv, col = pcall(function() return ctl.obj:get_field(wf.name) end)
+        if okv and col ~= nil then
+            local els = L.elements(col)
+            local mask, any_flag = 0, false
+            for idx, el in ipairs(els) do
+                local part, lost = idx - 1, nil
+                for _, row in ipairs(L.scalar_fields(el, 30)) do
+                    if row.type and row.type:find("LostPartsUnit%.Type$") and type(row.value) == "number" then part = row.value end
+                    if type(row.value) == "boolean" and row.name:find("[Ll]ost") then any_flag = true lost = lost or row.value end
+                end
+                if lost and part >= 0 and part <= 4 then mask = mask | bit_of(part) end
+            end
+            if any_flag then return mask, "collection " .. wf.name end
+        end
+    end
+    return nil, "no way found to ask which parts are lost"
+end
+
+-- Of a body (a record with .go): the mask, the controller it came from and how; cached controllers, looked for again every CTL_RECHECK_S.
+function L.read_body(r, rec, now)
+    if not r.ctls or now - (r.ctls_at or -100) >= L.CTL_RECHECK_S then
+        r.ctls, r.ctls_at = L.controllers(rec.go), now
+    end
+    local why
+    for _, ctl in ipairs(r.ctls) do
+        local mask, how = L.read_ctl(ctl)
+        if mask ~= nil then return mask, ctl, how end
+        why = how
+    end
+    return nil, nil, why or (#r.ctls == 0 and "no component that could own the lost parts" or "?")
+end
+
+-- The bodies of this game that are Molded of the host's world: { name, rec }
+function L.candidates()
+    local out = {}
+    if state.role == "host" then
+        for _, e in ipairs(enemy.roots or {}) do
+            if e.go and type(e.name) == "string" and e.name:match("^Em4[012]00_") and not (CFG.own and CFG.own.peer[e.name]) then out[#out + 1] = { name = e.name, rec = e } end
+        end
+    else
+        for name, c in pairs(CFG.molded and CFG.molded.copies or {}) do
+            if c.go and not c.dead_here then
+                c.krec = c.krec or c.rec or { name = name, go = c.go, xf = c.xf, family = enemy.base(name) } -- (the record read_health / enemy_is_dead want; shared with CFG.kill)
+                out[#out + 1] = { name = name, rec = c.krec }
+            end
+        end
+    end
+    return out
+end
+
+local function dead_body(rec)
+    pcall(read_health, rec)
+    local ok, d = pcall(enemy_is_dead, rec)
+    return ok and d == true
+end
+
+-- A part that was asked for on this body and now reads as lost: the method that was called worked (counted once).
+function L.verify(r, mask)
+    for part, st in pairs(r.apply) do
+        if st.at and not st.done and not st.failed and (mask >> part) & 1 == 1 then
+            st.done, st.how = true, "verified: " .. tostring(st.method)
+            L.n.applied = L.n.applied + 1
+            note(string.format("%s of %s removed with %s (it reads as lost now)", L.PART_NAMES[part], r.name, tostring(st.method)))
+            event(string.format("%s %s: removed with %s, verified", r.name, L.PART_NAMES[part], tostring(st.method)))
+        end
+    end
+end
+
+-- One step of removing `part` on this body, from the candidates in order. State per part: { i = candidates tried, at = when the last was called, done, failed, how }
+function L.apply_step(r, ctl, part, now)
+    local h = L.learn(ctl)
+    local st = r.apply[part]
+    if not st then st = { i = 0 } r.apply[part] = st end
+    if st.done or st.failed then return end
+    local mask = L.read_ctl(ctl)
+    if mask ~= nil and (mask >> part) & 1 == 1 then return end -- (it reads as lost: L.verify has counted it, or it was lost here already)
+    if mask == nil then
+        L.n.no_apply_method = L.n.no_apply_method + 1
+        st.failed, st.how = true, "cannot read the lost parts, so it cannot be checked"
+        return
+    end
+    if st.at and now - st.at < L.VERIFY_S then return end
+    if st.at then -- called, and the part still does not read as lost: this candidate did not work
+        h.apply_errors[st.method] = "called without error, but the part did not read as lost after " .. L.VERIFY_S .. " s"
+        st.at = nil
+    end
+    local m = h.apply_methods[st.i + 1]
+    if not m or st.i >= L.MAX_CANDIDATES then
+        st.failed, st.how = true, (#h.apply_methods == 0) and "no method takes a part type and has Lost in its name" or "none of the candidates made the part read as lost"
+        L.n.apply_failed = L.n.apply_failed + 1
+        if #h.apply_methods == 0 then L.n.no_apply_method = L.n.no_apply_method + 1 end
+        note(string.format("%s of %s could not be removed here: %s (see re7mp/limb_probe.json)", L.PART_NAMES[part], r.name, st.how))
+        event(string.format("%s %s: not removed: %s", r.name, L.PART_NAMES[part], st.how))
+        return
+    end
+    st.i = st.i + 1
+    pcall(tracer.crumb, "limb", string.format("removing %s of %s with %s", L.PART_NAMES[part], r.name, m.name))
+    local ok, err = pcall(function() ctl.obj:call(m.name, part) end)
+    pcall(tracer.crumb, "clean", "limb done")
+    if ok then
+        st.at, st.method = now, m.name
+    else
+        h.apply_errors[m.name] = tostring(err):sub(1, 90)
+        L.n.errors = L.n.errors + 1
+    end
+end
+
+-- One body, every SCAN_EVERY: read, send what is new, remove what the other side lost.
+function L.look(cand, now)
+    local name, rec = cand.name, cand.rec
+    local okd, addr = pcall(function() return rec.go:get_address() end)
+    local r = L.recs[name]
+    if r and okd and r.addr and r.addr ~= addr then r = nil end -- another body under that name: its history starts again
+    if not r then
+        r = { name = name, addr = okd and addr or nil, sent = 0, heard = 0, apply = {}, family = name:match("^(Em4[012]00)_") }
+        L.recs[name] = r
+        L.n.bodies_seen = L.n.bodies_seen + 1
+        local pend = L.pending[name]
+        if pend then r.heard = r.heard | pend.mask end
+    end
+    if dead_body(rec) then r.dead = true return end
+    r.dead = nil
+    local mask, ctl, how = L.read_body(r, rec, now)
+    r.read_how = how
+    if mask == nil then
+        L.n.read_none = L.n.read_none + 1
+        r.mask = nil
+    else
+        L.n.read_ok = L.n.read_ok + 1
+        if r.mask ~= mask then
+            event(string.format("%s reads as lost: %s (%s)", name, parts_text(mask), how))
+        end
+        r.mask = mask
+        L.verify(r, mask)
+    end
+    if not r.described and r.ctls and #r.ctls > 0 then
+        r.described = true
+        L.describe(name, r.family, rec, r.ctls)
+    end
+    local quiet = CFG.guard and CFG.guard.why(now)
+    -- 1. what the other side lost, here
+    local pend = L.pending[name]
+    if pend and mask ~= nil and ctl then
+        local missing = pend.mask & ~mask & L.SYNC_MASK
+        if missing == 0 then
+            L.pending[name] = nil
+        elseif quiet then
+            L.n.not_quiet = L.n.not_quiet + 1
+        else
+            for _, p in ipairs(L.SYNC_PARTS) do
+                if (missing >> p) & 1 == 1 then L.apply_step(r, ctl, p, now) end
+            end
+        end
+    end
+    if pend and now - pend.at > L.PENDING_S and L.pending[name] then
+        L.n.pending_gave_up = L.n.pending_gave_up + 1
+        note(string.format("%s: the other player's lost parts (%s) could not be applied in %d s: given up", name, parts_text(pend.mask), L.PENDING_S))
+        L.pending[name] = nil
+    end
+    -- 2. what was lost here, to the other side (not the bits it told me about: no echo)
+    if mask ~= nil then
+        local mine = mask & L.SYNC_MASK & ~r.heard
+        local fresh = mine & ~r.sent
+        local due = mine ~= 0 and r.sent_at and now - r.sent_at >= L.ANNOUNCE_S
+        if fresh ~= 0 or due then
+            if quiet then
+                L.n.not_quiet = L.n.not_quiet + 1
+            else
+                net_send(L.MSG, string.format("l|%s|%d", name, mine))
+                if fresh ~= 0 then L.n.sent = L.n.sent + 1 else L.n.resent = L.n.resent + 1 end
+                r.sent, r.sent_at = r.sent | mine, now
+                if fresh ~= 0 then note(string.format("%s lost %s here: told the other player", name, parts_text(fresh))) end
+            end
+        end
+    end
+end
+
+-- BOTH players, every frame while enemy sync is on (the joiner from enemy_update, the host from enemy_host_update).
+function L.update(now)
+    if not L.on or tracer.limb_suspect then return end
+    if now - L.scan_at < L.SCAN_EVERY then return end
+    L.scan_at = now
+    if L.types_done < #L.TYPES then -- the type definitions for the probe file, one per scan
+        L.types_done = L.types_done + 1
+        local tn = L.TYPES[L.types_done]
+        local ok, d = pcall(CFG.car.type_dump, tn)
+        L.probe.types[#L.probe.types + 1] = ok and L.slim(d) or { type = tn, error = tostring(d):sub(1, 100) }
+        L.probe_dirty = true
+    end
+    local seen = {}
+    for _, cand in ipairs(L.candidates()) do
+        seen[cand.name] = true
+        local ok, err = pcall(L.look, cand, now)
+        if not ok then
+            L.n.errors = L.n.errors + 1
+            L.last_error = tostring(err):sub(1, 100)
+        end
+    end
+    for name in pairs(L.recs) do
+        if not seen[name] then L.recs[name] = nil end
+    end
+    for name, p in pairs(L.pending) do
+        if not seen[name] and now - p.at > L.PENDING_S then
+            L.n.pending_gave_up = L.n.pending_gave_up + 1
+            L.pending[name] = nil
+        end
+    end
+    if L.probe_dirty and now - L.probe_at >= L.PROBE_EVERY_S then L.save(now) end
+end
+
+-- THE OTHER PLAYER: "l|name|mask" (cumulative: everything lost there). Recorded at once, done by L.update (a body that is not there yet is waited for).
+function L.on_message(rest, now)
+    local name, m = rest:match("^l|([%w_]+)|(%d+)$")
+    local mask = tonumber(m)
+    if not name or not mask then L.n.refused = L.n.refused + 1 return end
+    mask = mask & L.SYNC_MASK
+    if not L.on or tracer.limb_suspect then L.n.refused = L.n.refused + 1 return end
+    if state.role == "host" and not enemy.hit.accept then L.n.refused = L.n.refused + 1 return end -- (the box "hits from the other player" is off here)
+    if not name:match("^Em4[012]00_") then L.n.refused = L.n.refused + 1 return end
+    if CFG.own and CFG.own.peer[name] then L.n.refused = L.n.refused + 1 return end
+    for i = #L.recent, 1, -1 do
+        if now - L.recent[i] > 1 then table.remove(L.recent, i) end
+    end
+    if #L.recent >= L.HOST_PER_S then L.n.refused = L.n.refused + 1 return end
+    L.recent[#L.recent + 1] = now
+    L.n.heard = L.n.heard + 1
+    local r = L.recs[name]
+    if r then r.heard = r.heard | mask end
+    local pend = L.pending[name]
+    if pend then pend.mask = pend.mask | mask else L.pending[name] = { mask = mask, at = now } end
+    L.last = string.format("%s: the other player says %s is lost there", name, parts_text(mask))
+end
+
+net_on(L.MSG, function(payload)
+    local ok, err = pcall(L.on_message, payload, os.clock())
+    if not ok then L.n.errors, L.last_error = L.n.errors + 1, tostring(err):sub(1, 100) end
+end)
+
+-- ---- the probe file ----
+function L.slim(d)
+    if type(d) ~= "table" or not d.found then return d end
+    local total = (d.fields_total or 0) + (d.methods_total or 0)
+    if total <= 60 then return d end
+    local function keep(row) return row.name and (row.name:find("[Ll]ost") or row.name:find("[Pp]arts") or row.name:find("[Bb]reak") or row.name:find("[Dd]ismember") or row.name:find("[Ss]ever")) end
+    local out = { type = d.type, found = true, parent = d.parent, fields = {}, methods = {}, fields_total = d.fields_total, methods_total = d.methods_total,
+        note = "only members with lost / parts / break / dismember / sever in the name (the type has " .. total .. " members)" }
+    for _, f in ipairs(d.fields or {}) do if keep(f) then out.fields[#out.fields + 1] = f end end
+    for _, m in ipairs(d.methods or {}) do if keep(m) then out.methods[#out.methods + 1] = m end end
+    return out
+end
+
+-- The first body of each family that has a controller: the fields of every controller and the first elements of its lost-parts collections.
+function L.describe(name, family, rec, ctls)
+    local key = (family or name) .. "@" .. tostring(state.role)
+    if L.probe.bodies[key] then return end
+    local out = { body = name, controllers = {} }
+    for _, ctl in ipairs(ctls or {}) do
+        local row = { type = ctl.tn, fields = L.scalar_fields(ctl.obj, 80), collections = {} }
+        local h = L.how[ctl.tn]
+        for _, wf in ipairs(h and h.work_fields or {}) do
+            local okv, col = pcall(function() return ctl.obj:get_field(wf.name) end)
+            local c = { field = wf.name, type = wf.type, elements = {} }
+            if okv and col ~= nil then
+                for i, el in ipairs(L.elements(col)) do
+                    if i > 8 then break end
+                    c.elements[#c.elements + 1] = L.scalar_fields(el, 30)
+                end
+            end
+            row.collections[#row.collections + 1] = c
+        end
+        out.controllers[#out.controllers + 1] = row
+    end
+    L.probe.bodies[key] = out
+    L.probe_dirty = true
+end
+
+function L.save(now)
+    L.probe_at, L.probe_dirty = now, false
+    local copy = {}
+    for tn, h in pairs(L.how) do
+        copy[#copy + 1] = { type = tn, read_methods = h.read_methods, apply_methods = h.apply_methods, other_lost_methods = h.other_lost_methods, lost_collections = h.work_fields,
+            apply_errors = h.apply_errors, error = h.error }
+    end
+    table.sort(copy, function(a, b) return a.type < b.type end)
+    local res = { about = "re7mp 10.21 Molded limb probe: reads the type definitions and, on the first Molded body of each family, the lost-parts fields. Send this file.",
+        build = CFG.BUILD, role = state.role, types = L.probe.types, bodies = L.probe.bodies, what_was_found = copy, events = L.events, written_at = os.time() }
+    local ok, where = CFG.save_json(FILES.MAP.limb_probe[1], FILES.MAP.limb_probe[2], res)
+    if not ok then L.n.errors = L.n.errors + 1 L.last_error = tostring(where):sub(1, 100) end
+end
+
+function L.report()
+    local rows = {}
+    for name, r in pairs(L.recs) do
+        local apply = {}
+        for p, st in pairs(r.apply) do apply[#apply + 1] = L.PART_NAMES[p] .. ": " .. (st.done and st.how or st.failed and ("failed: " .. tostring(st.how)) or ("trying " .. tostring(st.method))) end
+        table.sort(apply)
+        rows[#rows + 1] = { body = name, lost_here = r.mask and parts_text(r.mask) or "cannot be read", read_how = r.read_how, told_other = parts_text(r.sent), told_by_other = parts_text(r.heard),
+            removing = apply, dead = r.dead }
+    end
+    table.sort(rows, function(a, b) return a.body < b.body end)
+    while #rows > 10 do table.remove(rows) end
+    local pend = {}
+    for name, p in pairs(L.pending) do pend[#pend + 1] = name .. ": " .. parts_text(p.mask) end
+    table.sort(pend)
+    local how = {}
+    for tn, h in pairs(L.how) do
+        how[#how + 1] = { type = tn, is_lost_methods = #h.read_methods, first_is_lost = h.read_methods[1] and h.read_methods[1].name or nil, make_lost_candidates = #h.apply_methods,
+            first_make_lost = h.apply_methods[1] and h.apply_methods[1].name or nil, collections = #h.work_fields, apply_errors = h.apply_errors, error = h.error }
+    end
+    table.sort(how, function(a, b) return a.type < b.type end)
+    return { about = "10.21: limbs and heads of the Molded, both ways (message kind 22). Partly GUESSWORK until a debug file shows the game's real methods: it only acts through a method with an exact shape (see CHANGELOG) and "
+        .. "writes re7mp/limb_probe.json with what the game offers. Nothing here has run in the real game.",
+        on = L.on, crash_marker = tracer.limb_suspect or nil, counts = L.n, last = L.last, last_error = L.last_error, found = how, bodies = rows, waiting_for_a_body = pend,
+        type_definitions_read = string.format("%d of %d", L.types_done, #L.TYPES), history = L.history, events = L.events,
+        waits = { scan_s = L.SCAN_EVERY, announce_s = L.ANNOUNCE_S, verify_s = L.VERIFY_S, pending_s = L.PENDING_S, candidates = L.MAX_CANDIDATES } }
 end
 end -- do
 
@@ -9667,11 +12276,9 @@ local death = { mode = 4, suppress_until = 0, last = "No deaths yet.", sent = 0,
 
 -- Was the game over that just came an execution (a scripted kill) and not a hit that took the health to 0? A hit that would kill is held
 -- at 1 (then you are down and there is no game over), so a game over that comes while you are not down and your health is above 1 is a
--- scripted kill; so is one that follows a grab call (only when the execution test's log is on, it is what hooks those).
+-- scripted kill. (10.23: a game over that followed a grab call used to count too, but only while the execution test's log was ticked; that log is gone.)
 function death.looks_like_execution(now)
     if pstat.downed then return false, "you were down already" end
-    local g = RE7.exec and RE7.exec.last_call_at
-    if g and now - g <= 20 then return true, string.format("a grab call came %.1f s before", now - g) end
     if pstat.hp ~= nil and pstat.hp > 1.5 then return true, string.format("health was %.0f, not 0 or 1", pstat.hp) end
     return false, pstat.hp == nil and "your health can't be read" or "health was 1 or less: a death by damage"
 end
@@ -9731,6 +12338,7 @@ end)
 RE7.on_death_signal = function(source)
     if pstat.reset_down then pstat.reset_down("the game ended", true) end
     local now = os.clock()
+    if CFG.friend and CFG.friend.over then pcall(CFG.friend.over.arm, source, now) end -- (10.9) Ethan's friend gets up and comes to you after the reload
     if now < death.suppress_until then return end
     say("death signal: " .. tostring(source))
     death.suppress_until = now + 30 -- the game-over screen can set the mode more than once
@@ -9766,205 +12374,12 @@ end
 RE7.on_gamemode = function(value)
     say("game mode set to " .. tostring(value))
     if RE7.death_value == nil or value ~= RE7.death_value then return end
-    RE7.exec.record("GameMode." .. tostring(RE7.death_name), "over")
-    if RE7.exec.recently_blocked() then return end
     RE7.on_death_signal("game mode " .. tostring(RE7.death_name))
 end
 
-----------------------------------------------------------------------------------------------
--- EXECUTION TEST. You asked whether an enemy execution (Jack's grab, Mia in the attic ...) gives a downed screen instead
--- of death, because the finishers "must have different game over calls". In Downed mode a hit that would kill you is held at 1
--- health, but a finisher kills by script, not by damage, so the hold cannot stop it, and no debug file has ever shown which
--- calls a finisher makes (every file so far is from a session with no death at all). Two switches, both off at every start, not
--- saved:
---   1. LOG: hooks a few methods of the grab classes (the census names app.PlayerGrappleEm3000, app.Em3000Grapple, Em3100Grapple,
---      Em4000Grapple, and app.GameOverScreen; at most 24 methods, never getters, 40 recorded calls per method) and writes every
---      call, every game-over call (the three the script already watches) and the player's health at that moment into the
---      debug file (health.execution_test). The verdict line says whether the first game over followed a grab and whether health
---      was still above 0 (then holding the health cannot work for that kind of death).
---   2. BLOCK (needs Downed mode, the other player connected and not down): the game-over calls setGameOverFlag(true) / doDie are
---      skipped, health is set to 1 and you go "down" like after a hit. At most 3 per minute, so a game that keeps asking still
---      ends. I do not know what the game does after a skipped game over (the grab animation may carry on and leave you stuck);
---      that is what the test is for.
-----------------------------------------------------------------------------------------------
-RE7.exec = { on = false, block = false, installed = false, hooks = {}, events = {}, counts = {}, fires = {}, overs = 0,
-    first_over = nil, before_over = nil, blocked = 0, blocked_at = {}, not_blocked = 0, note = "off" }
-RE7.exec.PRIORITY = {
-    { "die", "dead", "death", "kill", "finish", "execut", "gameover" },
-    { "grapple", "grab", "catch", "caught", "hold", "release", "escape", "cancel", "struggle", "shake", "begin", "start", "end" },
-}
-RE7.exec.TYPES = { "app.PlayerGrappleEm2000", "app.PlayerGrappleEm3000", "app.Em2000Grapple", "app.Em3000Grapple",
-    "app.Em3100Grapple", "app.Em4000Grapple", "app.GameOverScreen" }
-RE7.exec.BLOCKABLE = { dodie = true, setgameoverflag = true, requestgameover = true, startgameover = true, dogameover = true }
-RE7.exec.MAX_HOOKS, RE7.exec.MAX_PER_TYPE, RE7.exec.MAX_FIRES, RE7.exec.RING = 24, 8, 40, 60
-
-function RE7.exec.record(what, kind)
-    local X = RE7.exec
-    if not (X.on or X.block) then return end
-    local now = os.clock()
-    local prev = X.events[#X.events]
-    local ev = { t = math.floor(now * 100) / 100, what = what, kind = kind or "call", hp = pstat.hp, max = pstat.max, down = pstat.downed or nil,
-        gap = prev and (math.floor((now - prev.t) * 100) / 100) or nil }
-    X.events[#X.events + 1] = ev
-    if #X.events > X.RING then table.remove(X.events, 1) end
-    X.counts[what] = (X.counts[what] or 0) + 1
-    if kind == "over" then
-        X.overs = X.overs + 1
-        if not X.first_over then
-            X.first_over = ev
-            X.before_over = {}
-            for i = math.max(1, #X.events - 20), #X.events - 1 do X.before_over[#X.before_over + 1] = X.events[i] end -- (the 20 calls before it)
-        end
-    end
-end
-
-function RE7.exec.fire(what)
-    local X = RE7.exec
-    if not X.on then return end
-    if not what:find("GameOverScreen", 1, true) then X.last_call_at = os.clock() end -- (the game-over screen opening is not a grab)
-    X.fires[what] = (X.fires[what] or 0) + 1
-    if X.fires[what] > X.MAX_FIRES then return end
-    X.record(what, "call")
-end
-
-function RE7.exec.hookable(name)
-    local low = name:lower()
-    if name == ".ctor" or name == ".cctor" or low:find("update", 1, true) or low == "doawake" or low == "doondestroy"
-        or low == "finalize" or low == "dispose" then return false end
-    if low:sub(1, 4) == "get_" or low:sub(1, 2) == "is" or low:sub(1, 3) == "has" or low:sub(1, 3) == "can" then return false end
-    return true
-end
-
--- Hooks the methods (once, when the first switch is ticked). A crumb names the method being hooked, so a crash says which.
-function RE7.exec.install()
-    local X = RE7.exec
-    if X.installed then return end
-    X.installed = true
-    local types, seen = {}, {}
-    local function add(tn) if not seen[tn] then seen[tn] = true types[#types + 1] = tn end end
-    pcall(function()
-        local go = player_object()
-        for _, c in ipairs(go and go:call("get_Components"):get_elements() or {}) do
-            local full = c:get_type_definition():get_full_name()
-            if full:find("Grapple", 1, true) then add(full) end
-        end
-    end)
-    for _, tn in ipairs(X.TYPES) do add(tn) end
-    for _, tn in ipairs(types) do
-        local td = sdk.find_type_definition(tn)
-        if not td then
-            say("execution test: " .. tn .. " does not exist in this game (skipped)")
-        else
-            local picked, taken = {}, {}
-            local methods = td:get_methods() or {}
-            if tn:find("GameOver", 1, true) then -- the game-over screen is small: every method of it counts, whatever it is called
-                for _, m in ipairs(methods) do
-                    local name = m:get_name()
-                    if #picked < X.MAX_PER_TYPE and not taken[name] and X.hookable(name) then taken[name] = true picked[#picked + 1] = name end
-                end
-            end
-            for _, group in ipairs(X.PRIORITY) do
-                for _, m in ipairs(methods) do
-                    local name = m:get_name()
-                    local low = name:lower()
-                    if #picked < X.MAX_PER_TYPE and not taken[name] and X.hookable(name) then
-                        for _, w in ipairs(group) do
-                            if low:find(w, 1, true) then taken[name] = true picked[#picked + 1] = name break end
-                        end
-                    end
-                end
-            end
-            for _, name in ipairs(picked) do
-                if #X.hooks >= X.MAX_HOOKS then break end
-                pcall(tracer.crumb, "hooking", "execution test: " .. tn .. "." .. name)
-                local what = tn .. "." .. name
-                if hook_method(tn, name, function() X.fire(what) end) then X.hooks[#X.hooks + 1] = what end
-            end
-        end
-    end
-    pcall(tracer.crumb, "clean", "execution test hooks installed")
-    say(string.format("execution test: %d methods are watched: %s", #X.hooks, #X.hooks > 0 and table.concat(X.hooks, ", ") or "none"))
-end
-
-function RE7.exec.set_on(v)
-    local X = RE7.exec
-    X.on = v
-    X.note = v and "logging" or "off"
-    if v then X.install() end
-    say("execution test: logging " .. (v and "ON (experimental)" or "off"))
-end
-
-function RE7.exec.set_block(v)
-    local X = RE7.exec
-    X.block = v
-    say("execution test: blocking a game over and going down instead " .. (v and "ON (experimental)" or "off"))
-end
-
--- A game-over call is about to run: skip it (and hold you at 1, down) instead? Only for the few calls that end the game.
-function RE7.exec.block_wanted(tn, name)
-    local X = RE7.exec
-    if not X.block or not X.BLOCKABLE[name:lower()] then return false end
-    local now = os.clock()
-    if not (pstat.can_catch and pstat.can_catch(now)) then
-        X.note = "a game over was NOT blocked: Downed mode needs the other player connected and not down"
-        return false
-    end
-    local recent = {}
-    for _, t in ipairs(X.blocked_at) do if now - t < 60 then recent[#recent + 1] = t end end
-    X.blocked_at = recent
-    if #recent >= 3 then -- a game that keeps asking must still be able to end
-        X.not_blocked = X.not_blocked + 1
-        X.note = "a game over was NOT blocked: three were blocked in the last minute already"
-        X.record(tn .. "." .. name .. " (let through: 3 blocked in the last minute)", "info")
-        return false
-    end
-    X.blocked_at[#X.blocked_at + 1] = now
-    X.blocked = X.blocked + 1
-    X.note = "blocked " .. tn .. "." .. name
-    X.record(tn .. "." .. name .. " BLOCKED", "blocked")
-    pcall(pstat.exec_catch, tn .. "." .. name)
-    say("execution test: " .. X.note .. "; held at 1 health, down")
-    return true
-end
-
--- A game over was blocked in the last 5 s: the other calls that belong to it (the pause flag, the GameMode switch) are not a death
--- of their own. They are still recorded, and still run (only setGameOverFlag(true) / doDie are ever skipped).
-function RE7.exec.recently_blocked()
-    local X = RE7.exec
-    local last = X.blocked_at[#X.blocked_at]
-    return X.block and last ~= nil and os.clock() - last < 5
-end
-
-function RE7.exec.verdict()
-    local X = RE7.exec
-    if X.overs == 0 then return X.on and "no game over seen yet" or "not running" end
-    local o, g = X.first_over, nil
-    for i = #(X.before_over or {}), 1, -1 do
-        local e = X.before_over[i]
-        if e.kind == "call" and o.t - e.t <= 20 then g = e break end
-    end
-    local hp = o.hp and string.format("%.0f/%.0f", o.hp, o.max or 0) or "unknown"
-    local text
-    if g then
-        text = string.format("the first game over (%s) came %.1f s after %s, with health %s%s", o.what, o.t - g.t, g.what, hp,
-            (o.hp and o.hp > 1) and " (not 0: holding health at 1 cannot stop this kind of death)" or "")
-    else
-        text = string.format("the first game over (%s) came with no grab or finisher call before it, health %s: an ordinary death", o.what, hp)
-    end
-    if X.blocked > 0 then text = text .. string.format("; %d game over(s) were blocked", X.blocked) end
-    return text
-end
-
-function RE7.exec.report()
-    local X = RE7.exec
-    local counts = {}
-    for k, v in pairs(X.counts) do counts[#counts + 1] = { call = k, n = v } end
-    table.sort(counts, function(a, b) if a.n ~= b.n then return a.n > b.n end return a.call < b.call end)
-    while #counts > 20 do table.remove(counts) end
-    return { logging = X.on, block_on = X.block, hooked = X.hooks, calls_seen = counts, game_overs_seen = X.overs,
-        first_game_over = X.first_over, the_20_calls_before_it = X.before_over, blocked = X.blocked, let_through = X.not_blocked,
-        verdict = X.verdict(), note = X.note, latest = X.events }
-end
+-- (10.23) The execution test was removed: a log of the grab / finisher / game-over calls, and an opt-in 'block the game over and go down
+-- instead'. It was a developer experiment. The part that is kept is "Executions end the game for BOTH players" (above): it decides from the
+-- health, with no extra hooks.
 
 -- Other ways a death can start. Your notes say the finishers (Jack's grab, Mia in the attic) never reached the game-over
 -- mode switch above. So any method of the game manager or of the player's damage controller that is named like a game over or
@@ -9996,9 +12411,6 @@ function RE7.install_death_extras()
                                 local okv, v = pcall(function() return sdk.to_int64(args[3]) end)
                                 if okv and type(v) == "number" and v % 256 == 0 then return end
                             end
-                            RE7.exec.record(tn .. "." .. name, "over") -- the execution test writes down every game-over call
-                            if RE7.exec.block_wanted(tn, name) then return "skip" end
-                            if RE7.exec.recently_blocked() then return end -- the rest of a game over that was just blocked is not a death
                             RE7.on_death_signal(name)
                         end) then
                             RE7.death_hooks[#RE7.death_hooks + 1] = tn .. "." .. name
@@ -10032,7 +12444,7 @@ end
 do
 local H = {}
 H.PH_MSG = 7
-H.BOT_MSG = 11 -- a command only the loopback bot understands ("down" / "up"); a real player's script has no handler for it
+H.BOT_MSG = 11 -- a command only Ethan's friend understands ("down" / "up"); a real player's script has no handler for it
 H.CALL_ORIGINAL = sdk.PreHookResult and sdk.PreHookResult.CALL_ORIGINAL
 
 H.PLAYER_WORDS = { "damage", "guard", "block", "heal", "recover", "health", "hp", "die", "dead", "death", "down", "dying",
@@ -10216,6 +12628,7 @@ function H.apply_damage(dmg)
     return true, { before = hp, after = target }
 end
 pstat.apply_damage = H.apply_damage
+pstat.write_health, pstat.note = H.write_health, H.note -- (10.6: the friend's panel section, outside this block, writes your health and leaves a note through these)
 
 -- 9.28 (testing): invincible. A hit that lowers the health is undone at once (in the set_health hook and in the 10-a-second
 -- check), so enemies can be tried out. NOT for real play: it is off at every start and is not remembered. It does not stop an
@@ -10248,6 +12661,7 @@ function H.send_event(kind, arg)
     pstat.sent = pstat.sent + 1
 end
 pstat.send_event = H.send_event -- (the character, weapon and friendly-fire code, outside this block, sends its events through it)
+CFG.low.send = H.send_event -- (10.12: the "low" event)
 
 function H.is_heal_item(name)
     local low = name:lower()
@@ -10275,16 +12689,6 @@ function H.clamp_active(now)
     if r and r.downed and now - r.at < 10 then return false end
     return true
 end
-pstat.can_catch = H.clamp_active -- the execution test asks the same question before it blocks a game over
-
--- A finisher's game over was skipped by the execution test: hold the health at 1 and go down, as after a hit.
-function pstat.exec_catch(why)
-    H.write_health(1)
-    pstat.clamped = pstat.clamped + 1
-    if not pstat.downed then pstat.pending_down = true end
-    H.note("a game over was blocked (" .. tostring(why) .. "): you are held at 1 health and go down instead")
-end
-
 -- The game reloaded or ended without our help: forget that we were down (nothing to write, the new player is whole).
 function H.reset_down(why, silent)
     if not pstat.downed then return end
@@ -10459,6 +12863,16 @@ net_on(H.PH_MSG, function(payload)
         H.note(who .. " is back up")
     elseif kind == "char" then
         pcall(CFG.who.on_remote, arg, now) -- (9.31: which character they are shown as)
+    elseif kind == "mot" then
+        pcall(CFG.mbank.on_remote, arg, now) -- (10.1: which bank / clip they play, and what it is)
+    elseif kind == "mol" then
+        pcall(CFG.mbank.on_remote_overlay, arg, now) -- (10.4: the clip on their overlay layer: a block, a heal)
+    elseif kind == "act" then
+        pcall(CFG.mbank.on_remote_act, arg, now) -- (10.10: a small action on one of their layers: touching a door, the codex ...)
+    elseif kind == "actb" then
+        pcall(CFG.mbank.on_remote_act, arg, now, 2) -- (10.14: the second one, on another of their layers)
+    elseif kind == "low" then
+        pcall(CFG.low.on_remote, arg, now) -- (10.12: how high their camera is above their floor while they crawl or lie down)
     elseif kind == "wpn" then
         pcall(CFG.wpn.on_remote, arg, now) -- (9.31: which weapon they hold)
     elseif kind == "ff" then
@@ -10490,6 +12904,26 @@ function pstat.update(now)
     if down and not pstat.key_was_down then pstat.revive_other() end
     pstat.key_was_down = down
     pstat.revive_tick(now)
+    local oka, erra = pcall(CFG.friend.ai.tick, now) -- (10.6) what Ethan's friend does for you (only while it is the friend)
+    if not oka and now - (pstat.friend_err_at or 0) > 5 then
+        pstat.friend_err_at = now
+        say("friend helper error: " .. tostring(erra))
+    end
+    local okb, errb = pcall(CFG.friend.body.update, now) -- (10.7) ...and what its body does (blocks near enemies, the heal pose)
+    if not okb and now - (pstat.friend_body_err_at or 0) > 5 then
+        pstat.friend_body_err_at = now
+        say("friend body error: " .. tostring(errb))
+    end
+    local okf2, errf2 = pcall(CFG.friend.fight.update, now) -- (10.8) ...and its fighting: shoots near you, its ammo, heals itself, takes hits
+    if not okf2 and now - (pstat.friend_fight_err_at or 0) > 5 then
+        pstat.friend_fight_err_at = now
+        say("friend fight error: " .. tostring(errf2))
+    end
+    local okov, errov = pcall(CFG.friend.over.tick, now) -- (10.9) after a game over: up at full health and next to you
+    if not okov and now - (pstat.friend_over_err_at or 0) > 5 then
+        pstat.friend_over_err_at = now
+        say("friend game-over error: " .. tostring(errov))
+    end
 
     if now - pstat.read_at < 0.1 then return end
     pstat.read_at = now
@@ -10549,6 +12983,1061 @@ function pstat.update(now)
     end
 end
 
+-- (10.6) THE FRIEND HELPS: the first part of Ethan's friend's brain. It runs only while the friend is the other player (CFG.friend.present()),
+-- never for a real player. re7mp.exe keeps the friend walking after you and stopping 2 m away (10.26: or staying put, when you press F5; there is no "Beside you" any more),
+-- so it is normally inside the revive distance (3 m) already; this part decides what it does for you from there:
+--   * REVIVE: you are down and it has been within the revive distance for the revive time (3 s, the same two sliders as F8) -> you get up with the
+--     usual "health after being revived". No item is used (the wait is the price, as with F8), and it shows its use pose while it works on you.
+--   * HEAL: your health is at or below `below` percent (default 40) for a moment (REACT_SECS), it is within the revive distance and it carries a
+--     healing item -> it uses one on you: the use takes USE_SECS (its heal pose shows), then the item leaves ITS inventory (re7mp/friend.json)
+--     and your health goes up by that item's share of your maximum. Stopped (nothing spent) if you walk out of its reach, go down, or your
+--     health is up already. It picks the WEAKEST item that lifts you back over the threshold, else the strongest it has.
+-- How much an item gives back (percent of your maximum health) is an estimate from RE7 guides: Herb about 1/4, First Aid Med about 1/3, Strong
+-- First Aid Med everything. Nothing here touches the game's own inventory: the items are the friend's own, kept by this script.
+CFG.friend.ai = {
+    on = true, revive = true, heal = true, below = 40,
+    USE_SECS = 2.4,     -- the time its use takes (the script shows a remote player's heal pose for 2.4 s too)
+    REACT_SECS = 1.2,   -- your health has to stay low this long before it starts (a single bite does not make it dig for a Herb)
+    COOLDOWN = 3.0,     -- after a heal: no new one for this long
+    HEAL_PCT = { herb = 25, med = 33, strong = 100 },
+    reviving = nil, using = nil, low_since = nil, last_heal_at = -100, no_item_told = false,
+    stats = { revives = 0, revives_stopped = 0, heals = 0, heals_stopped = 0, no_item = 0 },
+    last = "nothing yet", last_heal = nil, status = "waiting",
+}
+
+do
+    local A = CFG.friend.ai
+
+    function A.note(text)
+        A.last = text
+        H.note("Ethan's friend: " .. text)
+    end
+
+    -- How much of your maximum health an item gives back (percent), or nil when it is not a healing item. The game's own category wins when this
+    -- script has seen the item (category 3 = heal; Chem Fluid is a material); an item never seen is judged by its name.
+    function A.heal_pct(id)
+        if type(id) ~= "string" then return nil end
+        local n, low = items.cat_cache[id], id:lower()
+        if n ~= nil and n ~= 3 then return nil end
+        if n == nil and not (low:find("herb", 1, true) or low:find("remedy", 1, true) or low:find("firstaid", 1, true) or low:find("first_aid", 1, true)
+            or low:find("medic", 1, true)) then return nil end
+        if low:find("strong", 1, true) then return A.HEAL_PCT.strong end
+        if low:find("herb", 1, true) and not low:find("chem", 1, true) and not low:find("mix", 1, true) then return A.HEAL_PCT.herb end
+        return A.HEAL_PCT.med
+    end
+
+    -- The healing items it carries: { { id, pct, count }, ... } weakest first.
+    function A.carried_heals()
+        local F, list = CFG.friend, {}
+        F.load()
+        for id, n in pairs(F.inv) do
+            local p = n >= 1 and A.heal_pct(id) or nil
+            if p then list[#list + 1] = { id = id, pct = p, count = n } end
+        end
+        table.sort(list, function(a, b) if a.pct ~= b.pct then return a.pct < b.pct end return a.id < b.id end)
+        return list
+    end
+
+    -- Which one would it use at this health (percent)? The weakest that lifts you back over the threshold, else the strongest.
+    function A.pick_item(health_pct)
+        local list = A.carried_heals()
+        if #list == 0 then return nil end
+        for _, e in ipairs(list) do
+            if health_pct + e.pct > A.below then return e end
+        end
+        return list[#list]
+    end
+
+    function A.stop_all()
+        A.reviving, A.using, A.low_since = nil, nil, nil
+    end
+
+    -- The end of a use: the health goes up first; only when the game took it does the item leave the friend's inventory.
+    function A.finish_heal(u, now)
+        local F = CFG.friend
+        A.using = nil
+        if (F.inv[u.id] or 0) < 1 then
+            A.stats.heals_stopped = A.stats.heals_stopped + 1
+            A.note("it no longer carries a " .. u.id .. ": nothing used")
+            return
+        end
+        local hp, mx = pstat.hp, pstat.max or pstat.seen_max
+        if type(hp) ~= "number" or type(mx) ~= "number" or mx <= 0 then return end
+        local target = math.min(mx, hp + mx * u.pct / 100)
+        if not H.write_health(target) then
+            A.stats.heals_stopped = A.stats.heals_stopped + 1
+            A.note("the game would not take the new health: the " .. u.id .. " is not used up")
+            return
+        end
+        F.inv[u.id] = F.inv[u.id] - 1
+        if F.inv[u.id] <= 0 then F.inv[u.id] = nil end
+        F.save()
+        A.stats.heals = A.stats.heals + 1
+        A.last_heal_at = now
+        A.last_heal = { item = u.id, from = math.floor(hp), to = math.floor(target), left = F.inv[u.id] or 0, at = math.floor(now * 10) / 10 }
+        A.note(string.format("used a %s on you: health %.0f -> %.0f of %.0f (it has %d left)", u.id, hp, target, mx, F.inv[u.id] or 0))
+        chat_add("Health", string.format("%s used a %s on you.", F.NAME, u.id))
+    end
+
+    -- Every frame (from pstat.update): what it is doing for you right now.
+    function A.tick(now)
+        local F = CFG.friend
+        if not A.on or not F.present() or not peer_present(now) then
+            if A.reviving or A.using then A.stop_all() end
+            A.status = A.on and "it is not here" or "switched off"
+            return
+        end
+        local r = pstat.remote
+        if r and r.downed and now - r.at < 10 then -- it is down itself (the panel's test button): it can't help
+            A.stop_all()
+            A.status = "it is down itself"
+            return
+        end
+        local d = H.remote_distance()
+        local near = d ~= nil and d <= pstat.revive_radius
+        if pstat.downed then
+            A.using, A.low_since = nil, nil
+            if not A.revive then A.status = "revive is switched off" return end
+            if not near then
+                if A.reviving then
+                    A.reviving = nil
+                    A.stats.revives_stopped = A.stats.revives_stopped + 1
+                    A.note(string.format("stopped helping you up: it is %s away (it has to stay within %.0f m)", d and string.format("%.1f m", d) or "somewhere", pstat.revive_radius))
+                end
+                A.status = string.format("you are down and it is %s away", d and string.format("%.1f m", d) or "somewhere")
+                return
+            end
+            if not A.reviving then
+                A.reviving = { since = now }
+                A.note(string.format("is helping you up: it stays within %.0f m for %.0f s", pstat.revive_radius, pstat.revive_hold))
+            end
+            state.remote_heal_until = now + 0.3 -- its use pose shows while it works on you
+            A.status = string.format("helping you up %.1f / %.0f s", math.min(now - A.reviving.since, pstat.revive_hold), pstat.revive_hold)
+            if now - A.reviving.since >= pstat.revive_hold then
+                A.reviving = nil
+                A.stats.revives = A.stats.revives + 1
+                chat_add("Health", F.NAME .. " helped you up.")
+                H.get_up(string.format("%s helped you up, %.1f m away, no item used", F.NAME, d))
+                A.last = string.format("helped you up (%.1f m away)", d)
+            end
+            return
+        end
+        A.reviving = nil
+        local hp, mx = pstat.hp, pstat.max or pstat.seen_max
+        if not A.heal then A.using, A.low_since = nil, nil A.status = "heal is switched off" return end
+        if type(hp) ~= "number" or type(mx) ~= "number" or mx <= 0 then
+            A.using, A.low_since = nil, nil
+            A.status = "your health is not readable yet"
+            return
+        end
+        local pct = hp / mx * 100
+        local low = pct <= A.below and hp > 0.5
+        if not low then A.no_item_told = false end
+        if A.using then
+            local u, why = A.using, nil
+            if not near then why = string.format("you are out of its reach (%s)", d and string.format("%.1f m", d) or "no position")
+            elseif not low then why = "your health is up already" end
+            if why then
+                A.using = nil
+                A.stats.heals_stopped = A.stats.heals_stopped + 1
+                A.note(string.format("stopped using the %s: %s (nothing spent)", u.id, why))
+                return
+            end
+            state.remote_heal_until = now + 0.3
+            A.status = string.format("using a %s on you %.1f / %.1f s", u.id, math.min(now - u.since, A.USE_SECS), A.USE_SECS)
+            if now - u.since >= A.USE_SECS then A.finish_heal(u, now) end
+            return
+        end
+        if not low then
+            A.low_since = nil
+            A.status = string.format("your health is %.0f%% (it helps at %d%% or less)", pct, A.below)
+            return
+        end
+        if not near then
+            A.low_since = nil
+            A.status = string.format("your health is %.0f%% but it is %s away (it has to be within %.0f m)", pct, d and string.format("%.1f m", d) or "somewhere", pstat.revive_radius)
+            return
+        end
+        A.low_since = A.low_since or now
+        if now - A.last_heal_at < A.COOLDOWN then
+            A.status = "it has just used one on you"
+            return
+        end
+        if now - A.low_since < A.REACT_SECS then
+            A.status = string.format("your health is %.0f%%: it is about to help", pct)
+            return
+        end
+        local e = A.pick_item(pct)
+        if e then
+            A.using = { id = e.id, pct = e.pct, since = now }
+            A.note(string.format("is using a %s on you (your health %.0f%%, it gives %d%%, %.1f s)", e.id, pct, e.pct, A.USE_SECS))
+        else
+            A.status = string.format("your health is %.0f%% and it carries no healing item", pct)
+            if not A.no_item_told then
+                A.no_item_told = true
+                A.stats.no_item = A.stats.no_item + 1
+                A.note(string.format("your health is %.0f%% but it carries no healing item: give it a Herb or First Aid Med (F7 next to it)", pct))
+                chat_add("Health", F.NAME .. " has nothing to heal you with. Give it a Herb or First Aid Med.")
+            end
+        end
+    end
+
+    function A.report()
+        local carried = {}
+        for _, e in ipairs(A.carried_heals()) do carried[#carried + 1] = { id = e.id, gives_percent = e.pct, count = e.count } end
+        local d = H.remote_distance()
+        return { on = A.on, revive = A.revive, heal = A.heal, heals_you_at_percent_or_less = A.below, status = A.status, last = A.last,
+            distance_m = d and math.floor(d * 10) / 10 or nil, reach_m = pstat.revive_radius, revive_seconds = pstat.revive_hold,
+            helping_you_up = A.reviving ~= nil, using_item = A.using and A.using.id or nil, healing_items = carried,
+            percent_given = { herb = A.HEAL_PCT.herb, first_aid_med = A.HEAL_PCT.med, strong_first_aid_med = A.HEAL_PCT.strong },
+            use_seconds = A.USE_SECS, react_seconds = A.REACT_SECS, cooldown_seconds = A.COOLDOWN,
+            revived_you = A.stats.revives, revive_stopped = A.stats.revives_stopped, healed_you = A.stats.heals, heal_stopped = A.stats.heals_stopped,
+            low_health_without_item = A.stats.no_item, last_heal = A.last_heal }
+    end
+end
+
+-- (10.7) ETHAN'S FRIEND ACTS FOR ITSELF (the "Ethan's friend does" choice "Acts for itself", the default now; "Copies me" is still there). re7mp.exe only
+-- moves the friend (it walks after you); everything the body shows comes from here:
+--   * POSE: the flags the exe copies from you (crouch, gun, block ...) are dropped. The friend blocks when an enemy is close to it, shows the heal pose
+--     while it helps you (CFG.friend.ai), and otherwise walks, runs or stands by how fast it really moves. Your clips are no longer fed to its body.
+--   * FACING: the way it LAST MOVED (it kept your camera's direction before, so the model looked outwards all the time); at a block it faces the enemy.
+--   * HEIGHT: it stands where YOU stood. The exe puts it at your height, so on stairs or any step it hung in the air. The script keeps a trail of the
+--     places you walked (a point every 0.25 m, the floor under the camera) and takes the friend's height from the nearest point of that trail, the way the other
+--     co-op mod keeps its bot on real ground (no ray casts: they are not reliable in this game). Nothing is read from the game for it.
+CFG.friend.body = {
+    TRAIL_MAX = 500, STEP = 0.25, NEAR = 2.0, FAR = 6.0,   -- the trail: a point every STEP metres (500 = 125 m of path); look within NEAR m, else the nearest within FAR m
+    BLOCK_DIST = 1.0, BLOCK_MIN = 0.5, BLOCK_MAX = 5.0, BLOCK_GAP = 0.4, THREAT_EVERY = 0.25, -- (10.9) it blocks only when an enemy is within 1 m (was 5 m); lets go at BLOCK_DIST + BLOCK_GAP
+    LET_GO_SECS = 1.0, OVERLAY_EVERY = 1.5,
+    GUARD_PAIR = "0_2300_guard.0", HEAL_PAIR = "0_2790_heal.0", -- Hands_Guard_Loop and Hands_Recovery of Ethan's bank
+    roots = {}, scan_at = -10, scans = 0, trail = {}, trail_n = 0, heading = nil, last_target = nil, ground = nil, adjusted = 0, from_trail = 0, from_player = 0, resets = 0,
+    threat = nil, threat_at = -10, blocking = false, block_seen_at = -10, blocks = 0, enemies_seen = 0, enemy_note = "no enemy read yet",
+    overlay_key = "none", overlay_at = -10, overlay_fed = 0, last_ground_note = nil,
+}
+
+do
+    local B = CFG.friend.body
+
+    function B.own_on()
+        return CFG.friend.present() and CFG.who ~= nil and CFG.who.bot_act == "own"
+    end
+
+    -- (10.10) "I dont think its telling the ground height below it very well": the trail took the floor as the camera height minus a GUESS (1.6 m standing, 0.5 m less crouched), so a
+    -- crouched stretch of the path was 0.2 m off (the real camera drop is about 0.7 m) and a jump, a landing or the camera bob moved the floor with it. Now the floor under me is read
+    -- from my OWN player object (the object manager's PlayerObj: its position is where its feet are). A reading is used only when the camera is a believable height above it (standing
+    -- 1.3 to 1.9 m, crouched 0.7 to 1.7 m): an object whose origin is not at the feet cannot slip in, and the guess is used for that point as before.
+    B.root = { on = true, at = -10, y = nil, reads = 0, used = 0, rejected = 0, failures = 0, last_error = nil, last_off = nil, standing_off = nil, crouched_off = nil, LO = { 1.3, 0.7 }, HI = { 1.9, 1.7 } }
+    function B.player_floor(cam_y, crouching)
+        local R = B.root
+        if not R.on or type(cam_y) ~= "number" then return nil end
+        local now = os.clock()
+        if R.y == nil or now - R.at >= 0.1 then
+            R.at = now
+            local ok, y = pcall(function()
+                local om = sdk.get_managed_singleton("app.ObjectManager")
+                local p = om and om:get_field("PlayerObj")
+                if p == nil then return nil end
+                local xf = p:call("get_Transform")
+                local v = xf and xf:call("get_Position")
+                return v and tonumber(v.y)
+            end)
+            if not ok then
+                R.failures, R.last_error, R.y = R.failures + 1, tostring(y):sub(1, 100), nil
+                return nil
+            end
+            R.y = y
+            if y ~= nil then R.reads = R.reads + 1 end
+        end
+        if R.y == nil then return nil end
+        local off = cam_y - R.y
+        R.last_off = off
+        local k = crouching and 2 or 1
+        if off < R.LO[k] or off > R.HI[k] then R.rejected = R.rejected + 1 return nil end
+        if crouching then R.crouched_off = off else R.standing_off = off end
+        R.used = R.used + 1
+        return R.y
+    end
+
+    -- A point of the trail: where the floor was under my camera. Only while the friend is here.
+    function B.note_player(pos, crouching)
+        if not CFG.friend.present() or type(pos) ~= "table" then return end
+        local fy = B.player_floor(pos.y, crouching) or (pos.y - (CFG.EYE_HEIGHT - CFG.CROUCH_DROP * (crouching and 1 or 0)))
+        local T, n = B.trail, #B.trail
+        local last = T[n]
+        if last then
+            local dx, dz = pos.x - last.x, pos.z - last.z
+            if dx * dx + dz * dz < B.STEP * B.STEP and math.abs(fy - last.y) < 0.12 then return end
+            if dx * dx + dz * dz > 400 then -- a jump of 20 m (a load, a teleport): the old path is not this place any more
+                B.trail, B.resets, n = {}, B.resets + 1, 0
+                T = B.trail
+            end
+        end
+        T[n + 1] = { x = pos.x, z = pos.z, y = fy }
+        if n + 1 > B.TRAIL_MAX then table.remove(T, 1) end
+        B.trail_n = B.trail_n + 1
+    end
+
+    -- The floor height for the friend at (x, z): the nearest crumb within NEAR m (nearest in height to where it stood when several floors overlap), else the
+    -- nearest within FAR m, else the floor under me now. Returns the height and where it came from.
+    function B.ground_y(x, z, cur)
+        local T = B.trail
+        local best, bs, near_any, nd = nil, 1e9, nil, 1e9
+        for i = #T, math.max(1, #T - B.TRAIL_MAX), -1 do
+            local c = T[i]
+            local dx, dz = c.x - x, c.z - z
+            local d2 = dx * dx + dz * dz
+            if d2 <= B.NEAR * B.NEAR then
+                local dy = cur and (c.y - cur) or 0
+                local score = d2 + 0.25 * dy * dy
+                if score < bs then best, bs = c, score end
+            end
+            if d2 < nd then near_any, nd = c, d2 end
+        end
+        if best then return best.y, "trail" end
+        if near_any and nd <= B.FAR * B.FAR then return near_any.y, "trail (far)" end
+        return nil, "player"
+    end
+
+    -- Every new position of the friend from the exe (read_remote): its height from the trail, and the way it moved.
+    function B.adjust(target, now)
+        local lp = state.local_pos
+        local fy, how = B.ground_y(target.x, target.z, B.ground)
+        if fy == nil and lp then
+            local cr = (state.local_pose and state.local_pose.crouch) and true or false
+            fy = B.player_floor(lp.y, cr) or (lp.y - (CFG.EYE_HEIGHT - CFG.CROUCH_DROP * (cr and 1 or 0)))
+        end
+        if fy ~= nil then
+            B.ground = fy
+            target.y = fy + CFG.EYE_HEIGHT
+            B.adjusted = B.adjusted + 1
+            if how == "trail" or how == "trail (far)" then B.from_trail = B.from_trail + 1 else B.from_player = B.from_player + 1 end
+        end
+        local lt = B.last_target
+        if lt then
+            local dx, dz = target.x - lt.x, target.z - lt.z
+            local len = math.sqrt(dx * dx + dz * dz)
+            if len >= 0.015 and len < CFG.TELEPORT_DISTANCE then B.heading = { dx / len, dz / len } end
+        end
+        B.last_target = { x = target.x, z = target.z }
+    end
+
+    -- Which way the body faces (x, z) or nil to leave it to the camera quaternion. At a block it faces the enemy it blocks.
+    function B.facing(pos)
+        if B.blocking and B.threat and pos then
+            local dx, dz = B.threat.x - pos.x, B.threat.z - pos.z
+            local len = math.sqrt(dx * dx + dz * dz)
+            if len > 0.2 then return dx / len, dz / len end
+        end
+        local FT = CFG.friend.fight
+        if FT and FT.aiming and FT.target and pos then -- (10.8) it faces what it shoots at
+            local dx, dz = FT.target.x - pos.x, FT.target.z - pos.z
+            local len = math.sqrt(dx * dx + dz * dz)
+            if len > 0.2 then return dx / len, dz / len end
+        end
+        if B.heading then return B.heading[1], B.heading[2] end
+        local lp = state.local_pos
+        if lp and pos then
+            local dx, dz = lp.x - pos.x, lp.z - pos.z
+            local len = math.sqrt(dx * dx + dz * dz)
+            if len > 0.2 then return dx / len, dz / len end
+        end
+        return nil
+    end
+
+    -- The pose bits of the friend's flags: yours are dropped, its own are added (the ready bits and the rest stay).
+    function B.own_flags(f, now)
+        local low = f % 64
+        local high = f - (f % 16384) -- (10.12: bit 13 is "running", the friend's own)
+        local out = low + high
+        if B.blocking then out = out + CFG.POSE_GUARD end
+        -- (10.8) it crouches when you crouch (so you can both hide from the same thing, though it does not know it is hiding)
+        if state.local_pose and state.local_pose.crouch then out = out + CFG.POSE_CROUCH end
+        -- (10.8) the fighting friend: a gun in hand while it has a target, aiming at it, and the shot pose for a moment after each shot
+        local FT = CFG.friend.fight
+        if FT and FT.drawn then
+            out = out + CFG.POSE_GUN
+            if FT.aiming then out = out + CFG.POSE_AIM end
+            if now < FT.shot_until then out = out + CFG.POSE_SHOOT end
+        end
+        return out
+    end
+
+    -- The nearest live enemy to the friend: { name, x, y, z, dist } or nil. The list is the enemy sync's (enemy.roots, scanned once a second); with no
+    -- enemy sync running the friend scans for itself on the same timer. Only enemies that are close are looked at closely: the ones the game parks
+    -- (not started, no animation, at the origin, no Status component) and the dead do not count.
+    -- The list of enemies to look at: the enemy sync's, or (when that is not scanning) one the friend keeps itself, scanned once a second.
+    function B.enemy_list(now)
+        local list = enemy.roots
+        if not (now - enemy.last_scan < 2.0) then
+            if now - B.scan_at >= 1.0 then
+                B.scan_at = now
+                local ok, roots = pcall(find_enemy_roots, B.roots)
+                if ok then B.roots, B.scans = roots, B.scans + 1 end
+            end
+            list = B.roots
+        end
+        return list or {}
+    end
+
+    -- Is this enemy alive and playing (not parked by the game, not dead)? p is its position.
+    function B.is_live(e, p)
+        pcall(read_health, e) -- (finds its Status component the first time)
+        local okm, _, motion = pcall(read_motion, e)
+        local okf, inactive = pcall(inactive_flags, e, okm and motion or 0, p)
+        local okd, dead = pcall(enemy_is_dead, e)
+        return okf and inactive == 0 and not (okd and dead)
+    end
+
+    function B.nearest_enemy(now)
+        local r = state.remote
+        if not (r and r.pos) then return nil end
+        local list = B.enemy_list(now)
+        local gy = B.ground or (r.pos.y - CFG.EYE_HEIGHT)
+        local best, bd, n = nil, 1e9, 0
+        for _, e in ipairs(list or {}) do
+            local okp, p = pcall(function() return e.xf:call("get_Position") end)
+            if okp and p ~= nil and finite(p.x) and finite(p.y) and finite(p.z) then
+                local dx, dz = p.x - r.pos.x, p.z - r.pos.z
+                local d = math.sqrt(dx * dx + dz * dz)
+                if d <= B.BLOCK_DIST + B.BLOCK_GAP + 0.5 and math.abs(p.y - gy) < 3.5 then
+                    if B.is_live(e, p) then
+                        n = n + 1
+                        if d < bd then best, bd = { name = e.name, x = p.x, y = p.y, z = p.z, dist = d }, d end
+                    end
+                end
+            end
+        end
+        B.enemies_seen = n
+        return best
+    end
+
+    local function feed(key, now)
+        local M = CFG.mbank
+        if key == B.overlay_key and now - B.overlay_at < B.OVERLAY_EVERY then return end
+        B.overlay_key, B.overlay_at = key, now
+        B.overlay_fed = B.overlay_fed + 1
+        pcall(M.on_remote_overlay, key == "none" and "0_0_none" or key, now)
+    end
+
+    -- Every frame (from pstat.update, after the helper): look for enemies four times a second, block while one is close, and tell the body what to play.
+    function B.update(now)
+        if not B.own_on() or not peer_present(now) then
+            B.blocking, B.threat = false, nil
+            B.enemy_note = "the friend is not acting for itself"
+            return
+        end
+        if now - B.threat_at >= B.THREAT_EVERY then
+            B.threat_at = now
+            local ok, e = pcall(B.nearest_enemy, now)
+            B.threat = ok and e or nil
+            if not ok then B.enemy_note = "enemy read failed: " .. tostring(e):sub(1, 80) end
+            if B.threat then
+                B.block_seen_at = now
+                B.enemy_note = string.format("nearest enemy %s, %.1f m from it", tostring(B.threat.name), B.threat.dist)
+            elseif ok then
+                B.enemy_note = string.format("no live enemy near it (%d read)", B.enemies_seen)
+            end
+        end
+        -- (10.9) how long its body takes to get down after you crouch (the debug file says it: "it takes a second")
+        do
+            local lc = state.local_pose and state.local_pose.crouch == true
+            if lc ~= B.cr_want then B.cr_want, B.cr_since, B.cr_lag = lc, now, nil end
+            local pc = (state.pose and state.pose.crouch) or 0
+            if B.cr_since and B.cr_lag == nil and ((lc and pc >= 0.9) or (not lc and pc <= 0.1)) then B.cr_lag = now - B.cr_since end
+        end
+        local A = CFG.friend.ai
+        local FT = CFG.friend.fight
+        local busy = (A and (A.using ~= nil or A.reviving ~= nil)) or (FT and FT.healing ~= nil) or false
+        local r = pstat.remote
+        local down = r and r.downed and now - r.at < 10
+        local t = B.threat
+        local want = false
+        -- (10.8) with a gun and ammo it shoots instead of blocking; it blocks when it cannot shoot (no gun, no ammo, reloading)
+        local shooting = FT and FT.aiming and FT.can_shoot
+        if not busy and not down and not shooting and t then
+            want = t.dist <= (B.blocking and (B.BLOCK_DIST + B.BLOCK_GAP) or B.BLOCK_DIST)
+        end
+        if want then
+            if not B.blocking then
+                B.blocking, B.blocks = true, B.blocks + 1
+                say(string.format("health: Ethan's friend blocks: %s is %.1f m from it", tostring(t.name), t.dist))
+            end
+        elseif B.blocking and now - B.block_seen_at >= B.LET_GO_SECS or (B.blocking and (busy or down or shooting)) then
+            B.blocking = false
+            say("health: Ethan's friend lowers its guard")
+        end
+        -- its clips: the heal while it helps you, the block while it blocks (the receiving side plays them or, with no such clip, its recorded clips)
+        local key = "none"
+        if busy then key = B.HEAL_PAIR elseif B.blocking then key = B.GUARD_PAIR end
+        feed(key, now)
+    end
+
+    function B.report()
+        return { acting_for_itself = B.own_on(), blocking = B.blocking, blocks = B.blocks, nearest_enemy = B.threat and { name = B.threat.name, metres = math.floor(B.threat.dist * 10) / 10 } or nil,
+            enemies = B.enemy_note, block_within_m = B.BLOCK_DIST, block_lets_go_at_m = B.BLOCK_DIST + B.BLOCK_GAP, enemy_scans = B.scans, trail_points = #B.trail, trail_points_written = B.trail_n, trail_resets = B.resets,
+            heading = B.heading and { x = math.floor(B.heading[1] * 100) / 100, z = math.floor(B.heading[2] * 100) / 100 } or nil,
+            crouch = { you_crouching = B.cr_want == true, body_down_after_s = B.cr_lag and math.floor(B.cr_lag * 100) / 100 or nil, body_lift_m = math.floor(CFG.body.crouch_lift() * 100) / 100, slider_m = CFG.friend.crouch_lift,
+                feet = CFG.friend.ground.report(), camera_drop_seen_m = CFG.friend.ground.cam_drop and math.floor(CFG.friend.ground.cam_drop * 100 + 0.5) / 100 or nil },
+            floor_y = B.ground and math.floor(B.ground * 100) / 100 or nil, heights_set = B.adjusted, from_trail = B.from_trail, from_my_floor = B.from_player,
+            floor_under_me = { read_from_my_own_object = B.root.on, readings = B.root.reads, used_for_the_trail = B.root.used, rejected_as_unbelievable = B.root.rejected, failures = B.root.failures, last_error = B.root.last_error,
+                camera_above_it_m_last = B.root.last_off and math.floor(B.root.last_off * 100 + 0.5) / 100 or nil, standing_m = B.root.standing_off and math.floor(B.root.standing_off * 100 + 0.5) / 100 or nil,
+                crouched_m = B.root.crouched_off and math.floor(B.root.crouched_off * 100 + 0.5) / 100 or nil, believable_standing_m = B.root.LO[1] .. " to " .. B.root.HI[1], believable_crouched_m = B.root.LO[2] .. " to " .. B.root.HI[2] },
+            overlay_now = B.overlay_key, overlay_sent = B.overlay_fed }
+    end
+end
+
+----------------------------------------------------------------------------------------------
+-- (10.8) THE FIGHTING FRIEND. While it acts for itself (CFG.friend.body) it shoots at the enemies that are NEAR YOU, with its own weapons and its own
+-- ammo (what you gave it, F7 within 3 m: they left your inventory), takes ammo out of its own inventory shot by shot and tells you when it runs out.
+--   * TARGET: a live enemy within NEAR_YOU m of YOU and within REACH m of the friend, the one nearest to you. Line of sight is IGNORED (the ray casts
+--     are not reliable in this game, and the friend stands close to you anyway).
+--   * WEAPON: the carried gun with ammo that does the most damage per second; it keeps it until its ammo is gone. The ammo is the gun's own kind
+--     (HandgunBullet for a handgun, ShotgunBullet for a shotgun, ...).
+--   * DAMAGE: the gun's table damage (CFG.wpn.DAMAGE) x the same scale the other player's shots use (HIT.gun_scale), handed to the game's own damage call
+--     (HIT.apply) with the same correction for what the game really takes off. One shot every gap seconds, a reload after every magazine.
+--   * SELF-HEAL: below heal_below % of its own health it uses a healing item from its own inventory on itself (2.4 s), unless it is busy with you.
+--   * DAMAGE TAKEN: SIMULATED. The enemies' own AI does not know the friend exists, so an enemy that gets within HURT_REACH m of it takes hurt_pct % of its
+--     health off every HURT_EVERY s (less while it blocks); the hit goes to the exe as the same "ff" event a friendly-fire hit uses, and at 1 health it goes down
+--     and you get it up the usual way (F8 within 3 m, or a heal). The health lives in the exe; "hp:<n>" (exe 10.8) sets it for a heal.
+-- None of it runs unless the friend is here and acts for itself.
+----------------------------------------------------------------------------------------------
+CFG.friend.fight = {
+    on = true, heal_self = true, heal_below = 40, hurt_pct = 8,
+    NEAR_YOU = 5.0, NEAR_MIN = 2.0, NEAR_MAX = 25.0, REACH = 25.0,
+    SCAN_EVERY = 0.25, HURT_REACH = 1.6, HURT_EVERY = 1.2, HURT_BLOCKED = 0.4,
+    -- (10.10) "ethans friend should shoot slower, 300ms delay minimum": the shortest time between two of its shots, whatever the gun (a slider, 100-2000 ms)
+    MIN_GAP = 0.3, MIN_GAP_LO = 0.1, MIN_GAP_HI = 2.0,
+    USE_SECS = 2.4, HEAL_COOLDOWN = 4.0, LOW_AMMO = 5, OUT_TELL_EVERY = 25, NO_GUN_TELL_EVERY = 60, NO_HEAL_TELL_EVERY = 60,
+    SAVE_EVERY = 2.0, SHOT_POSE_SECS = 0.4, DRAWN_SECS = 3.0, VERIFY_SECS = 2.0, WPN_EVERY = 10,
+    -- per kind of gun: seconds between shots, rounds in a magazine, seconds to reload, the damage when the gun is not in CFG.wpn.DAMAGE
+    FAMILY = {
+        handgun = { gap = 0.55, mag = 15, reload = 1.7, dmg = 100 },
+        shotgun = { gap = 1.1, mag = 6, reload = 2.4, dmg = 90 },
+        machinegun = { gap = 0.14, mag = 30, reload = 2.0, dmg = 50 },
+        magnum = { gap = 1.3, mag = 6, reload = 2.6, dmg = 1200 },
+        other = { gap = 0.8, mag = 10, reload = 2.0, dmg = 100 },
+    },
+    target = nil, targets_near = 0, hurters = {}, scan_at = -10, scans = 0,
+    weapon = nil, mag_left = 0, next_shot_at = 0, reload_until = 0, reloading = false,
+    aiming = false, drawn = false, can_shoot = false, draw_until = 0, shot_until = 0,
+    healing = nil, last_heal_at = -100, verify = nil, exe_old = false,
+    hurt_at = setmetatable({}, { __mode = "k" }), dead = setmetatable({}, { __mode = "k" }), DEAD_SKIP = 8, was_down = false,
+    out_told_at = -100, no_gun_told_at = -100, no_heal_told_at = -100, low_told = nil,
+    dirty = false, saved_at = -10, wpn_told = nil, wpn_told_at = -100,
+    state = "not here", last = "nothing yet", last_tell = nil,
+    stats = { shots = 0, hits = 0, failed = 0, damage_dealt = 0, kills = 0, ammo_used = 0, reloads = 0, out_of_ammo = 0, no_gun = 0, low_ammo = 0,
+        heals = 0, heals_stopped = 0, no_heal_item = 0, hurts = 0, damage_taken = 0, times_down = 0, exe_old_hits = 0 },
+}
+
+do
+    local FT = CFG.friend.fight
+    local B = CFG.friend.body
+    local function clampn(v, lo, hi) return math.max(lo, math.min(hi, v)) end
+
+    function FT.note(text)
+        FT.last = text
+        H.note("Ethan's friend: " .. text)
+    end
+
+    -- Something it says to you: the chat's top-left lines and the journal.
+    function FT.tell(text)
+        FT.last_tell = text
+        chat_add(CFG.friend.NAME, text)
+        say("friend: " .. text)
+    end
+
+    function FT.key(id) return (tostring(id):lower():gsub("[^%w]", "")) end
+
+    local FAMILIES = { "shotgun", "machinegun", "magnum", "handgun" }
+
+    function FT.weapon_family(id)
+        local k = FT.key(id)
+        for _, f in ipairs(FAMILIES) do
+            if k:find(f, 1, true) then return f end
+        end
+        return "other"
+    end
+
+    -- The kind of gun this ammunition fits ("handgun", ...), or nil when the item is not ammunition. The game's own category (2 = ammo) wins when it is known.
+    function FT.ammo_family(id)
+        if type(id) ~= "string" then return nil end
+        local k, cat = FT.key(id), items.cat_cache[id]
+        if cat ~= nil and cat ~= 2 then return nil end
+        if cat == nil and not (k:find("bullet", 1, true) or k:find("ammo", 1, true) or k:find("shell", 1, true) or k:find("cartridge", 1, true)) then return nil end
+        for _, f in ipairs(FAMILIES) do
+            if k:find(f, 1, true) then return f end
+        end
+        if k:find("shell", 1, true) then return "shotgun" end
+        return "other"
+    end
+
+    function FT.is_gun(id)
+        if FT.ammo_family(id) then return false end
+        local kind = CFG.wpn.kind_of(id)
+        if kind == "gun" then return true end
+        return kind == nil and items.cat_cache[id] == 1 and not FT.key(id):find("knife", 1, true)
+    end
+
+    -- What it carries that matters here: guns { id, family }, and the ammo per kind { total, ids = { id, ... } }.
+    function FT.arsenal()
+        local F = CFG.friend
+        F.load()
+        local guns, ammo = {}, {}
+        local ids = {}
+        for id, n in pairs(F.inv) do
+            if n >= 1 then ids[#ids + 1] = id end
+        end
+        table.sort(ids)
+        for _, id in ipairs(ids) do
+            local n = F.inv[id]
+            local af = FT.ammo_family(id)
+            if af then
+                local a = ammo[af] or { total = 0, ids = {} }
+                ammo[af] = a
+                a.total = a.total + n
+                a.ids[#a.ids + 1] = id
+            elseif FT.is_gun(id) then
+                guns[#guns + 1] = { id = id, family = FT.weapon_family(id) }
+            end
+        end
+        return guns, ammo
+    end
+
+    function FT.damage_of(gun)
+        local d = CFG.wpn.damage_of(gun.id)
+        return d or FT.FAMILY[gun.family].dmg
+    end
+
+    -- The gun it shoots with: the one it already has while it still has ammo, else the best it can load (most damage per second).
+    function FT.pick_weapon()
+        local guns, ammo = FT.arsenal()
+        local W = FT.weapon
+        if W then
+            for _, g in ipairs(guns) do
+                if g.id == W.id and ((ammo[g.family] and ammo[g.family].total >= 1) or (ammo.other and ammo.other.total >= 1)) then
+                    return W, #guns, ammo
+                end
+            end
+        end
+        local best, best_dps
+        for _, g in ipairs(guns) do
+            local af = (ammo[g.family] and ammo[g.family].total >= 1) and g.family or ((ammo.other and ammo.other.total >= 1) and "other" or nil) -- (ammo whose kind the name does not tell fits any gun)
+            if af then
+                local fam = FT.FAMILY[g.family]
+                local dmg = FT.damage_of(g)
+                local dps = dmg / fam.gap
+                if not best or dps > best_dps then best, best_dps = { id = g.id, family = g.family, ammo_family = af, damage = dmg }, dps end
+            end
+        end
+        if best and (not W or W.id ~= best.id) then
+            FT.mag_left, FT.reloading, FT.reload_until = math.min(FT.FAMILY[best.family].mag, ammo[best.ammo_family].total), false, 0
+            say(string.format("friend: it takes up its %s (%s, %d damage a shot, %d rounds)", best.id, best.family, best.damage, ammo[best.ammo_family].total))
+        end
+        return best, #guns, ammo
+    end
+
+    function FT.ammo_left(family)
+        local _, ammo = FT.arsenal()
+        return ammo[family] and ammo[family].total or 0
+    end
+
+    -- One round out of its inventory (the first ammunition item of the gun's kind). Returns the id or nil.
+    function FT.use_round(family)
+        local F = CFG.friend
+        local _, ammo = FT.arsenal()
+        local a = ammo[family]
+        if not a then return nil end
+        local id = a.ids[1]
+        F.inv[id] = (F.inv[id] or 0) - 1
+        if F.inv[id] <= 0 then F.inv[id] = nil end
+        FT.dirty = true
+        FT.stats.ammo_used = FT.stats.ammo_used + 1
+        return id
+    end
+
+    function FT.flush(now)
+        if FT.dirty and now - FT.saved_at >= FT.SAVE_EVERY then
+            FT.dirty, FT.saved_at = false, now
+            CFG.friend.save()
+        end
+    end
+
+    -- The friend's own health as the exe reports it: hp, max, down. nil when nothing was heard lately.
+    function FT.health(now)
+        local r = pstat.remote
+        if not (r and r.hp and r.at and now - r.at < 15) then return nil end
+        return r.hp, (r.max and r.max > 0) and r.max or 1000, r.downed == true
+    end
+
+    -- Look at the enemies: the one to shoot at (nearest to YOU within NEAR_YOU, and within REACH of the friend) and the ones that reach the friend.
+    function FT.scan(now)
+        FT.scan_at, FT.scans = now, FT.scans + 1
+        local lp, r = state.local_pos, state.remote
+        FT.target, FT.targets_near, FT.hurters = nil, 0, {}
+        if not (lp and r and r.pos) then return end
+        local gy = lp.y - CFG.EYE_HEIGHT
+        local bd
+        for _, e in ipairs(B.enemy_list(now)) do
+            local okp, p = pcall(function() return e.xf:call("get_Position") end)
+            if okp and p ~= nil and finite(p.x) and finite(p.y) and finite(p.z) and math.abs(p.y - gy) < 4 then
+                local dp = math.sqrt((p.x - lp.x) ^ 2 + (p.z - lp.z) ^ 2)
+                local df = math.sqrt((p.x - r.pos.x) ^ 2 + (p.z - r.pos.z) ^ 2)
+                if ((dp <= FT.NEAR_YOU and df <= FT.REACH) or df <= FT.HURT_REACH) and not (FT.dead[e] and now - FT.dead[e] < FT.DEAD_SKIP) then
+                    if B.is_live(e, p) then
+                        if dp <= FT.NEAR_YOU and df <= FT.REACH then
+                            FT.targets_near = FT.targets_near + 1
+                            if not bd or dp < bd then
+                                bd = dp
+                                FT.target = { e = e, name = e.name, x = p.x, y = p.y, z = p.z, dist_you = dp, dist_it = df }
+                            end
+                        end
+                        if df <= FT.HURT_REACH then FT.hurters[#FT.hurters + 1] = e end
+                    end
+                end
+            end
+        end
+    end
+
+    -- (10.10) the seconds between two shots of a kind of gun: the gun's own gap, never shorter than the minimum (300 ms unless the slider says otherwise)
+    function FT.gap_of(family)
+        local fam = FT.FAMILY[family] or FT.FAMILY.other
+        return math.max(fam.gap, FT.MIN_GAP)
+    end
+
+    -- One shot at the target. Returns true when a round was fired.
+    function FT.shoot(now, t, W)
+        local st = FT.stats
+        local HIT = enemy.hit -- (the enemy hit code's table)
+        if not HIT then return false end
+        local hp0 = read_health(t.e)
+        if type(hp0) == "number" and hp0 == 0 then -- already at 0: no round is wasted (the game may take a while to say the enemy is dead)
+            FT.dead[t.e], FT.target = now, nil
+            return false
+        end
+        local id = FT.use_round(W.ammo_family or W.family)
+        if not id then return false end
+        FT.mag_left = FT.mag_left - 1
+        FT.next_shot_at = now + FT.gap_of(W.family)
+        FT.shot_until = now + FT.SHOT_POSE_SECS
+        st.shots = st.shots + 1
+        local scale = HIT.gun_scale or 2.1
+        local meant = clampn(math.floor(W.damage * scale + 0.5), 1, HIT.MAX)
+        local handed = meant
+        local rr = HIT.ratios[t.name] or HIT.ratio -- the game's own multiplier for this enemy, when earlier hits measured it
+        if rr and rr > 0 then handed = clampn(math.floor(meant / rr + 0.5), 1, 3 * HIT.MAX) end
+        local ok, okc, how, before, after = pcall(HIT.apply, t.e, handed)
+        if not ok then okc, how, before, after = false, tostring(okc), -1, -1 end
+        if okc then
+            st.hits = st.hits + 1
+            if type(before) == "number" and type(after) == "number" and before >= 0 and after >= 0 and before > after then st.damage_dealt = st.damage_dealt + (before - after) end
+            if (how == "addManualDamage" or how == "addHitDamage") and type(before) == "number" and before > 0 then
+                HIT.pending[#HIT.pending + 1] = { e = t.e, name = t.name, before = before, handed = handed, at = now }
+                while #HIT.pending > 4 do table.remove(HIT.pending, 1) end
+            end
+            local dead = false
+            if type(after) == "number" and after <= 0 then dead = true else
+                local okd, d = pcall(enemy_is_dead, t.e)
+                dead = okd and d == true
+            end
+            if dead then
+                st.kills = st.kills + 1
+                FT.dead[t.e], FT.target = now, nil
+            end
+            FT.last = string.format("shot %s at %s (%.1f m from you): %d meant, %d handed, by %s, health %s -> %s%s", W.id, tostring(t.name), t.dist_you,
+                meant, handed, tostring(how), tostring(before), tostring(after), dead and " (dead)" or "")
+        else
+            st.failed = st.failed + 1
+            FT.last = string.format("shot %s at %s: the game would not take the damage (%s)", W.id, tostring(t.name), tostring(how))
+        end
+        say("friend: " .. FT.last)
+        local af = W.ammo_family or W.family
+        local left = FT.ammo_left(af)
+        if left > 0 and left <= FT.LOW_AMMO and FT.low_told ~= af then
+            FT.low_told = af
+            st.low_ammo = st.low_ammo + 1
+            FT.tell(string.format("Running low on %s ammo: %d left.", af == "other" and "its" or af, left))
+        elseif left > FT.LOW_AMMO then
+            if FT.low_told == af then FT.low_told = nil end
+        end
+        if left <= 0 then
+            FT.mag_left = 0
+        elseif FT.mag_left <= 0 then
+            FT.reloading, FT.reload_until = true, now + FT.FAMILY[W.family].reload
+            st.reloads = st.reloads + 1
+        end
+        return true
+    end
+
+    -- Tells the other side's script which gun it holds, so the body can show it (the same event a real player sends). Only when it changes (and every WPN_EVERY s).
+    function FT.show_weapon(now)
+        local arg = (FT.drawn and FT.weapon) and CFG.wpn.arg_of(FT.weapon.id) or "none"
+        if arg ~= FT.wpn_told or now - FT.wpn_told_at >= FT.WPN_EVERY then
+            FT.wpn_told, FT.wpn_told_at = arg, now
+            pcall(CFG.wpn.on_remote, arg, now)
+        end
+    end
+
+    function FT.set_hp(n)
+        n = math.max(2, math.min(1000, math.floor(n + 0.5)))
+        pcall(net_send, CFG.who.BOT_MSG, "hp:" .. n)
+        return n
+    end
+
+    function FT.stop_heal(why)
+        local u = FT.healing
+        FT.healing = nil
+        if u then
+            FT.stats.heals_stopped = FT.stats.heals_stopped + 1
+            FT.note(string.format("stopped using the %s on itself: %s (nothing spent)", u.id, why))
+        end
+    end
+
+    function FT.finish_heal(u, now, hp, mx)
+        local F, A = CFG.friend, CFG.friend.ai
+        FT.healing = nil
+        if (F.inv[u.id] or 0) < 1 then
+            FT.stats.heals_stopped = FT.stats.heals_stopped + 1
+            FT.note("it no longer carries a " .. u.id .. ": nothing used")
+            return
+        end
+        local target = FT.set_hp(math.min(mx, hp + mx * u.pct / 100))
+        F.inv[u.id] = F.inv[u.id] - 1
+        if F.inv[u.id] <= 0 then F.inv[u.id] = nil end
+        F.save()
+        FT.last_heal_at = now
+        FT.stats.heals = FT.stats.heals + 1
+        FT.verify = { want = target, at = now, max = mx }
+        FT.note(string.format("used a %s on itself: health %.0f -> %d of %.0f (%d left)", u.id, hp, target, mx, F.inv[u.id] or 0))
+        chat_add(F.NAME, string.format("Used a %s on myself.", u.id))
+    end
+
+    -- Did the exe take the new health? An exe from before 10.8 does not know "hp:<n>": then only "up" works, and it gives back all of it.
+    function FT.check_verify(now, hp, mx)
+        local v = FT.verify
+        if not v or now - v.at < FT.VERIFY_SECS then return end
+        FT.verify = nil
+        if hp and hp >= v.want - 5 then return end
+        FT.stats.exe_old_hits = FT.stats.exe_old_hits + 1
+        FT.exe_old = true
+        if v.want >= 0.9 * v.max then
+            pcall(net_send, CFG.who.BOT_MSG, "up")
+            FT.note("the exe did not take the exact health (it is older than 10.8: rebuild re7mp.exe): used \"up\" instead, which gives back all of it")
+        else
+            FT.note("the exe did not take the exact health (it is older than 10.8: rebuild re7mp.exe), so its health stays where it was")
+        end
+    end
+
+    function FT.heal_tick(now, hp, mx, down)
+        local A = CFG.friend.ai
+        if FT.healing then
+            local u = FT.healing
+            if down then FT.stop_heal("it went down") return end
+            if not FT.heal_self then FT.stop_heal("self-heal was switched off") return end
+            if hp and mx and hp / mx * 100 > 99 then FT.stop_heal("its health is full already") return end
+            state.remote_heal_until = now + 0.3
+            if now - u.since >= FT.USE_SECS then FT.finish_heal(u, now, hp or 0, mx or 1000) end
+            return
+        end
+        if not FT.heal_self or down or not hp or not mx or mx <= 0 then return end
+        if (A and (A.using or A.reviving)) or pstat.downed then return end -- you come first
+        local pct = hp / mx * 100
+        if pct > FT.heal_below then FT.no_heal_told_at = -100 return end
+        if now - FT.last_heal_at < FT.HEAL_COOLDOWN then return end
+        local list = A.carried_heals()
+        if #list == 0 then
+            if now - FT.no_heal_told_at >= FT.NO_HEAL_TELL_EVERY then
+                FT.no_heal_told_at = now
+                FT.stats.no_heal_item = FT.stats.no_heal_item + 1
+                FT.tell(string.format("I'm hurt (%.0f%%) and I have nothing to heal with.", pct))
+            end
+            return
+        end
+        local pick = list[#list]
+        for _, e in ipairs(list) do -- the weakest that lifts it back over the threshold, else the strongest
+            if pct + e.pct > FT.heal_below then pick = e break end
+        end
+        FT.healing = { id = pick.id, pct = pick.pct, since = now }
+        FT.note(string.format("is using a %s on itself (its health %.0f%%, it gives %d%%, %.1f s)", pick.id, pct, pick.pct, FT.USE_SECS))
+    end
+
+    -- The simulated damage: an enemy within reach takes health off every HURT_EVERY s.
+    function FT.hurt_tick(now, hp, mx, down)
+        if down or FT.hurt_pct <= 0 then return end
+        mx = mx or 1000 -- (the exe has not reported its health yet: its health is 1000 at the start)
+        for _, e in ipairs(FT.hurters) do
+            if now - (FT.hurt_at[e] or -100) >= FT.HURT_EVERY then
+                FT.hurt_at[e] = now
+                local dmg = mx * FT.hurt_pct / 100 * (B.blocking and FT.HURT_BLOCKED or 1)
+                dmg = math.max(1, math.min(600, math.floor(dmg + 0.5)))
+                if pstat.send_event then pcall(pstat.send_event, "ff", tostring(dmg)) end
+                FT.stats.hurts, FT.stats.damage_taken = FT.stats.hurts + 1, FT.stats.damage_taken + dmg
+                FT.note(string.format("%s reached it: it takes %d damage%s", tostring(e.name), dmg, B.blocking and " (blocking)" or ""))
+                break -- one hit per tick, however many are on it
+            end
+        end
+    end
+
+    function FT.update(now)
+        FT.flush(now)
+        local active = B.own_on() and peer_present(now)
+        if not active then
+            FT.target, FT.aiming, FT.drawn, FT.can_shoot, FT.hurters = nil, false, false, false, {}
+            if FT.healing then FT.healing = nil end
+            FT.state = CFG.friend.present() and "it is not acting for itself" or "not here"
+            return
+        end
+        local hp, mx, down = FT.health(now)
+        if down and not FT.was_down then
+            FT.stats.times_down = FT.stats.times_down + 1
+            FT.note("it is down")
+        end
+        FT.was_down = down == true
+        FT.check_verify(now, hp, mx)
+        if now - FT.scan_at >= FT.SCAN_EVERY then
+            local ok, err = pcall(FT.scan, now)
+            if not ok then FT.target, FT.hurters, FT.state = nil, {}, "enemy read failed: " .. tostring(err):sub(1, 80) end
+        end
+        FT.heal_tick(now, hp, mx, down)
+        FT.hurt_tick(now, hp, mx, down)
+        local A = CFG.friend.ai
+        local busy = FT.healing ~= nil or (A and (A.using ~= nil or A.reviving ~= nil))
+        FT.can_shoot, FT.aiming = false, false
+        if down then
+            FT.drawn, FT.state = false, "down"
+        elseif not FT.on then
+            FT.drawn, FT.state = false, "shooting is switched off"
+        else
+            local t = FT.target
+            local W, ngun, ammo = FT.pick_weapon()
+            FT.weapon = W
+            if t then FT.draw_until = now + FT.DRAWN_SECS end
+            if busy then
+                FT.state = "busy with a heal"
+            elseif not t then
+                FT.state = W and "ready: nothing near you to shoot at" or (ngun > 0 and "no ammo" or "no gun")
+            elseif not W then
+                if ngun > 0 then
+                    FT.state = "out of ammo"
+                    if now - FT.out_told_at >= FT.OUT_TELL_EVERY then
+                        FT.out_told_at = now
+                        FT.stats.out_of_ammo = FT.stats.out_of_ammo + 1
+                        FT.tell("I'm out of ammo!")
+                    end
+                else
+                    FT.state = "no gun"
+                    if now - FT.no_gun_told_at >= FT.NO_GUN_TELL_EVERY then
+                        FT.no_gun_told_at = now
+                        FT.stats.no_gun = FT.stats.no_gun + 1
+                        FT.tell("I have nothing to shoot with. Give me a gun and ammo.")
+                    end
+                end
+            else
+                FT.aiming = true
+                if FT.reloading and now >= FT.reload_until then
+                    FT.reloading = false
+                    FT.mag_left = math.min(FT.FAMILY[W.family].mag, FT.ammo_left(W.ammo_family or W.family))
+                end
+                if FT.reloading then
+                    FT.state = string.format("reloading (%.1f s)", math.max(0, FT.reload_until - now))
+                elseif now >= FT.next_shot_at then
+                    FT.can_shoot = true
+                    FT.state = "shooting"
+                    FT.shoot(now, t, W)
+                else
+                    FT.can_shoot = true
+                    FT.state = "aiming at " .. tostring(t.name)
+                end
+                if FT.reloading then FT.can_shoot = false end
+            end
+            FT.drawn = FT.weapon ~= nil and (FT.aiming or now < FT.draw_until)
+        end
+        FT.show_weapon(now)
+    end
+
+    function FT.report()
+        local guns, ammo = FT.arsenal()
+        local hp, mx, down = FT.health(os.clock())
+        local ammo_out = {}
+        for fam, a in pairs(ammo) do ammo_out[fam] = a.total end
+        local gl = {}
+        for _, g in ipairs(guns) do gl[#gl + 1] = { id = g.id, kind = g.family, damage = FT.damage_of(g) } end
+        return { shoots = FT.on, state = FT.state, target = FT.target and { name = FT.target.name, metres_from_you = math.floor(FT.target.dist_you * 10) / 10,
+                metres_from_it = math.floor(FT.target.dist_it * 10) / 10 } or nil,
+            enemies_in_reach = FT.targets_near, line_of_sight = "ignored", near_you_m = FT.NEAR_YOU, reach_m = FT.REACH, shortest_gap_ms = math.floor(FT.MIN_GAP * 1000 + 0.5),
+            weapon = FT.weapon and { id = FT.weapon.id, kind = FT.weapon.family, damage = FT.weapon.damage, rounds_in_magazine = FT.mag_left, reloading = FT.reloading, ms_between_shots = math.floor(FT.gap_of(FT.weapon.family) * 1000 + 0.5) } or nil,
+            guns = gl, ammo = ammo_out, drawn = FT.drawn, aiming = FT.aiming,
+            health = hp and { hp = hp, max = mx, percent = math.floor(hp / mx * 100), down = down } or nil,
+            heals_itself = FT.heal_self, heals_below_percent = FT.heal_below, healing_now = FT.healing and FT.healing.id or nil, exe_older_than_10_8 = FT.exe_old,
+            enemies_hurt_it_by_percent = FT.hurt_pct, stats = FT.stats, last = FT.last, last_said = FT.last_tell, scans = FT.scans }
+    end
+end
+
+----------------------------------------------------------------------------------------------
+-- (10.9) AFTER A GAME OVER Ethan's friend gets up at full health and is put next to you ("after a game over, ethans friend should revive and teleport to me").
+-- The game over is the game's own signal (RE7.on_death_signal: the game mode changing to game over). The reload that follows puts you at the last
+-- checkpoint, somewhere else: a friend that was down stays where it fell and one that is closer than 40 m would only walk after you. So when the reload has
+-- FINISHED (the loading gate, CFG.busy, was shut and has been open for WAIT_AFTER_LOAD s; or GIVE_UP s after the game over when no load was seen) the script
+-- sends the exe the command "revive" (kind 11; exe 10.9: up at full health, put next to you, "up" + a health report come back) and, for an exe from before
+-- 10.9 that does not know it, "up" (it gets up where it is). Nothing happens unless the friend is here. A switch in the panel, and a button to try it.
+----------------------------------------------------------------------------------------------
+CFG.friend.over = {
+    on = true, WAIT_AFTER_LOAD = 2.0, GIVE_UP = 45, GIVE_UP_ABSENT = 120,
+    armed_at = nil, why = nil, saw_load = false, load_end = nil, armed_n = 0, sent_n = 0, last = "no game over yet", last_at = nil,
+}
+do
+    local O = CFG.friend.over
+
+    -- A game over was signalled (RE7.on_death_signal; it can be signalled more than once while the screen is up: only the first arms).
+    function O.arm(why, now)
+        now = now or os.clock()
+        if O.armed_at then return end
+        O.armed_n = O.armed_n + 1
+        if not O.on then O.last = "game over (" .. tostring(why) .. "): the switch 'after a game over it gets up and comes to me' is off" return end
+        if not CFG.friend.present() then O.last = "game over (" .. tostring(why) .. "): Ethan's friend is not here, nothing to do" return end
+        O.armed_at, O.why, O.saw_load, O.load_end = now, tostring(why), false, nil
+        O.last = "game over (" .. tostring(why) .. "): waiting for the reload to finish"
+    end
+
+    -- Revive it and bring it to you now (the end of the wait, and the panel's button).
+    function O.fire(now, why)
+        now = now or os.clock()
+        O.armed_at = nil
+        O.sent_n = O.sent_n + 1
+        pcall(net_send, CFG.who.BOT_MSG, "revive")
+        pcall(net_send, CFG.who.BOT_MSG, "up") -- (an exe from before 10.9 ignores "revive": it at least gets up, where it is)
+        pcall(function()
+            local FT = CFG.friend.fight
+            if FT.healing and FT.stop_heal then FT.stop_heal("game over") end
+            if FT.tell then FT.tell("I'm back. Coming to you.") end
+        end)
+        O.last, O.last_at = "told Ethan's friend to revive and come to you (" .. tostring(why) .. ")", now
+        say("friend: " .. O.last)
+    end
+
+    function O.tick(now)
+        if not O.armed_at then return end
+        if not O.on then O.armed_at = nil O.last = "switched off while waiting" return end
+        if not CFG.friend.present() then
+            if now - O.armed_at > O.GIVE_UP_ABSENT then O.armed_at = nil O.last = "game over: Ethan's friend was not here for " .. O.GIVE_UP_ABSENT .. " s, dropped" end
+            return
+        end
+        if CFG.busy and CFG.busy.busy then
+            O.saw_load, O.load_end = true, nil
+        elseif O.saw_load and not O.load_end then
+            O.load_end = now
+        end
+        if O.saw_load and O.load_end and now - O.load_end >= O.WAIT_AFTER_LOAD then
+            O.fire(now, "the reload after the game over has finished")
+        elseif not O.saw_load and now - O.armed_at >= O.GIVE_UP then
+            O.fire(now, "no reload seen " .. O.GIVE_UP .. " s after the game over")
+        end
+    end
+
+    function O.report()
+        return { on = O.on, waiting = O.armed_at ~= nil, waiting_s = O.armed_at and math.floor((os.clock() - O.armed_at) * 10) / 10 or nil, load_seen = O.saw_load,
+            game_overs_seen = O.armed_n, revives_sent = O.sent_n, last = O.last, wait_after_load_s = O.WAIT_AFTER_LOAD, give_up_s = O.GIVE_UP }
+    end
+end
+
 -- On screen: the red tint and text when you are down, and what the helper can do.
 function pstat.draw(now)
     local who = H.who_is_there()
@@ -10559,6 +14048,8 @@ function pstat.draw(now)
         end)
         pcall(draw.text, "YOU ARE DOWN: " .. who .. " has to use a Herb or Chem Fluid next to you", 24, 200, 0xFF3030FF)
     end
+    local FA = CFG.friend.ai
+    if FA and (FA.reviving or FA.using) then pcall(draw.text, "Ethan's friend: " .. FA.status, 24, 250, 0xFF00D7FF) end -- (10.6)
     local r = pstat.remote
     if r and r.downed and peer_present(now) and now - r.at < 10 then
         local d = H.remote_distance()
@@ -10622,8 +14113,12 @@ dbg.extra = function()
                         why = e.why, size = e.size, crc = e.crc, tag = e.tag, partner_account = e.partner_account, game_lists_the_slot = sv.game_sees(tonumber(e.slot) or -1, os.clock()) }
                 end
             end
-            local okg, gset, glist = pcall(function() return CFG.lm.game_slots() end)
+            local okg, gset, glist = pcall(function() return CFG.lm.game_slots(10, sv.SCAN_TO) end) -- (10.20: a scan up to 10 s old, 21 questions, not 61 calls into the game on every write)
             out.game_says_slots_exist = okg and glist or nil
+            local st = CFG.lm.scan_stats
+            out.slot_scans = { about = "10.20: how often and how long the game was asked which save slots exist (isExistData); slow = scans that took 30 ms or more",
+                scans = st.scans, calls = st.calls, avg_ms = st.scans > 0 and math.floor(st.total_ms / st.scans * 100) / 100 or 0, max_ms = math.floor(st.max_ms * 10) / 10,
+                served_from_cache = st.served_from_cache, slow = st.slow, exe_file_reads = sv.read_stats and sv.read_stats.reads or nil }
             out.label_status = CFG.lm.status
             out.labels_written = CFG.lm.written
             out.played_with = {}
@@ -10632,11 +14127,9 @@ dbg.extra = function()
             return out
         end)(),
         story = CFG.story.report(), -- 
-        spawn_log = CFG.slog and CFG.slog.report(false) or nil, -- 9.43: the spawn log (Mia's spawn: methods, files, what her copy lacks, hair physics)
+        enemy_timeline = enemy.tl and enemy.tl.report() or nil, -- 10.12: how the joiner plays the host's enemies back (delay, clock, interpolation counts)
         enemy_clips = CFG.eanim and CFG.eanim.report() or nil, -- 9.41: enemy clip playback, the bank fetch, and the table of every bank and clip id seen
         doors = CFG.door and CFG.door.report() or nil, -- 9.40: door sync (what was sent and got, why a door was ignored, the loading gate)
-        cutscenes = CFG.cs and CFG.cs.report() or nil,
-        execution_test = RE7.exec.report(), -- 
         item_sync = items.report(), -- 9.32: the pickup hook (every addItem overload), what it saw, and the take / both-players mode
         item_data = CFG.idata.report(), -- 9.32: the kinds held (stack sizes, records), the item classes' fields and methods
         items = { create_worked_with = give.create_how, bumped_stacks = give.bumped or 0, failed_creations = give.create_log,
@@ -10699,7 +14192,7 @@ dbg.extra = function()
         who = CFG.who and CFG.who.report() or nil, -- 9.31
         weapons = CFG.wpn and CFG.wpn.report() or nil, friendly_fire = CFG.ff and CFG.ff.report() or nil,
         pickups = CFG.pick and CFG.pick.report() or nil, inventory_changes = CFG.inv and CFG.inv.report() or nil, -- 9.31
-        loader = CFG.load and CFG.load.report() or nil, enemy_models = CFG.pup and CFG.pup.report() or nil, -- 9.31
+        loader = CFG.load and CFG.load.report() or nil, enemy_models = CFG.pup and CFG.pup.report() or nil, kill_sync = CFG.kill and CFG.kill.report() or nil, limb_sync = CFG.limb and CFG.limb.report() or nil, -- 9.31; 10.21
         enemy_motions = CFG.mot and CFG.mot.report() or nil, -- 9.33: the .motlist files of the enemies near the last press
         bridge_reads = CFG.bridge and CFG.bridge.report() or nil, -- 9.33: reads of the exe's files that failed (and how often the script waited instead)
         reset_to_defaults = CFG.reset and { times = CFG.reset.done, last = CFG.reset.last } or nil, -- 9.33
@@ -10708,9 +14201,30 @@ dbg.extra = function()
         model_types = CFG.mprobe and CFG.mprobe.types or nil,
         body_lab = CFG.body and CFG.body.report and CFG.body.report() or nil,
         real_body = CFG.real and CFG.real.report and CFG.real.report() or nil,
-        hair = CFG.hair and CFG.hair.report() or nil, -- 9.35: Mia's hair physics (and what her hair / cloth components hold)
         perf = CFG.perf and CFG.perf.report() or nil, -- 9.36: where the frame time goes, the slowest frames, what writing this file costs
         model_check = CFG.verify and CFG.verify.report and CFG.verify.report() or nil, -- 9.36: the every-5-seconds check that enemy models are whole
+        reframework = CFG.fw and CFG.fw.report() or nil, -- 10.1: which REFramework build wrote this file
+        model_settle = CFG.settle and CFG.settle.report() or nil, -- 10.1: the look at a new body after 4 s, the rebuilds and what was said
+        model_pack = CFG.pack and CFG.pack.report() or nil, -- 10.1: the full character models (Nexus RE7 mod 86)
+        motion_banks = CFG.mbank and CFG.mbank.report() or nil, -- 10.1: Ethan's bank / clip pairs, their names and labels
+        weapon_models = CFG.wmesh and CFG.wmesh.report() or nil, -- 10.15: the other player's weapon on their body (the mesh / material / grip that went over, the copy, what failed)
+        boss_pool = CFG.pool and CFG.pool.report() or nil, -- 10.15: one health pool: the copies that took the host's number, the kills, the boss bar
+        car_probe = CFG.car and CFG.car.report() or nil, -- 10.16: the garage car probe (reads only)
+        story_flow = CFG.flow and CFG.flow.report() or nil, -- 10.18: the game's story flow numbers, mine and the other player's (reads only)
+        story_match = CFG.match and CFG.match.report() or nil, -- 10.18: matching the story steps (experimental)
+        enemy_targets = CFG.tgt and CFG.tgt.report() or nil, -- 10.18: who the enemies target and how far they are from each player (reads only)
+        enemy_handover = CFG.own and CFG.own.report() or nil, -- 10.18: the enemy hand-over (experimental)
+        enemy_sync_tick = CFG.esync and CFG.esync.report() or nil, -- 10.19: re7mp.exe's box "Sync enemies and the Molded"
+        channel_tick = CFG.chan and CFG.chan.report() or nil, -- (10.24) which channel and build re7mp.exe says it is
+        garage_car = CFG.carsync and CFG.carsync.report() or nil, -- 10.19: Jack's car in the garage: who runs it, the other player's get-in, the puppet, damage
+        actor_probe = CFG.actors and CFG.actors.report() or nil, -- 10.19: scene objects that run their own script (reads only)
+        guard = CFG.guard and CFG.guard.report() or nil, -- 10.16: the quiet check (loading, events, cutscenes) the pool, the weapon model and the boss hits wait for
+        molded_spawn_points = CFG.mold and CFG.mold.report() or nil, -- 10.15: the Molded the spawn points say are out, by their unique wire names
+        molded_copies = CFG.molded and CFG.molded.report() or nil, -- 10.15: (opt-in) the host's Molded brought out in this game
+        friend = CFG.friend and CFG.friend.report() or nil, -- 10.5: Ethan's friend: its inventory, the shared weapons and ammo, what was refused
+        low_body = CFG.low and CFG.low.report() or nil, -- 10.12: crawling / lying: the floor the other body is stood on
+        run_or_walk = CFG.run and CFG.run.report() or nil, -- 10.12: the run bit, the speeds and the bars
+        game_motion = CFG.gmot and CFG.gmot.report() or nil, -- 10.2: the other player's body animated from the motion bank: every step and what it said
         model_table = CFG.bm and CFG.bm.report() or nil, -- 9.36: per model: collected, files known, made / failed and why, what the check found
         clips = CFG.clip and CFG.clip.report and CFG.clip.report() or nil,
         other_player = pstat.remote and { hp = pstat.remote.hp, max = pstat.remote.max, downed = pstat.remote.downed } or nil,
@@ -10922,16 +14436,20 @@ function pstat.panel()
     else
         imgui.text(who .. ": no health received yet")
     end
-    if state.remote_name == "Loopback Bot" then -- the pretend player can be told to go down, so a revive can be tried alone
-        imgui.text(string.format("The loopback bot can go down: walk within %.0f m of it and press F8, then stay put for %.0f s (no item needed), or use a heal from the inventory next to it.",
+    if CFG.friend.present() then -- the pretend player can be told to go down, so a revive can be tried alone
+        imgui.text(string.format("Ethan's friend can go down: walk within %.0f m of it and press F8, then stay put for %.0f s (no item needed), or use a heal from the inventory next to it.",
             pstat.revive_radius, pstat.revive_hold))
-        if imgui.button("Loopback bot: make it go down") then
+        if imgui.button("Ethan's friend: make it go down") then
             net_send(H.BOT_MSG, "down")
-            H.note("told the loopback bot to go down")
+            H.note("told Ethan's friend to go down")
         end
-        if imgui.button("Loopback bot: make it get up") then
+        if imgui.button("Ethan's friend: make it get up") then
             net_send(H.BOT_MSG, "up")
-            H.note("told the loopback bot to get up")
+            H.note("told Ethan's friend to get up")
+        end
+        if imgui.button("Ethan's friend: revive it and bring it to me (what happens after a game over)") then
+            CFG.friend.over.fire(os.clock(), "the button")
+            H.note("told Ethan's friend to revive and come to me")
         end
     end
     imgui.text(pstat.last)
@@ -11178,6 +14696,9 @@ function H.pose_eye(go, now)
         P.crouch_h = true
     end
     P.crouch_reads = P.crouch_reads + (P.crouch_h and 1 or 0)
+    -- (10.10) the deepest the camera sank in a crouch so far (shown in the friend's crouch report: the value CROUCH_DROP, 0.5 m, was a guess)
+    local GF = CFG.friend and CFG.friend.ground
+    if GF and P.crouch_h and P.eye_drop > (GF.cam_drop or 0) and P.eye_drop < 1.2 then GF.cam_drop = P.eye_drop end
 end
 
 -- Once per player object: every field of every player component whose name hints at crouching or a stance. They are only
@@ -11329,6 +14850,10 @@ state.pose_source = function(now)
     local P = H.POSE
     local guard, heal = P.guard, P.heal
     if H.rec.use_signal and H.rec.signal and H.rec.guard_now(now) then guard = true end -- (an extra, learned signal the player ticked)
+    if CFG.mbank then -- (10.4) the clip on Ethan's overlay layers: a block / heal the flags did not see
+        if CFG.mbank.overlay_is("guard", now) then guard = true end
+        if CFG.mbank.overlay_is("heal", now) then heal = true end
+    end
     -- 9.9: a downed player's body still does what it does (the 9.8 build hid it); the other player sees the truth.
     local crouch = P.crouch
     P.sent.packets = P.sent.packets + 1
@@ -12558,9 +16083,19 @@ net_on(VER_MSG, function(payload)
     else
         V.problem = nil
     end
+    -- (10.24) the same release but another BUILD (the alpha builds share a release number): only a note, never a problem, since two nearby builds may well work together
+    if rel == CFG.RELEASE and build ~= CFG.BUILD then
+        V.build_note = string.format("%s runs script build %s and you run %s (the same release): changes between builds can change what is synced, so for a test both of you should run the same build", who, build, CFG.BUILD)
+    else
+        V.build_note = nil
+    end
     if first then
         say("version: " .. V.summary)
         if V.problem then chat_add("Version", V.problem) end
+    end
+    if V.build_note and V.build_noted ~= build then
+        V.build_noted = build
+        say("version: " .. V.build_note)
     end
 end)
 
@@ -12579,9 +16114,9 @@ function V.update(now)
         V.sent_at = now
         net_send(VER_MSG, mine())
     end
-    -- they never said which version they run: an older script (the loopback bot is not a script)
+    -- they never said which version they run: an older script (Ethan's friend is not a script)
     local who = state.remote_name or CFG.DEFAULT_NAME
-    if present and not V.remote and V.seen_at and now - V.seen_at > 8 and who ~= "Loopback Bot" then
+    if present and not V.remote and V.seen_at and now - V.seen_at > 8 and not CFG.friend.is_name(who) then
         V.summary = who .. " runs a script older than release v" .. CFG.RELEASE .. " (it reports no version)"
         if not V.problem then
             V.problem = who .. "'s script is older than release v" .. CFG.RELEASE .. ": update so you both run the same version"
@@ -12611,6 +16146,11 @@ function V.panel()
     if V.exe_problem then warn(V.exe_problem) end
     if V.problem then warn(V.problem)
     elseif V.summary then imgui.text(V.summary) end
+    if V.build_note and not V.problem then imgui.text(V.build_note) end
+    -- (10.24) a tester on the public alpha: said at the top of the panel, so a screenshot or a debug file shows it
+    if CFG.chan and CFG.chan.value == "alpha" then
+        imgui.text("ALPHA channel (re7mp.exe build " .. tostring(CFG.chan.exe_build or "?") .. "): expect things to break; send debug.json from both players with what you were doing.")
+    end
 end
 end -- do
 
@@ -12624,9 +16164,9 @@ CFG.saves = saves
 -- Does the game itself say a save exists in this slot (SaveDataManager.isExistData)? true / false / nil when it can't be asked.
 -- Asked at most every 2 s: it is one call for each of 60 slots.
 function saves.game_sees(slot, now)
-    if now - (saves.seen_at or -10) > 2 then
+    if now - (saves.seen_at or -100) > 2 then -- (10.20: still every 2 s, but only while the panel or a debug file asks, and 21 questions, not 61, from a scan that is up to 2 s old)
         saves.seen_at = now
-        local ok, set = pcall(function() return CFG.lm.game_slots() end)
+        local ok, set = pcall(function() return CFG.lm.game_slots(2, saves.SCAN_TO) end)
         saves.seen = ok and set or nil
     end
     if saves.seen == nil then return nil end
@@ -12639,6 +16179,21 @@ end
 -- partner is connected, and that the exe does not list, is written down as played with that partner and labelled "[CO-OP with Bob]"
 -- in the Load screen. A save written over an existing slot looks the same as before, so it can NOT be told (see the README).
 saves.played, saves.pending, saves.prev_set, saves.watch_at, saves.played_loaded = {}, {}, nil, -100, false
+-- (10.20) How often the script looks at things around the saves. Before: the exe's save file every 1 s, and the game's 61 save slots (isExistData 0 to 60) every 5 s whether or
+-- anybody was connected or not, and again for the panel and for every debug file. In the 10.15 host file the five slowest frames (400 to 600 ms) were all in that part of the
+-- frame, and the game's own autosave writes into the same folder. Now: the exe's file every 5 s (every 2 s while the REFramework menu is open, every 15 s while nothing is
+-- shared and nobody is connected), the slots only to 20 (the game lists 15 at most; the exe never installs past 15), every 5 s only while someone is connected and every
+-- 60 s otherwise, and one scan serves the panel and the debug file. (RE7MP_TEST_SAVES_S: only the test harness sets it; it keeps the old 1 s file read.)
+saves.READ_S, saves.READ_IDLE_S, saves.READ_UI_S = 5, 15, 2
+saves.WATCH_S, saves.WATCH_IDLE_S, saves.SCAN_TO = 5, 60, 20
+saves.TEST_READ_S = tonumber(rawget(_G, "RE7MP_TEST_SAVES_S"))
+saves.read_stats = { reads = 0 }
+function saves.read_gap(now)
+    if saves.TEST_READ_S then return saves.TEST_READ_S end
+    if state.ui_at ~= nil and now - state.ui_at < 1.5 then return saves.READ_UI_S end -- the REFramework menu is open: somebody may be looking at the panel
+    if saves.enabled or peer_present(now) then return saves.READ_S end
+    return saves.READ_IDLE_S
+end
 function saves.played_load()
     saves.played_loaded = true
     local d = FILES.read("coop_played")
@@ -12664,18 +16219,26 @@ end
 
 function saves.watch(now)
     if not saves.played_loaded then saves.played_load() end
-    if now - saves.watch_at < 5 then return end
+    local who = state.remote_name
+    local with = peer_present(now) and type(who) == "string" and who ~= ""
+    -- 10.20: with nobody connected only a slow look is needed (a deleted slot is forgotten); the first look after somebody appears only takes the picture, so a save that
+    -- was made before they came is not taken for one made with them (before, the picture was never more than 5 s old).
+    local fresh = with and not saves.watch_with
+    local fast = with or next(saves.pending) ~= nil
+    if not fresh and now - saves.watch_at < (fast and saves.WATCH_S or saves.WATCH_IDLE_S) then saves.watch_with = with return end
+    -- (10.27) a look is due, but the game is writing a save: 61 isExistData questions into the folder it is writing to took 626, 499 and 222 ms in the 10.26 file. Wait for the save to end
+    -- (and 1.5 s after). Nothing is lost by it: watch_with and watch_at are left alone, so a "fresh" look stays fresh and a due look stays due, and the new slot is seen right after.
+    if CFG.perf.saving_quiet(now, "slot_watch") then return end
+    saves.watch_with = with
     saves.watch_at = now
-    local ok, set = pcall(function() return CFG.lm.game_slots() end)
+    local ok, set = pcall(function() return CFG.lm.game_slots(nil, saves.SCAN_TO) end)
     if not ok or type(set) ~= "table" then return end
     local mine = {}
     for _, e in ipairs(saves.entries) do
         if type(e) == "table" and tonumber(e.slot) then mine[math.floor(tonumber(e.slot))] = true end
     end
     local changed = false
-    local who = state.remote_name
-    local with = peer_present(now) and type(who) == "string" and who ~= ""
-    if saves.prev_set then
+    if saves.prev_set and not fresh then
         for sl in pairs(set) do
             if not saves.prev_set[sl] and with and not mine[sl] and not saves.played[sl] and not saves.pending[sl] then
                 saves.pending[sl] = { at = now, partner = who }
@@ -12702,6 +16265,7 @@ end
 
 local function read_saves(now)
     saves.last_read = now
+    saves.read_stats.reads = saves.read_stats.reads + 1
     local d = json.load_file("re7mp_coop_saves.json")
     if type(d) ~= "table" then return end
     saves.enabled = d.enabled == true
@@ -12731,7 +16295,7 @@ function saves.accounts_line()
     if theirs == 0 then
         return s .. "the other player's account is not known yet (their re7mp.exe 9.42 or newer tells it once connected)."
     elseif theirs == mine then
-        return s .. "the other player's account is the SAME (the loopback bot, or you both use one Steam account)."
+        return s .. "the other player's account is the SAME (Ethan's friend, or you both use one Steam account)."
     end
     return s .. "the other player's account is " .. theirs .. "."
 end
@@ -12953,11 +16517,21 @@ end
 
 -- The manual slots the game itself says exist (SaveDataManager.isExistData: true for 0 = the Autosave and for each manual
 -- save). Returns a set {slot = true} and a sorted list, or nil if the game can't be asked.
-function LM.game_slots()
+-- 10.20: game_slots(max_age, limit): `limit` is the highest slot asked (60 when not given); an answer from the last `max_age` seconds that covered at least that many slots is
+-- given again instead of asking the game again (nil = always ask). Every real scan is timed: LM.scan_stats goes in the debug file (a scan that took 30 ms or more is listed).
+LM.scan_stats = { scans = 0, calls = 0, total_ms = 0, max_ms = 0, slow = {}, served_from_cache = 0 }
+function LM.game_slots(max_age, limit)
+    limit = limit or 60
+    local t0 = os.clock()
+    local c = LM.slots_cache
+    if c and max_age and t0 - c.at <= max_age and c.limit >= limit then
+        LM.scan_stats.served_from_cache = LM.scan_stats.served_from_cache + 1
+        return c.set, c.list
+    end
     local okm, sm = pcall(sdk.get_managed_singleton, "app.SaveDataManager")
     if not okm or not sm then return nil end
     local set, list, asked = {}, {}, false
-    for i = 0, 60 do
+    for i = 0, limit do
         local ok, v = pcall(function() return sm:call("isExistData", i) end)
         if ok and v ~= nil then asked = true end
         if ok and v == true and i >= 1 then
@@ -12965,7 +16539,16 @@ function LM.game_slots()
             list[#list + 1] = i
         end
     end
+    local dt = os.clock() - t0
+    local st = LM.scan_stats
+    st.scans, st.calls, st.total_ms = st.scans + 1, st.calls + limit + 1, st.total_ms + dt * 1000
+    if dt * 1000 > st.max_ms then st.max_ms = dt * 1000 end
+    if dt >= 0.03 then
+        st.slow[#st.slow + 1] = { at = math.floor(t0 * 10) / 10, ms = math.floor(dt * 10000) / 10, slots = limit + 1 }
+        while #st.slow > 12 do table.remove(st.slow, 1) end
+    end
     if not asked then return nil end
+    LM.slots_cache = { at = t0, limit = limit, set = set, list = list }
     return set, list
 end
 
@@ -13296,11 +16879,15 @@ local function settings_snapshot()
         death_mode_choice = death.mode, exec_wipe = death.exec_wipe, ping_mode = pings.mode, item_sync = items.enabled,
         show_skeleton = state.show_skeleton, freeze_instead = lobby.freeze_instead,
         auto_join = lobby.auto_join, auto_start = lobby.auto_start,
-        enemy_mode = enemy.mode, enemy_drive_ai = enemy.drive_ai,
+        enemy_mode2 = enemy.mode, enemy_drive_ai = enemy.drive_ai, -- (10.22: enemy_mode2; the old key enemy_mode held "2" for everybody and is no longer read)
         drop_on_discard = give.drop_on_discard, give_hint = give.hint, give_last = give.last_ok,
         hide_near = math.floor(CFG.HIDE_NEAR_DISTANCE * 100 + 0.5) / 100, show_parked = enemy.show_parked, enemy_hide_walls = enemy.hide_walls,
         revive_radius = math.floor(pstat.revive_radius * 10 + 0.5) / 10, revive_pct = pstat.revive_pct,
         revive_hold = math.floor(pstat.revive_hold * 2 + 0.5) / 2,
+        friend_helps = CFG.friend.ai.on, friend_revive = CFG.friend.ai.revive, friend_heal = CFG.friend.ai.heal, friend_heal_below = CFG.friend.ai.below, -- (10.6)
+        friend_fights = CFG.friend.fight.on, friend_heals_itself = CFG.friend.fight.heal_self, friend_self_below = CFG.friend.fight.heal_below, friend_hurt_pct = CFG.friend.fight.hurt_pct, -- (10.8)
+        friend_shoot_m = CFG.friend.fight.NEAR_YOU, friend_crouch_lift = CFG.friend.crouch_lift, friend_guard_m = CFG.friend.body.BLOCK_DIST, friend_revive_after_over = CFG.friend.over.on, friend_ground_feet = CFG.friend.ground.on, friend_shot_gap_ms = math.floor(CFG.friend.fight.MIN_GAP * 1000 + 0.5), act_layers = CFG.mbank.act_on, -- (10.9; 10.10: friend_ground_feet, friend_shot_gap_ms, act_layers)
+        show_retired_panels = CFG.show_retired or nil, -- (10.7) a hidden switch (only written when true): brings back the four menu sections that were retired
         label_loadmenu = CFG.lm.enabled,
         guard_signal = pstat.rec and pstat.rec.signal or nil, use_guard_signal = pstat.rec and pstat.rec.use_signal or false,
         occlude = state.occlude, menu_hide = state.menu_hide, wall_skip = state.occ.skip_list(),
@@ -13309,38 +16896,41 @@ local function settings_snapshot()
         hit_on = enemy.hit.on, hit_accept = enemy.hit.accept, hit_damage = enemy.hit.damage, shot_signal = enemy.hit.signal,
         face_me = CFG.face_me == true, body_scale = CFG.body.scale, crouch_extra = CFG.body.crouch_extra, body_hidden = CFG.body.hidden_list(),
         real_body = CFG.real.on, real_body_set = CFG.real.touched, real_body_model = CFG.real.model, real_body_debug = CFG.real.debug,
-        real_body_hair = CFG.real.hide_hair, mia_own_head = CFG.body.face.on, mia_layers_on = CFG.body.face.mats, mia_layers = CFG.body.face_choice_copy(),
-        hair_physics = CFG.hair.on, mia_head_parts = CFG.body.donor.on, -- (9.35)
-        cutscene_probe = CFG.cs and CFG.cs.on == true or false, cutscene_secs = CFG.cs and CFG.cs.secs or 25,
-        cutscene_link = CFG.cs and CFG.cs.link == true or false, cutscene_stop_loco = CFG.cs and CFG.cs.stop_loco ~= false or false, cutscene_loco_grace = CFG.cs and CFG.cs.loco_grace or 4,
+        real_body_hair = CFG.real.hide_hair, mia_own_head = CFG.body.face.on, mia_layers_on = CFG.body.face.mats, mia_layers = CFG.body.face_choice_copy(), vr_layers_off = CFG.body.face.vr_off, vr_chest_10_9 = true,
+        mia_head_parts = CFG.body.donor.on, -- (9.35)
         gun_signals = (pstat.gun and (pstat.gun.signals.gun or pstat.gun.signals.aim)) and { gun = pstat.gun.signals.gun, aim = pstat.gun.signals.aim } or nil,
         use_gun_signals = pstat.gun and pstat.gun.use_learned or false,
         gun_hold = pstat.gun and pstat.gun.hold or 12,
         who_choice = CFG.who and CFG.who.choice, who_follow = CFG.who and CFG.who.follow,
-        hit_by_gun = enemy.hit.by_gun, hit_gun_scale = enemy.hit.gun_scale,
+        hit_by_gun2 = enemy.hit.by_gun, hit_gun_scale = enemy.hit.gun_scale, -- (10.21: hit_by_gun2; the old key held "false" for everybody and is no longer read)
         story_callout = CFG.story.callout == true, story_back = CFG.story.back ~= false, story_watch = CFG.story.watch_list(),
         item_journal = CFG.pick and CFG.pick.on, item_scan = CFG.pick and CFG.pick.scan, item_mode = items.mode, item_ground = give.ground,
         item_safe_only = items.safe_only, -- (9.44)
-        load_by_path = CFG.load and CFG.load.on, pup_on = CFG.pup and CFG.pup.on, pup_box_too = CFG.pup and CFG.pup.box_too,
-        door_sync = CFG.door == nil or CFG.door.on ~= false, -- (9.40)
+        load_by_path = CFG.load and CFG.load.on, pup_on2 = CFG.pup and CFG.pup.on, pup_box_too = CFG.pup and CFG.pup.box_too, -- (10.21: pup_on2; the old pup_on key is no longer read)
+        pool_follow = CFG.pool and CFG.pool.on, pool_bar = CFG.pool and CFG.pool.bar, -- (10.15) one health pool, the boss bar
+        kill_sync = CFG.kill and CFG.kill.on, -- (10.21) kills both ways
+        limb_sync = CFG.limb and CFG.limb.on, -- (10.21) Molded limbs and heads both ways
+        weapon_models = CFG.wmesh and CFG.wmesh.on, -- (10.15) the other player's weapon on their body
+        car_sync = CFG.carsync and CFG.carsync.on, car_ride = CFG.carsync and CFG.carsync.opt.ride, car_damage = CFG.carsync and CFG.carsync.opt.damage, -- (10.19) the garage car
+        car_runover = CFG.carsync and CFG.carsync.opt.runover, car_carry = CFG.carsync and CFG.carsync.opt.carry, car_seat = CFG.carsync and CFG.carsync.opt.seat,
+        car_brain_off = CFG.carsync and CFG.carsync.opt.brain_off, car_seat_x = CFG.carsync and CFG.carsync.opt.seat_x, car_run_damage = CFG.carsync and CFG.carsync.opt.run_damage,
         enemy_clips = CFG.eanim ~= nil and CFG.eanim.on == true, -- (9.41)
-        spawn_log = CFG.slog ~= nil and CFG.slog.on == true, -- (9.43)
-        spawn_focus = CFG.slog ~= nil and CFG.slog.focus or nil, -- (9.43)
     }
 end
 
 local function settings_key(t)
     return table.concat({ tostring(t.death_mode_choice), tostring(t.exec_wipe), tostring(t.ping_mode), tostring(t.item_sync), tostring(t.item_safe_only),
         tostring(t.show_skeleton), tostring(t.freeze_instead), tostring(t.auto_join), tostring(t.auto_start),
-        tostring(t.enemy_mode), tostring(t.enemy_drive_ai), tostring(t.drop_on_discard), tostring(t.give_hint), tostring(t.give_last),
+        tostring(t.enemy_mode2), tostring(t.enemy_drive_ai), tostring(t.drop_on_discard), tostring(t.give_hint), tostring(t.give_last),
         tostring(t.hide_near), tostring(t.show_parked), tostring(t.enemy_hide_walls), tostring(t.revive_radius), tostring(t.revive_pct), tostring(t.revive_hold),
+        tostring(t.friend_helps), tostring(t.friend_revive), tostring(t.friend_heal), tostring(t.friend_heal_below), tostring(t.friend_fights), tostring(t.friend_heals_itself), tostring(t.friend_self_below), tostring(t.friend_hurt_pct), tostring(t.friend_shoot_m), tostring(t.friend_crouch_lift), tostring(t.friend_guard_m), tostring(t.friend_revive_after_over), tostring(t.friend_ground_feet), tostring(t.friend_shot_gap_ms), tostring(t.act_layers), tostring(t.show_retired_panels),
         tostring(t.label_loadmenu), pstat.rec and pstat.rec.signal_text() or "", tostring(t.use_guard_signal),
         tostring(t.occlude), tostring(t.menu_hide), table.concat(t.wall_skip, ","), tostring(t.weapon_lock), tostring(t.lock_hook), tostring(t.lock_items), tostring(t.lock_guns), tostring(t.lock_move), tostring(t.hit_on), tostring(t.hit_accept),
         tostring(t.hit_damage), t.shot_signal and (tostring(t.shot_signal.type) .. "." .. tostring(t.shot_signal.field)) or "",
         tostring(t.story_callout), tostring(t.story_back), table.concat(t.story_watch, ","), tostring(t.face_me), tostring(t.mia_own_head), tostring(t.mia_layers_on), CFG.body.face_choice_text(), tostring(t.body_scale), tostring(t.crouch_extra), table.concat(t.body_hidden, ","),
         tostring(t.real_body), tostring(t.real_body_set), tostring(t.real_body_model), tostring(t.real_body_debug), tostring(t.real_body_hair),
         pstat.gun and (pstat.gun.text(pstat.gun.signals.gun) .. "|" .. pstat.gun.text(pstat.gun.signals.aim)) or "", tostring(t.use_gun_signals),
-        tostring(t.cutscene_probe), tostring(t.cutscene_secs), tostring(t.gun_hold), tostring(t.who_choice), tostring(t.who_follow), tostring(t.load_by_path), tostring(t.pup_on), tostring(t.pup_box_too), tostring(t.hit_by_gun), tostring(t.hit_gun_scale), tostring(t.item_journal), tostring(t.item_scan), tostring(t.cutscene_stop_loco), tostring(t.cutscene_loco_grace), tostring(t.item_mode), tostring(t.item_ground), tostring(t.hair_physics), tostring(t.mia_head_parts), tostring(t.door_sync) }, "|")
+        tostring(t.gun_hold), tostring(t.who_choice), tostring(t.who_follow), tostring(t.load_by_path), tostring(t.pup_on2), tostring(t.pup_box_too), tostring(t.hit_by_gun2), tostring(t.hit_gun_scale), tostring(t.item_journal), tostring(t.item_scan), tostring(t.item_mode), tostring(t.item_ground), tostring(t.mia_head_parts), tostring(t.vr_layers_off), tostring(t.pool_follow), tostring(t.kill_sync), tostring(t.limb_sync), tostring(t.pool_bar), tostring(t.weapon_models), tostring(t.car_sync), tostring(t.car_ride), tostring(t.car_damage), tostring(t.car_runover), tostring(t.car_carry), tostring(t.car_seat), tostring(t.car_brain_off), tostring(t.car_seat_x), tostring(t.car_run_damage) }, "|")
 end
 
 ----------------------------------------------------------------------------------------------
@@ -13378,9 +16968,10 @@ function CFG.reset.apply(d, live)
     if type(d.freeze_instead) == "boolean" then lobby.freeze_instead = d.freeze_instead end
     if type(d.auto_join) == "boolean" then lobby.auto_join = d.auto_join end
     if type(d.auto_start) == "boolean" then lobby.auto_start = d.auto_start end
-    if type(d.enemy_mode) == "number" and d.enemy_mode >= 1 and d.enemy_mode <= #ENEMY_MODES then
-        enemy.mode = math.floor(d.enemy_mode)
-        if enemy.mode == 3 then enemy.mode = 2 end -- the experimental mode is never switched on by itself
+    -- (10.22) mode 3 (ghosts, and my own enemies moved onto the host's) is the default now and no longer "experimental". The old key enemy_mode is NOT read any more: it held
+    -- 2 for every player (the default of 0.10 was saved with the rest), so reading it would have kept everybody on ghosts only. The new key is enemy_mode2.
+    if type(d.enemy_mode2) == "number" and d.enemy_mode2 >= 1 and d.enemy_mode2 <= #ENEMY_MODES then
+        enemy.mode = math.floor(d.enemy_mode2)
     end
     if type(d.enemy_drive_ai) == "boolean" then enemy.drive_ai = d.enemy_drive_ai end
     if type(d.drop_on_discard) == "boolean" then give.drop_on_discard = d.drop_on_discard end
@@ -13393,6 +16984,30 @@ function CFG.reset.apply(d, live)
     if type(d.revive_radius) == "number" and d.revive_radius >= 1 and d.revive_radius <= 10 and d.revive_radius ~= 4 then pstat.revive_radius = d.revive_radius end
     if type(d.revive_hold) == "number" and d.revive_hold >= 1 and d.revive_hold <= 10 then pstat.revive_hold = d.revive_hold end
     if type(d.revive_pct) == "number" and d.revive_pct >= 5 and d.revive_pct <= 100 then pstat.revive_pct = math.floor(d.revive_pct) end
+    -- (10.6) what Ethan's friend does for you
+    if type(d.friend_helps) == "boolean" then CFG.friend.ai.on = d.friend_helps end
+    if type(d.friend_revive) == "boolean" then CFG.friend.ai.revive = d.friend_revive end
+    if type(d.friend_heal) == "boolean" then CFG.friend.ai.heal = d.friend_heal end
+    if type(d.friend_heal_below) == "number" and d.friend_heal_below >= 10 and d.friend_heal_below <= 80 then CFG.friend.ai.below = math.floor(d.friend_heal_below) end
+    if type(d.act_layers) == "boolean" then CFG.mbank.act_on = d.act_layers end -- (10.10) small actions on a second layer
+    -- (10.8) what the fighting friend does for itself
+    if type(d.friend_fights) == "boolean" then CFG.friend.fight.on = d.friend_fights end
+    if type(d.friend_heals_itself) == "boolean" then CFG.friend.fight.heal_self = d.friend_heals_itself end
+    if type(d.friend_self_below) == "number" and d.friend_self_below >= 10 and d.friend_self_below <= 80 then CFG.friend.fight.heal_below = math.floor(d.friend_self_below) end
+    if type(d.friend_hurt_pct) == "number" and d.friend_hurt_pct >= 0 and d.friend_hurt_pct <= 30 then CFG.friend.fight.hurt_pct = math.floor(d.friend_hurt_pct) end
+    do -- (10.9) how near YOU an enemy must be for the friend to shoot it (5 m by default; the 10.8 build shot at 10 m), and how high its crouching body stands
+        local FTs = CFG.friend.fight
+        if type(d.friend_shoot_m) == "number" and d.friend_shoot_m >= FTs.NEAR_MIN and d.friend_shoot_m <= FTs.NEAR_MAX then FTs.NEAR_YOU = math.floor(d.friend_shoot_m * 2 + 0.5) / 2 end
+        if type(d.friend_shot_gap_ms) == "number" and d.friend_shot_gap_ms >= FTs.MIN_GAP_LO * 1000 and d.friend_shot_gap_ms <= FTs.MIN_GAP_HI * 1000 then FTs.MIN_GAP = math.floor(d.friend_shot_gap_ms / 10 + 0.5) / 100 end -- (10.10)
+        local FBs = CFG.friend.body
+        if type(d.friend_guard_m) == "number" and d.friend_guard_m >= FBs.BLOCK_MIN and d.friend_guard_m <= FBs.BLOCK_MAX then FBs.BLOCK_DIST = math.floor(d.friend_guard_m * 10 + 0.5) / 10 end
+        if type(d.friend_crouch_lift) == "number" and d.friend_crouch_lift >= CFG.body.CROUCH_EXTRA_MIN and d.friend_crouch_lift <= CFG.body.CROUCH_EXTRA_TOP then
+            CFG.friend.crouch_lift = math.floor(d.friend_crouch_lift * 1000 + 0.5) / 1000
+        end
+    end
+    if type(d.friend_revive_after_over) == "boolean" then CFG.friend.over.on = d.friend_revive_after_over end -- (10.9)
+    if type(d.friend_ground_feet) == "boolean" then CFG.friend.ground.on = d.friend_ground_feet end -- (10.10)
+    if type(d.show_retired_panels) == "boolean" then CFG.show_retired = d.show_retired_panels end -- (10.7)
     if type(d.label_loadmenu) == "boolean" then CFG.lm.enabled = d.label_loadmenu end
     if type(d.occlude) == "boolean" then state.occlude = d.occlude end
     if type(d.menu_hide) == "boolean" then state.menu_hide = d.menu_hide end
@@ -13407,30 +17022,36 @@ function CFG.reset.apply(d, live)
         if type(d.who_choice) == "string" and not live then CFG.who.set_choice(d.who_choice) end -- (the exe's "Play as" owns this one)
         if type(d.who_follow) == "boolean" then CFG.who.follow = d.who_follow end
         if type(d.load_by_path) == "boolean" then CFG.load.on = d.load_by_path end
-        if type(d.pup_on) == "boolean" then CFG.pup.on = d.pup_on end
+        if type(d.pup_on2) == "boolean" then CFG.pup.on = d.pup_on2 end -- (10.21: the old key pup_on held "true" for everybody; the models are off until the box is ticked)
         if type(d.pup_box_too) == "boolean" then CFG.pup.box_too = d.pup_box_too end
+        if CFG.pool and type(d.pool_follow) == "boolean" then CFG.pool.on = d.pool_follow end -- (10.15)
+        if CFG.pool and type(d.pool_bar) == "boolean" then CFG.pool.bar = d.pool_bar end
+        if CFG.kill and type(d.kill_sync) == "boolean" then CFG.kill.on = d.kill_sync end -- (10.21)
+        if CFG.limb and type(d.limb_sync) == "boolean" then CFG.limb.on = d.limb_sync end -- (10.21)
+        if CFG.wmesh and type(d.weapon_models) == "boolean" then
+            if live and CFG.wmesh.on ~= d.weapon_models then CFG.wmesh.set_on(d.weapon_models) else CFG.wmesh.on = d.weapon_models end
+        end
+        if CFG.carsync then -- (10.19) the garage car
+            local O2 = CFG.carsync.opt
+            if type(d.car_sync) == "boolean" then CFG.carsync.on = d.car_sync end
+            if type(d.car_ride) == "boolean" then O2.ride = d.car_ride end
+            if type(d.car_damage) == "boolean" then O2.damage = d.car_damage end
+            if type(d.car_runover) == "boolean" then O2.runover = d.car_runover end
+            if type(d.car_carry) == "boolean" then O2.carry = d.car_carry end
+            if type(d.car_seat) == "boolean" then O2.seat = d.car_seat end
+            if type(d.car_brain_off) == "boolean" then O2.brain_off = d.car_brain_off end
+            if type(d.car_seat_x) == "number" and d.car_seat_x >= -2 and d.car_seat_x <= 2 then O2.seat_x = d.car_seat_x end
+            if type(d.car_run_damage) == "number" and d.car_run_damage >= 1 and d.car_run_damage <= 600 then O2.run_damage = d.car_run_damage end
+        end
         if type(d.item_journal) == "boolean" then CFG.pick.on = d.item_journal end
         if type(d.item_scan) == "boolean" then CFG.pick.scan = d.item_scan end
-        if type(d.hit_by_gun) == "boolean" then enemy.hit.by_gun = d.hit_by_gun end
+        if type(d.hit_by_gun2) == "boolean" then enemy.hit.by_gun = d.hit_by_gun2 end
         if type(d.hit_gun_scale) == "number" and d.hit_gun_scale >= 0.5 and d.hit_gun_scale <= 6 then enemy.hit.gun_scale = d.hit_gun_scale end
     end
     if pstat.lock and type(d.lock_hook) == "boolean" then pstat.lock.hooks.on = d.lock_hook end
     if pstat.lock and type(d.lock_guns) == "boolean" then pstat.lock.guns.on = d.lock_guns end
     if pstat.lock and type(d.lock_move) == "boolean" then pstat.lock.move.on = d.lock_move end
     if type(d.face_me) == "boolean" then CFG.face_me = d.face_me end
-    if CFG.cs then -- (9.28) the cutscene probe: remembered; the hook behind it is installed a few seconds into the game (CFG.cs.update)
-        if type(d.cutscene_probe) == "boolean" then
-            if live and CFG.cs.on ~= d.cutscene_probe then CFG.cs.set_on(d.cutscene_probe) else CFG.cs.on = d.cutscene_probe end
-        end
-        if type(d.cutscene_secs) == "number" and d.cutscene_secs >= CFG.cs.SECS_MIN and d.cutscene_secs <= CFG.cs.SECS_MAX then
-            CFG.cs.secs = math.floor(d.cutscene_secs + 0.5)
-        end
-        if type(d.cutscene_stop_loco) == "boolean" then CFG.cs.stop_loco = d.cutscene_stop_loco end
-        if type(d.cutscene_link) == "boolean" then CFG.cs.link = d.cutscene_link end
-        if type(d.cutscene_loco_grace) == "number" and d.cutscene_loco_grace >= CFG.cs.GRACE_MIN and d.cutscene_loco_grace <= CFG.cs.GRACE_MAX then
-            CFG.cs.loco_grace = math.floor(d.cutscene_loco_grace * 2 + 0.5) / 2
-        end
-    end
     if pstat.gun then -- (9.28) the gun / aim signals the gun recording learned (checked field by field: a damaged file must not break the script)
         if type(d.use_gun_signals) == "boolean" then pstat.gun.use_learned = d.use_gun_signals end
         if type(d.gun_hold) == "number" and d.gun_hold >= pstat.gun.HOLD_MIN and d.gun_hold <= pstat.gun.HOLD_MAX then
@@ -13455,7 +17076,10 @@ function CFG.reset.apply(d, live)
             end
         end
     end
-    if type(d.crouch_extra) == "number" and d.crouch_extra >= 0 and d.crouch_extra <= CFG.body.CROUCH_EXTRA_MAX then CFG.body.crouch_extra = math.floor(d.crouch_extra * 1000 + 0.5) / 1000 end
+    -- (10.8) the old default (0.08) saved by every earlier build is not a choice: the new default replaces it
+    if type(d.crouch_extra) == "number" and d.crouch_extra >= CFG.body.CROUCH_EXTRA_MIN and d.crouch_extra <= CFG.body.CROUCH_EXTRA_MAX and math.abs(d.crouch_extra - CFG.body.CROUCH_EXTRA_OLD) > 0.0005 then
+        CFG.body.crouch_extra = math.floor(d.crouch_extra * 1000 + 0.5) / 1000
+    end
     if type(d.body_scale) == "number" and d.body_scale >= CFG.body.SCALE_MIN and d.body_scale <= CFG.body.SCALE_MAX then
         CFG.body.scale = math.floor(d.body_scale * 1000 + 0.5) / 1000
     end
@@ -13475,23 +17099,22 @@ function CFG.reset.apply(d, live)
     -- (9.33) the story callouts and the watch-only list (the story SWITCHES are never saved: re7mp.exe's box says whether they are on)
     if type(d.story_callout) == "boolean" then CFG.story.callout = d.story_callout end
     if type(d.story_back) == "boolean" then CFG.story.back = d.story_back end
-    if type(d.door_sync) == "boolean" and CFG.door then CFG.door.on = d.door_sync end -- (9.40)
+    -- (10.22) door sync is always on: the box and its saved key door_sync are gone, so a "false" in an old settings file is not read
     if type(d.enemy_clips) == "boolean" and CFG.eanim then CFG.eanim.on = d.enemy_clips end -- (9.41)
-    if type(d.spawn_log) == "boolean" and CFG.slog then CFG.slog.on = d.spawn_log end -- (9.43)
-    if type(d.spawn_focus) == "string" and #d.spawn_focus <= 120 and d.spawn_focus ~= "" and CFG.slog then CFG.slog.focus = d.spawn_focus end -- (9.43)
     if type(d.story_watch) == "table" then
         for _, id in ipairs(d.story_watch) do CFG.story.set_watch(id, true) end
     end
     if type(d.mia_own_head) == "boolean" then CFG.body.face.on = d.mia_own_head end
     if type(d.mia_layers_on) == "boolean" then CFG.body.face.mats = d.mia_layers_on end
+    if type(d.vr_layers_off) == "boolean" then CFG.body.face.vr_off = d.vr_layers_off end -- (10.4)
     if type(d.mia_head_parts) == "boolean" then CFG.body.donor.on = d.mia_head_parts end -- (9.35) her head and chain hair on the playable body
-    if type(d.hair_physics) == "boolean" then -- (9.35) the experimental chain physics of her hair
-        if live then CFG.hair.set_on(d.hair_physics) else CFG.hair.on = d.hair_physics end
-    end
+    -- (10.23) hair_physics is no longer read: an old settings file that has it changes nothing
     if type(d.mia_layers) == "table" then
         local n = 0
         for nm, v in pairs(d.mia_layers) do
-            if type(nm) == "string" and type(v) == "boolean" and n < CFG.body.face.MAX_CHOICES and CFG.body.face_set_layer(nm, v) then n = n + 1 end
+            -- (10.9) a saved "pl2000_VR hidden" is the 10.8 rule's doing (Mia's chest is in that layer), not a choice: dropped once; the box in the panel still works
+            local old_chest = d.vr_chest_10_9 ~= true and tostring(nm):lower() == "pl2000_vr" and v == false
+            if not old_chest and type(nm) == "string" and type(v) == "boolean" and n < CFG.body.face.MAX_CHOICES and CFG.body.face_set_layer(nm, v) then n = n + 1 end
         end
     end
     if type(d.body_hidden) == "table" then
@@ -13795,8 +17418,11 @@ CFG.ids = {
         em9800 = "21 Enemies",
         em9900 = "Shipworker David (retextured em9600)",
         pl0000 = "Ethan Winters",
+        pl1000 = "Chris Redfield (Not a Hero DLC)",   -- (10.4) the DLC characters the full model pack has
         pl2000 = "Mia Winters",
         pl3000 = "Clancy Jarvis",
+        pl3400 = "Zoe Baker (Daughters DLC)",
+        pl9000 = "Joe Baker (End of Zoe DLC)",
     },
     ALIAS = { em6190 = "em6500" }, -- (the scene calls the molded deputy Em6190; its model is em6500)
 }
@@ -13821,6 +17447,15 @@ CFG.load = {
     cache = {},               -- "mesh:<path>" -> holder, or false when it failed once (not retried)
     tried = 0, loaded = 0, failed = 0, attempts = {}, last = "nothing loaded by path yet", used_for = {},
     bad = {},                 -- 9.32: model family -> why a body made from its files failed in this session (find() answers nothing for it afterwards)
+    -- (10.8) Clancy's hands: the other co-op mod (coop_dummy.lua, "Clancy ... ShadowHandR ... mdf = pl3000/pl3000/em3010") names the material files of his hands: em3010 and em3020.
+    -- The 10.7 guess (his body's file, pl3001.mdf2) had materials but the wrong ones: the hands drew black (the 14 Nov screenshot).
+    MDF_BUILTIN = { ["Character/Player/pl3000/pl3000/pl3010.mesh"] = "Character/Player/pl3000/pl3000/em3010.mdf2",
+        ["Character/Player/pl3000/pl3000/pl3020.mesh"] = "Character/Player/pl3000/pl3000/em3020.mdf2" },
+    -- (10.8) the pack's Clancy head (pl3002.mesh: materials pl3050_Equipment / eye / face / hair) can use the game's own head material, which has those four names: it comes
+    -- right after the pack's own file. A pack part never takes another part's file (the 10.7 file: the head got his BODY's file, 3 materials with other names, and drew black).
+    MDF_EXTRA = { ["coop/Character/Player/pl3000/pl3002/pl3002.mesh"] = { "Character/Player/pl3000/pl3050/pl3050.mdf2" },
+        ["coop/Character/Player/pl3100/pl3102/pl3102.mesh"] = { "Character/Player/pl3000/pl3050/pl3050.mdf2" } },
+    strikes = {},             -- (10.8) pack mesh file -> how many times it showed no materials with the file in use (the first time may only be a slow load: the same file is tried once more)
     mat_try = {}, mdf_ok = {}, mat_log = {}, mdf_dirty = false, -- 9.38: mesh file -> which material-file candidate is in use / the one that worked (kept) / what was tried
     mdf_user = {},            -- 9.39: mesh file -> a material file the owner picked with "This file looks right" (kept; the check can't see a WRONG file that has materials)
     bad_until = {},           -- 9.36: family -> when a mark in `bad` ends (a mesh that was merely slow is tried again after a while; a mark with no entry here lasts the session)
@@ -13855,7 +17490,246 @@ CFG.load = {
 -- The known files of a model name: { body = path, parts = { paths } } or nil.
 function CFG.load.entry(name)
     local fam = CFG.ids.family(name)
-    return fam and CFG.load.KNOWN[fam] or nil
+    if not fam then return nil end
+    return (CFG.pack and CFG.pack.entry(name)) or CFG.load.KNOWN[fam] -- (10.1: the full model pack's files first, when it is installed)
+end
+
+----------------------------------------------------------------------------------------------
+-- 10.1: THE FULL CHARACTER MODELS ("the models as the other player's character ... Ethan, Mia and Clancy, including the head models").
+-- Nexus RE7 mod 86, "Third Person Full Model Placeholders" by AfroJackX (its Permissions page lets others use its assets), ships inside
+-- re7mp's modpack folder, and re7mp.exe puts its meshes and materials under natives/stm/coop (so the player's own first-person body stays
+-- the game's) and writes reframework/data/re7mp/modpack.json. With that note present the other player's body is made from those files:
+-- the body (plXX01), the lower body and head (plXX02: the pack's bodies already have their heads, so Mia's borrowed head and hair, the
+-- donors, are not added) and, for Mia, her hair and chest (pl2020, pl2023); the hands stay the game's own. A path "coop/Character/Player/..." is
+-- the game's path with the loose-file folder in front (the same way the other developer's mod asks for these files).
+-- If the pack's body will not load, the game's own models are used for that character from then on (the old way: Ethan copied from the
+-- scene, Mia and Clancy from the game's files) and the top left says so. Nothing here is used without the note, so a player without the pack
+-- sees no difference.
+----------------------------------------------------------------------------------------------
+CFG.pack = {
+    on = true,                -- the box in the panel
+    flag = nil, flag_at = -100, READ_EVERY = 10,
+    bad = {},                 -- family -> why the pack's body failed; that character uses the game's own models for the rest of the session
+    last = "not looked at yet", used = {}, failures = 0, -- (failures: how many; CFG.pack.failed is the function)
+    ENTRY = {
+        pl0000 = { body = "coop/Character/Player/pl0000/pl0001/pl0001.mesh",
+            parts = { "coop/Character/Player/pl0000/pl0002/pl0002.mesh", "Character/Player/pl0000/pl0000/pl0010.mesh", "Character/Player/pl0000/pl0000/pl0020.mesh" } },
+        -- (10.10) "mias right arm includes part of her chest, the left arm just has her hand": the right arm is the game's own Pl2000HandR (pl2010: arm and a piece of chest),
+        -- and the pack's left side is only pl2023, the GENOME CODEX hand (8 joints: models.json) with her chest layer. The game's own Pl2000HandL is pl2020 (70 joints, 2
+        -- materials, as pl2010 has 69): the left arm that goes with the right one. The pack's hair has the same file stem (pl2020), so this part is named pl2020_hand
+        -- (CFG.pack.NAMES). It is optional (not from the pack): if it does not load only it is left out.
+        pl2000 = { body = "coop/Character/Player/pl2000/pl2001/pl2001.mesh",
+            parts = { "coop/Character/Player/pl2000/pl2002/pl2002.mesh", "coop/Character/Player/pl2000/pl2000/pl2020.mesh",
+                "coop/Character/Player/pl2000/pl2023/pl2023.mesh", "Character/Player/pl2000/pl2000/pl2010.mesh", "Character/Player/pl2000/pl2000/pl2020.mesh" } },
+        pl2100 = { body = "coop/Character/Player/pl2100/pl2101/pl2101.mesh",
+            parts = { "coop/Character/Player/pl2100/pl2102/pl2102.mesh", "coop/Character/Player/pl2100/pl2100/pl2110.mesh", "coop/Character/Player/pl2100/pl2100/pl2120.mesh" } },
+        pl3000 = { body = "coop/Character/Player/pl3000/pl3001/pl3001.mesh",
+            parts = { "coop/Character/Player/pl3000/pl3002/pl3002.mesh", "Character/Player/pl3000/pl3000/pl3010.mesh", "Character/Player/pl3000/pl3000/pl3020.mesh" } },
+        -- (10.4) the pack's DLC characters, the way the other developer's mod dresses them (docs/NOTES.md there: "the mod's bodies (XX01) already include the head").
+        -- Zoe: body, lower body and both hands are in the pack (pl3410 / pl3420 carry their own materials). Chris (ch8) and Joe (ch9): body and lower body only; the pack
+        -- has no hand files for them and the game's are not known, so their VR hands stay (the layer rule hides ..._VR only on a body with hand parts).
+        pl3400 = { body = "coop/Character/Player/pl3400/pl3401/pl3401.mesh",
+            parts = { "coop/Character/Player/pl3400/pl3402/pl3402.mesh", "coop/Character/Player/pl3400/pl3400/pl3410.mesh", "coop/Character/Player/pl3400/pl3400/pl3420.mesh" } },
+        pl1000 = { body = "coop/ch8/Character/Player/pl1000/pl1001/pl1001.mesh", parts = { "coop/ch8/Character/Player/pl1000/pl1002/pl1002.mesh" } },
+        -- (10.7) Joe's hands: the pack has none and the files of the game are not known; these two follow the other characters' pattern (plXXXX/plXXXX/plXX10 and plXX20: Ethan's
+        -- hands are pl0000/pl0000/pl0010 and pl0020). The other developer only tried pl9000/pl9010/pl9010. They are OPTIONAL parts (not from the pack): if they do not load,
+        -- the model check drops them and the pack's Joe stays (see CFG.pack.drop).
+        -- (10.9) The 10.8 test proved the guesses wrong: ch9/.../pl9010.mesh and pl9020.mesh "were not loaded after 10 s" (they do not exist), and the pack has none.
+        -- Joe borrows ETHAN's hands, the game's own files (they load at once and have materials, as the Ethan body shows); same rig names, so they join Joe's body.
+        -- They are optional: if they do not load only they are left out. (Joe's own hands are still not in any file we have: when they turn up, put them here.)
+        -- (10.10) "he hands work in molded together though, but not in ours": the other developer's mod dresses Joe with the game's OWN ch9 files and tries a list of guessed hand files
+        -- (CFG.pack.GUESSES: his list, in his order) until one has materials; the user sees Joe's hands there. Ours tries the same files (all at once, the ones that do not load are
+        -- left out after PART_WAIT s), and Ethan's hands are used for a side only when none of that side's guesses loaded (CFG.pack.BORROWED).
+        pl9000 = { body = "coop/ch9/Character/Player/pl9000/pl9001/pl9001.mesh", parts = { "coop/ch9/Character/Player/pl9000/pl9002/pl9002.mesh" } },
+        pl3100 = { body = "coop/Character/Player/pl3100/pl3101/pl3101.mesh", parts = { "coop/Character/Player/pl3100/pl3102/pl3102.mesh" } },
+    },
+}
+
+-- (10.10) The name of a part is its mesh file's stem ("pl2010"), except where two files of one character share a stem: the pack's hair is coop/.../pl2000/pl2000/pl2020
+-- and the game's own left hand is Character/.../pl2000/pl2000/pl2020, so that one is called pl2020_hand.
+CFG.pack.NAMES = { ["Character/Player/pl2000/pl2000/pl2020.mesh"] = "pl2020_hand",
+    ["ch9/Character/Player/pl9000/pl9030/pl9030.mesh"] = "pl9030_b", ["ch9/Character/Player/pl9000/pl9040/pl9040.mesh"] = "pl9040_b" }
+function CFG.pack.part_name(path)
+    if type(path) ~= "string" then return "?" end
+    return CFG.pack.NAMES[path] or path:match("([^/]+)%.mesh$") or path
+end
+
+-- (10.10) "any that say ch9 is related and should be treated as Joe Baker's ... his hands should be in there somewhere": the pack's ch9 folder holds Joe's body (pl9001), his
+-- head (pl9002) and the face textures (pl9050), and no hands (the body mesh has the hand BONES but no hand mesh); the hand files of the game are not named in anything we have
+-- (pl9010 / pl9020 in two folders, and a handful of other guesses, do not load). So Joe's own hands are LEARNED from the game: the Model collection (F11, or its
+-- automatic mode) writes the mesh file of every object it sees to models.json, and a mesh of Joe's (or Chris's) folder with a number from 10 to 49 (pl9010, pl9020, pl9021 ...
+-- the hands, the way Ethan's are pl0010 / pl0020 / pl0021) is used as one of his hand parts from then on, in this and every later session. Until then Joe wears Ethan's hands.
+CFG.pack.LEARN = { pl9000 = true, pl1000 = true }
+-- (10.10) Joe's hand files as the other developer's mod (coop_dummy.lua, CHARACTERS.joe) tries them: his first guess, then the alternatives in his order; the user saw Joe's hands work
+-- there. R = right, L = left. A side with none of them loading wears Ethan's hand (BORROWED: the game's own file, always loads, same rig names).
+CFG.pack.GUESSES = { pl9000 = {
+    R = { "ch9/Character/Player/pl9000/pl9010/pl9010.mesh", "ch9/Character/Player/pl9000/pl9000/pl9011.mesh", "ch9/Character/Player/pl9000/pl9003/pl9003.mesh",
+        "ch9/Character/Player/pl9000/pl9000/pl9030.mesh", "ch9/Character/Player/pl9000/pl9030/pl9030.mesh" },
+    L = { "ch9/Character/Player/pl9000/pl9020/pl9020.mesh", "ch9/Character/Player/pl9000/pl9000/pl9021.mesh", "ch9/Character/Player/pl9000/pl9004/pl9004.mesh",
+        "ch9/Character/Player/pl9000/pl9000/pl9040.mesh", "ch9/Character/Player/pl9000/pl9040/pl9040.mesh" } } }
+CFG.pack.BORROWED = { pl9000 = { R = "Character/Player/pl0000/pl0000/pl0010.mesh", L = "Character/Player/pl0000/pl0000/pl0020.mesh" } }
+CFG.pack.MAX_LEARNED = 4
+CFG.pack.learn_cache = { n = -1, by = {} }
+-- The hand meshes the game was seen to use for this character: { path, ... } in a fixed order.
+function CFG.pack.learned(fam)
+    local P = CFG.pack
+    if not P.LEARN[fam] then return {} end
+    local MP = CFG.mprobe
+    local n = MP and MP.collected_n or 0
+    if P.learn_cache.n == n and P.learn_cache.by[fam] then return P.learn_cache.by[fam] end
+    local out, seen = {}, {}
+    if MP and type(MP.collected) == "table" then
+        for _, c in pairs(MP.collected) do
+            local m = type(c) == "table" and c.mesh or nil
+            if type(m) == "string" and #m < 200 then
+                local folder, rest = m:lower():match("/player/(pl%d%d%d%d)/(.+)%.mesh$")
+                local stem = rest and rest:match("([^/]+)$")
+                local num = stem and stem:match("^pl%d%d%d%d$") and tonumber(stem:sub(3))
+                if folder == fam and num and num % 100 >= 10 and num % 100 <= 49 and stem:sub(1, 4) == fam:sub(1, 4) and not seen[m] then
+                    seen[m] = true
+                    out[#out + 1] = m
+                end
+            end
+        end
+    end
+    table.sort(out)
+    while #out > P.MAX_LEARNED do table.remove(out) end
+    if P.learn_cache.n ~= n then P.learn_cache = { n = n, by = {} } end
+    P.learn_cache.by[fam] = out
+    return out
+end
+
+-- The parts of a character: the pack's list; for a character with hand guesses: the learned hands when there are any (the game was seen to use them), else the guesses of each side
+-- that have not been left out, else that side's borrowed hand. (Cached until a part is dropped or the collected models change.)
+function CFG.pack.parts_of(fam)
+    local P = CFG.pack
+    local e = P.ENTRY[fam]
+    if not e then return {} end
+    local learned = P.learned(fam)
+    local guesses, borrowed = P.GUESSES[fam], P.BORROWED[fam]
+    if #learned == 0 and not guesses then return e.parts or {} end
+    local n = P.learn_cache.n
+    local c = P.parts_cache[fam]
+    if c and c.n == n and c.dn == P.dropped_n then return c.list end
+    local out = {}
+    for _, part in ipairs(e.parts or {}) do out[#out + 1] = part end
+    if #learned > 0 then
+        for _, path in ipairs(learned) do out[#out + 1] = path end
+    elseif guesses then
+        local gone = P.dropped[fam] or {}
+        for _, side in ipairs({ "R", "L" }) do
+            local any = false
+            for _, path in ipairs(guesses[side] or {}) do
+                if not gone[P.part_name(path)] then out[#out + 1] = path any = true end
+            end
+            if not any and borrowed and borrowed[side] then out[#out + 1] = borrowed[side] end
+        end
+    end
+    P.parts_cache[fam] = { n = n, dn = P.dropped_n, list = out }
+    return out
+end
+CFG.pack.parts_cache = {}
+
+-- Did re7mp.exe put the pack in place? (modpack.json; read again every READ_EVERY s)
+function CFG.pack.available()
+    local P = CFG.pack
+    local now = os.clock()
+    if P.flag ~= nil and now - P.flag_at < P.READ_EVERY then return P.flag end
+    P.flag_at = now
+    local ok, d = pcall(FILES.read, "modpack")
+    P.flag = ok and type(d) == "table" and d.models == "coop"
+    P.last = P.flag and "the full model pack is installed (modpack.json)" or "no modpack.json: the pack is not installed, so the game's own models are used"
+    return P.flag
+end
+
+-- Is this model (Pl0000_Chapter1, Pl2000, Pl3000 ...) made from the pack's files?
+function CFG.pack.active(name)
+    local P = CFG.pack
+    if not P.on or not (CFG.load and CFG.load.on) then return false end
+    local fam = CFG.ids.family(name)
+    if not fam or not P.ENTRY[fam] or P.bad[fam] then return false end
+    return P.available() == true
+end
+
+function CFG.pack.entry(name)
+    local P = CFG.pack
+    if not P.active(name) then return nil end
+    local fam = CFG.ids.family(name)
+    local e = P.ENTRY[fam]
+    local dropped = P.dropped[fam]
+    local list = P.parts_of(fam)
+    local lkey = table.concat(list, "|")
+    if (not dropped or next(dropped) == nil) and list == (e.parts or {}) then return e end
+    local f = P.filtered[fam]
+    if f and f.source == e and f.n == P.dropped_n and f.lkey == lkey then return f.entry end
+    local parts = {}
+    for _, part in ipairs(list) do
+        if not (dropped and dropped[P.part_name(part)]) then parts[#parts + 1] = part end
+    end
+    local out = { body = e.body, parts = parts }
+    P.filtered[fam] = { source = e, n = P.dropped_n, lkey = lkey, entry = out }
+    return out
+end
+
+-- (10.7) A part that is NOT from the pack (a hand: the game's own file, or a guess at one) is optional: when it will not load, only that part is left out and the pack's body
+-- stays. Before, one hand that got no materials made the whole pack fail and the character fell back to the game's own models (Clancy, 10.5).
+CFG.pack.dropped, CFG.pack.dropped_n, CFG.pack.filtered, CFG.pack.drops = {}, 0, {}, {}
+CFG.pack.remake_for = nil
+function CFG.pack.optional(name, part)
+    local P = CFG.pack
+    local fam = CFG.ids.family(name)
+    local e = fam and P.ENTRY[fam]
+    if not e or type(part) ~= "string" then return false end
+    for _, path in ipairs(P.parts_of(fam)) do
+        if P.part_name(path) == part then return not path:find("^coop/") end
+    end
+    return false
+end
+
+function CFG.pack.drop(name, part, why)
+    local P = CFG.pack
+    local fam = CFG.ids.family(name)
+    if not fam or not P.optional(name, part) then return false end
+    P.dropped[fam] = P.dropped[fam] or {}
+    if P.dropped[fam][part] then return false end
+    P.dropped[fam][part] = tostring(why):sub(1, 100)
+    P.dropped_n = P.dropped_n + 1
+    P.drops[#P.drops + 1] = string.format("%s: %s left out (%s)", tostring(name), part, tostring(why):sub(1, 80))
+    if #P.drops > 12 then table.remove(P.drops, 1) end
+    say(string.format("model pack: %s: the part %s does not load (%s); it is left out and the rest of the pack's body stays", tostring(name), part, tostring(why):sub(1, 80)))
+    -- (10.10) a side whose hand guesses have ALL been left out now wants the borrowed hand (parts_of): the body is made again once, after this frame's drops are all in (join_pending)
+    local b = P.BORROWED[fam]
+    if b and P.GUESSES[fam] and #P.learned(fam) == 0 then
+        local want = {}
+        for _, path in ipairs(P.parts_of(fam)) do want[path] = true end
+        for _, side in ipairs({ "R", "L" }) do
+            if b[side] and want[b[side]] and not P.dropped[fam][P.part_name(b[side])] then P.remake_for = fam end
+        end
+    end
+    return true
+end
+
+-- The pack's body for this character would not load: the game's own models from now on (this session), and the owner is told.
+function CFG.pack.failed(name, why)
+    local P = CFG.pack
+    local fam = CFG.ids.family(name)
+    if not fam or P.bad[fam] or not P.ENTRY[fam] then return false end
+    P.bad[fam] = tostring(why):sub(1, 120)
+    P.failures = P.failures + 1
+    if CFG.load then CFG.load.bad[fam], CFG.load.bad_until[fam] = nil, nil end -- the old way is not marked bad because the new one was
+    P.last = string.format("%s: the pack's files did not load (%s); the game's own models are used", name, P.bad[fam])
+    say("model pack: " .. P.last)
+    pcall(CFG.settle.announce, string.format("The full model for %s is not usable (%s). Using the game's own model instead.", name, P.bad[fam]))
+    pcall(CFG.real.retry)
+    return true
+end
+
+function CFG.pack.report()
+    local P = CFG.pack
+    local bad = {}
+    for k, v in pairs(P.bad) do bad[k] = v end
+    return { on = P.on, installed_note_found = P.flag == true, last = P.last, failures = P.failures, characters_using_the_game_models_now = bad,
+        made_from_the_pack = P.used, parts_left_out = P.drops, about = "re7mp: the full character models (Nexus RE7 mod 86 by AfroJackX), made from natives/stm/coop when re7mp.exe has put them there" }
 end
 
 -- The material file of a mesh file: the one the collector saw (models.json "mdf"), else the mesh's own name with .mdf2.
@@ -13864,7 +17738,16 @@ function CFG.load.material_path(mesh_path)
     local known = CFG.mprobe and CFG.mprobe.collected and CFG.mprobe.collected[mesh_path]
     if known and type(known.mdf) == "string" and known.mdf ~= "" then return known.mdf, "seen in the game" end
     if L.mdf_user[mesh_path] then return L.mdf_user[mesh_path], "picked by you" end
+    -- (10.8) a mesh with a built-in file (Clancy's hands) does not take a kept one that is another while the built-in one is in use: 10.7 kept his body's file for
+    -- them (written to model_status.json after a slow load) and they drew black. The kept one is forgotten, so the next save cleans the file.
+    local bi = L.MDF_BUILTIN[mesh_path]
+    local bi_on = bi ~= nil and (L.mat_try[mesh_path] or 1) <= 1 and CFG.pack and CFG.pack.available() == true
+    if bi_on and L.mdf_ok[mesh_path] and L.mdf_ok[mesh_path] ~= bi then L.mdf_ok[mesh_path] = nil end
     if L.mdf_ok[mesh_path] then return L.mdf_ok[mesh_path], "worked before" end
+    -- (10.7) built in: the files that were found to work in the owner's tests (the 10.5 file: Clancy's hands were tried against pl3010.mdf2 and the folder's name first and the
+    -- pack's body was thrown out before the third guess, the body's own file, got its turn). Used for the first try only; a failure goes on to the guesses as before.
+    local b = L.MDF_BUILTIN[mesh_path]
+    if b and (L.mat_try[mesh_path] or 1) <= 1 and CFG.pack and CFG.pack.available() == true then return b, "built in (worked in earlier tests)" end
     local c = L.material_candidates(mesh_path)
     local i = math.min(L.mat_try[mesh_path] or 1, #c)
     return c[i], i == 1 and "guessed from the mesh's name" or string.format("candidate %d of %d", i, #c)
@@ -13881,6 +17764,11 @@ function CFG.load.material_candidates(mesh_path)
     local out, seen, auto = {}, {}, nil
     local function add(p) if type(p) == "string" and not seen[p] then seen[p] = true out[#out + 1] = p end end
     add((mesh_path:gsub("%.mesh$", ".mdf2")))
+    -- (10.8) a mesh of the full model pack (coop/...) has its material file next to it; the game's own file of the same part is the only other choice
+    if mesh_path:find("^coop/") then
+        for _, p in ipairs(CFG.load.MDF_EXTRA[mesh_path] or {}) do add(p) end
+        return out, #out
+    end
     local dir, base = mesh_path:match("^(.*)/([^/]+)%.mesh$")
     if dir then
         local fold, parent = dir:match("([^/]+)$"), dir:match("^(.*)/[^/]+$")
@@ -13923,6 +17811,16 @@ function CFG.load.next_material(mesh_path, manual)
     local i = L.mat_try[mesh_path] or 1
     local lg = L.mat_log[mesh_path] or { tried = {} }
     L.mat_log[mesh_path] = lg
+    -- (10.8) the 14 Nov file: the pack's Clancy head showed no materials 12 s after the first look, because everything was still loading (his body was not ready either),
+    -- the next file was taken at once, and the wrong one (his body's) was kept for every later start. A pack file gets a second look before another one is tried.
+    if not manual and mesh_path:find("^coop/") then
+        local key = mesh_path .. "#" .. i
+        L.strikes[key] = (L.strikes[key] or 0) + 1
+        if L.strikes[key] < 2 then
+            L.note(string.format("material of %s: %s showed no materials (a slow load?); the same file is tried once more before another one", mesh_path, c[i]))
+            return nil
+        end
+    end
     lg.tried[#lg.tried + 1] = c[i]
     L.mat_try[mesh_path] = i + 1
     L.note(string.format("material of %s: %s %s; trying %s (%d of %d)", mesh_path, c[i], manual and "looked wrong" or "gave no materials", c[i + 1], i + 1, #c))
@@ -13963,7 +17861,8 @@ end
 -- (9.39) Forget what was kept (the script's own and yours) and start from the first guess again.
 function CFG.load.material_forget()
     local L = CFG.load
-    L.mdf_ok, L.mdf_user, L.mat_try, L.mat_log = {}, {}, {}, {}
+    L.mdf_ok, L.mdf_user, L.mat_try, L.mat_log, L.strikes = {}, {}, {}, {}, {}
+    if CFG.pack then CFG.pack.dropped, CFG.pack.dropped_n = {}, CFG.pack.dropped_n + 1 end -- (10.7) the hands that were left out are tried again too
     L.mdf_dirty = true
     L.note("the kept material files are forgotten")
     pcall(function() CFG.bm.dirty = true end)
@@ -14052,7 +17951,8 @@ function CFG.load.find(name)
     -- 9.35: Ethan is NEVER made from his files. The 9.34 test: "he spawned with no textures" when made from files, and a copy of the scene's own
     -- Ethan "seems to consistently work" (it shares the textures the game has already loaded). So he is copied from the scene or not drawn:
     -- while he is not in the scene (Mia's flashback, a tape) the green debug man stays, and the scene is looked at again every few seconds.
-    if fam == "pl0000" then
+    -- 10.1: ...except from the full model pack (CFG.pack): its pl0001 comes with its own materials and textures
+    if fam == "pl0000" and not (CFG.pack and CFG.pack.active(name)) then
         L.ethan_refused = (L.ethan_refused or 0) + 1
         return nil, "Ethan is copied from the scene, never made from his files"
     end
@@ -14068,8 +17968,9 @@ function CFG.load.find(name)
     if not body then return nil, why end
     local out = { kids = {}, scanned = 0, name = name, loaded_by_path = true }
     out.object, out.root = body, body
+    local packed = CFG.pack and CFG.pack.active(name)
     for _, p in ipairs(e.parts) do
-        local part = L.part(p)
+        local part = L.part(p, packed and CFG.pack.part_name(p) or nil) -- (10.10: the pack's name for a part whose stem is another part's)
         if part then out.kids[#out.kids + 1] = part end
     end
     L.used_for[name] = (L.used_for[name] or 0) + 1
@@ -14165,6 +18066,10 @@ CFG.who = {
         { key = "ethan", label = "Ethan Winters", player = { "Pl0000", "Pl0000_Chapter1" }, models = { "Pl0000_Chapter1", "Pl0000" } },
         { key = "mia", label = "Mia Winters", player = { "Pl2000", "Pl2100" }, models = { "Pl2000", "Pl2100", "Em2000" } },
         { key = "clancy", label = "Clancy Jarvis", player = { "Pl3000", "Pl3100" }, models = { "Pl3000", "Pl3100" } },
+        -- (10.4) the DLC characters of the full model pack (their bodies are made from its files; none is in the story scenes, so without the pack Ethan stays)
+        { key = "chris", label = "Chris Redfield (Not a Hero)", player = { "Pl1000" }, models = { "Pl1000" } },
+        { key = "zoe", label = "Zoe Baker (Daughters)", player = { "Pl3400" }, models = { "Pl3400" } },
+        { key = "joe", label = "Joe Baker (End of Zoe)", player = { "Pl9000" }, models = { "Pl9000" } },
         -- (9.37) two enemy models the loader makes well (9.36 test): not characters the game ever lets a player be, so no player object belongs to them
         { key = "pete", label = "Pete Walken", player = {}, models = { "Em9200" } },
         { key = "andre", label = "Andre Stickland", player = {}, models = { "Em6200" } },
@@ -14180,12 +18085,13 @@ CFG.who = {
     cand = 0,                 -- which model of that character is being tried (index into LIST[..].models)
     unavailable = nil,        -- a key whose models are none of them in this scene
     seq_seen = nil, read_at = -100, from_exe = 0, status = "not looked yet", scene = nil, switches = 0,
-    -- (9.33) a test aid: the LOOPBACK BOT says which character it is when it is told to (kind 11 "char:<key>", repeated every SEND_EVERY s; "char:none"
+    -- (9.33) a test aid: the ETHAN'S FRIEND says which character it is when it is told to (kind 11 "char:<key>", repeated every SEND_EVERY s; "char:none"
     -- takes it back), so the body made from Mia's or Clancy's files can be tried without a second player. nil = it says nothing (as before).
     BOT_MSG = 11, bot = nil, bot_told = nil, bot_told_at = -100, bot_sent = 0,
-    -- (9.38) what the loopback bot DOES (kind 11 "state:<key>", repeated every SEND_EVERY s; "down" / "up" once, when the choice changes). The first
+    -- (9.38) what Ethan's friend DOES (kind 11 "state:<key>", repeated every SEND_EVERY s; "down" / "up" once, when the choice changes). The first
     -- one is the default: it copies what the owner does (his pose and gun bits, his speed), the rest show one state each so it can be looked at.
     BOT_ACTS = {
+        { key = "own", label = "Acts for itself (walks after you, faces the way it moves, blocks near enemies, helps you; stands on your trail)" },
         { key = "copy", label = "Copies me (does what I do: walk, run, crouch, block, heal, gun, aim, shoot)" },
         { key = "timer", label = "The old timer (block, crouch, heal on a 16 s loop)" },
         { key = "idle", label = "Idle (stands still)" },
@@ -14202,16 +18108,82 @@ CFG.who = {
         { key = "shoot", label = "Shoot (a shot every 1.5 s)" },
         { key = "down", label = "Down (on the ground; a heal or F8 gets it up)" },
     },
-    bot_act = "copy", bot_act_told = nil, bot_act_at = -100, bot_down_sent = false,
+    bot_act = "own", bot_act_told = nil, bot_act_at = -100, bot_down_sent = false,
 }
 
--- Choose what the loopback bot does (a key from BOT_ACTS). Returns false for an unknown key.
+-- Choose what Ethan's friend does (a key from BOT_ACTS). Returns false for an unknown key.
 function CFG.who.set_bot_act(key)
     local W = CFG.who
     for _, a in ipairs(W.BOT_ACTS) do
-        if a.key == key then W.bot_act = key return true end
+        if a.key == key then
+            if W.bot_act ~= key then say("Ethan's friend: it now does '" .. key .. "' (" .. a.label .. ")") end
+            W.bot_act = key
+            return true
+        end
     end
     return false
+end
+
+-- (10.26) FOLLOW OR STAY: one key in the game. Until 10.25 this was three radios in re7mp.exe (follows you / stays put / beside you); they are gone
+-- from the exe, and "beside you" is gone altogether. F5 flips Ethan's friend between FOLLOWING you (the start; it walks after you and stops 2 m away) and
+-- STAYING PUT (it stops where it stands now). The exe is told with kind 11 "mode:follow" / "mode:stay": once when the key is pressed and again every
+-- SEND_EVERY s, like the other friend commands, so a friend that was started later (or an exe that missed one) gets the current choice. A corner of the
+-- screen says which one it is and which key flips it. F7 stays the item "Give" key (CFG.give.hotkey), which is why this one is F5 (0x74, free).
+-- Nothing here runs unless the friend is the other player (CFG.friend.present()): a real player has no such command.
+CFG.friend.mode = {
+    hotkey = 0x74, key_name = "F5", key_was_down = false,
+    stay = false,                          -- false = it follows you (what the exe starts with), true = it stays where it stands
+    told = nil, told_at = -100, SEND_EVERY = 10, sent = 0, presses = 0,
+    hint = true,                           -- the corner text
+    TEXT_FOLLOW = "Ethan's friend follows you  (F5 = stay put)",
+    TEXT_STAY = "Ethan's friend stays put  (F5 = follow you)",
+}
+
+-- Choose follow (false) or stay (true) and say so to the exe at once (when the friend is there; update() repeats it).
+function CFG.friend.mode.set(stay)
+    local M = CFG.friend.mode
+    stay = stay == true
+    if M.stay ~= stay then say("Ethan's friend: now " .. (stay and "stays put" or "follows you")) end
+    M.stay = stay
+    M.told = nil -- (so update() sends it on its next look)
+end
+
+function CFG.friend.mode.toggle()
+    local M = CFG.friend.mode
+    M.presses = M.presses + 1
+    M.set(not M.stay)
+    return M.stay
+end
+
+-- Every frame: the key (once per press), and the repeat of the current choice to the exe.
+function CFG.friend.mode.update(now)
+    local M = CFG.friend.mode
+    local okk, down = pcall(function() return reframework:is_key_down(M.hotkey) end)
+    down = okk and down == true
+    local friend_here = CFG.friend.present() and peer_present(now)
+    if down and not M.key_was_down and friend_here then M.toggle() end
+    M.key_was_down = down
+    if not friend_here then
+        M.told = nil -- the friend is not here (the exe is stopped or it is a real player): tell it again when it comes
+        return
+    end
+    local want = M.stay and "stay" or "follow"
+    if M.told ~= want or now - M.told_at >= M.SEND_EVERY then
+        M.told, M.told_at = want, now
+        M.sent = M.sent + 1
+        pcall(net_send, CFG.who.BOT_MSG, "mode:" .. want)
+    end
+end
+
+-- Every frame: the corner text. Top right (the Give hint, the REC line and the chat sit at the left; the lobby message is top left).
+function CFG.friend.mode.draw(now)
+    local M = CFG.friend.mode
+    if not M.hint or not CFG.friend.present() or not peer_present(now) then return end
+    local sz = { x = 1920, y = 1080 }
+    pcall(function() local d = imgui.get_display_size() if d and d.x and d.x > 100 then sz = d end end)
+    local text = M.stay and M.TEXT_STAY or M.TEXT_FOLLOW
+    local x = math.max(24, math.floor(sz.x - #text * 8 - 28)) -- (about 8 px a letter, so the longer line still fits)
+    pcall(draw.text, text, x, 24, 0xFF00D7FF)
 end
 
 function CFG.who.entry(key)
@@ -14266,11 +18238,19 @@ function CFG.who.set_choice(key)
     return false
 end
 
--- Choose the character the loopback bot says it is (a key from LIST), or nil for "says nothing". Returns false for an unknown key.
+-- Choose the character Ethan's friend says it is (a key from LIST), or nil for "says nothing". Returns false for an unknown key.
 function CFG.who.set_bot(key)
     local W = CFG.who
-    if key == nil or key == "none" then W.bot = nil return true end
-    if W.entry(key) then W.bot = key return true end
+    if key == nil or key == "none" then
+        if W.bot ~= nil then say("Ethan's friend: it says nothing about its character now") end
+        W.bot = nil
+        return true
+    end
+    if W.entry(key) then
+        if W.bot ~= key then say("Ethan's friend: it now says it is " .. W.entry(key).label) end
+        W.bot = key
+        return true
+    end
     return false
 end
 
@@ -14317,7 +18297,7 @@ end
 function CFG.who.update(now)
     local W, R = CFG.who, CFG.real
     -- Keep mgr.player_name current. The object in hand is asked for its name every time (cheap: a renamed one is noticed at once); the
-    -- scene is walked again every RESCAN_EVERY s (player_object limits that to once in 3 s itself), because when the game swaps the player
+    -- scene is walked again (10.11: only when the object is not where the camera is) every RESCAN_EVERY s (player_object limits that to once in 3 s itself), because when the game swaps the player
     -- object for another one the old one may stay in the scene, and player_object only walks it once a minute for a single player.
     if mgr.player then
         local ok, n = pcall(function() return mgr.player:call("get_Name") end)
@@ -14326,7 +18306,10 @@ function CFG.who.update(now)
             mgr.player_name = n
         end
     end
-    if now - W.rescan_at >= W.RESCAN_EVERY then W.rescan_at, mgr.player_scan_at = now, -1000 end
+    if now - W.rescan_at >= W.RESCAN_EVERY then -- (10.11) was: always walk the scene again (27 to 34 ms, a hitch every 10 s); now only when the remembered object is not where the camera is
+        W.rescan_at = now
+        if not mgr.player_on_camera() then mgr.player_scan_at = -1000 end
+    end
     pcall(player_object)
     W.read_exe(now)
     -- tell the other player: when it changes, when they appear, and every SEND_EVERY seconds
@@ -14340,8 +18323,8 @@ function CFG.who.update(now)
     else
         W.last_sent_key = nil -- (so they are told the moment they are there)
     end
-    -- (9.33) the loopback bot (only it understands this kind) is told which character to say it is; it answers like a real player would
-    if state.remote_name == "Loopback Bot" and peer_present(now) then
+    -- (9.33) Ethan's friend (only it understands this kind) is told which character to say it is; it answers like a real player would
+    if CFG.friend.present() and peer_present(now) then
         -- (9.38) ...and what to do with its body
         local act = W.bot_act
         if W.bot_act_told ~= act or (act ~= "down" and now - W.bot_act_at >= W.SEND_EVERY) then
@@ -14352,7 +18335,7 @@ function CFG.who.update(now)
                 pcall(net_send, W.BOT_MSG, "down")
             else
                 if W.bot_down_sent then W.bot_down_sent = false pcall(net_send, W.BOT_MSG, "up") end
-                pcall(net_send, W.BOT_MSG, "state:" .. act)
+                pcall(net_send, W.BOT_MSG, "state:" .. (act == "own" and "copy" or act)) -- (10.7) "own": the exe only moves it; the script decides what its body does
             end
         end
         if W.bot then
@@ -14415,9 +18398,11 @@ function CFG.who.report()
     local W = CFG.who
     local p = W.playing()
     return { choice = W.choice, follow_their_character = W.follow, i_play = p, player_object = mgr.player_name, i_am_shown_as = W.mine(),
+        player_search = { scene_walks = mgr.player_walks.walks, kept_without_a_walk = mgr.player_walks.kept, last_walk_ms = mgr.player_walks.last_ms, slowest_walk_ms = mgr.player_walks.max_ms, distance_to_camera_m = mgr.player_walks.last_d, next_walk_wait_s = mgr.player_walks.far_every,
+            about = "(10.11) the scene is walked for the player object only when the remembered one is not within 3.5 m of the camera (it was every 10 s: a 30 ms hitch)" },
         in_other_scene = W.in_other_scene(), they_are = W.remote, body_is = W.applied, model_try = W.cand, unavailable = W.unavailable,
         status = W.status, sent = W.sent, received = W.received, rejected = W.rejected, from_exe = W.from_exe, body_switches = W.switches,
-        loopback_bot_says = W.bot, loopback_bot_told = W.bot_told, loopback_bot_commands = W.bot_sent, loopback_bot_does = W.bot_act, loopback_bot_does_told = W.bot_act_told }
+        friend_says = W.bot, friend_told = W.bot_told, friend_commands = W.bot_sent, friend_does = W.bot_act, friend_does_told = W.bot_act_told }
 end
 
 ----------------------------------------------------------------------------------------------
@@ -14957,6 +18942,7 @@ function CFG.wpn.update(now)
     local W = CFG.wpn
     local there = peer_present(now)
     if W.remote and W.remote_at and now - W.remote_at >= W.REMOTE_TTL then W.remote, W.remote_at = nil, nil end
+    if CFG.wmesh then pcall(CFG.wmesh.sender, now, there) end -- (10.15) the weapon in my hand, as a mesh and a grip, for the other player's copy of me
     if not there and now >= W.force_until then W.last_sent = nil return end -- (alone: nothing is read, nothing costs)
     if now - W.read_at >= W.READ_EVERY then W.read(now) end
     if there and pstat.send_event then
@@ -14976,6 +18962,971 @@ function CFG.wpn.report()
         they_hold_damage = W.remote and (CFG.wpn.damage_of(W.remote)) or nil, table_size = (function() local n = 0 for _ in pairs(W.DAMAGE) do n = n + 1 end return n end)(),
         -- (9.32) which place answered, what every place says now, how that changed, and the long dumps
         source = W.source, evidence = W.evidence, evidence_log = W.ev_log, probes = W.probes, probes_taken = #W.probes }
+end
+
+----------------------------------------------------------------------------------------------
+-- (10.15) THE OTHER PLAYER'S WEAPON ON THEIR BODY ("we should work on showing the weapon models now"). UNVERIFIED in the real game.
+-- What the other mod does and found (coop_dummy.lua local_weapon / show_held / apply_grip; its notes of 2026-11-03 and the log of its real game):
+--   * the weapon in a hand is a DRAWN CHILD OF THE PLAYER: wp1210_Handgun_Item, wp1190_Knife_Item (your own debug files of 15 and 19 Nov say the same: every weapon and
+--     every item hangs under Pl0000 at depth 1 and only the held one is drawn; the heal bottle is drawn too, an app.Item that is not a wpNNNN). A knife stays drawn for a
+--     moment while a gun comes out, so a knife only counts after half a second and anything else beats it. Light objects (wp0030_Light_Event) and the Shadow* body pieces are not weapons.
+--   * what goes over is the mesh file and the material file of that object ("Weapon/wp1010_Handgun/wp1010_Handgun", "Weapon/wp1010_Handgun/wp1010") and how it sits
+--     in the hand (local position, rotation and parent joint: the knife sat 10 cm off R_Wep and turned).
+--   * the other game NEVER gets the real weapon object ("Never attach a real weapon object to the friend's character": the real gun made the ghost slide and the game exited
+--     silently 6 s after a second one). It makes ONE mesh object from the two files, hangs it on the body's right-hand joint with SameJointsConstraint off, and sets the grip.
+--   * every copy made is remembered, so that a body made again can never keep an old one stuck on its hand (the pistol that stayed on the hand for every weapon after it).
+-- Here: message 17, "w|<mesh>|<material, or = when it has the mesh's name>|px|py|pz|qw|qx|qy|qz|<joint>" or "w|-" (nothing in the hand), sent when it changes (at most once a
+-- second) and every 8 s. The copy is made in the game phase of the body (CFG.body.tick), the files are loaded by path (CFG.load.holder, the loader's own crash marker), the mesh
+-- is waited for (MeshReady) up to 10 s with the copy not drawn, and only then is it parented, jointed and drawn. The joint is looked for in the body's own joint list
+-- (R_Wep, then R_Hand, R_Wrist); with none of them nothing is parented. Every game call that changes something is traced (stage "wmesh": a session that ends inside one
+-- switches this off at the next start). One copy at a time; three failed makes of the same weapon and it is left alone until the weapon changes.
+----------------------------------------------------------------------------------------------
+CFG.wmesh = {
+    MSG = 17, on = true, -- (on: remembered as weapon_models)
+    SCAN_EVERY = 0.5, SEND_GAP = 1, KEEPALIVE = 8, KNIFE_SETTLE = 0.5, TTL = 30,
+    MAX_OBJECTS = 100, MAX_DEPTH = 2, MAX_PATH = 90, LOAD_WAIT = 10, MAKE_EVERY = 2, MAX_FAILS = 3, SAY_MAX = 40,
+    MAKES_PER_MIN = 12,       -- (10.16) at most this many copies are made in a minute (the 10.15 file: 74 made and 73 destroyed in one session)
+    SKIP = { wp0060 = "the chainsaw of the Jack fight" }, -- (10.16) never sent, never made (the Jack crash report came in that fight; not shown until it is known to be safe)
+    JOINTS = { "R_Wep", "R_Hand", "R_Wrist" },
+    -- sender
+    scan_at = -100, sent_text = nil, sent_key = nil, sent_at = -100, knife_since = nil, local_rec = nil, local_why = "not looked yet",
+    -- receiver
+    got = nil, got_at = nil, copy = nil, all = {}, fails = {}, make_at = -100, grip_at = -100, status = "nothing yet",
+    n = { scans = 0, found = 0, none = 0, sent = 0, received = 0, rejected = 0, too_long = 0, bad_path = 0, made = 0, parented = 0, regrip = 0, dropped = 0, kept_loading = 0,
+        forgotten = 0, errors = 0, no_joint = 0, load_failed = 0, timeouts = 0, expired = 0, held_not_quiet = 0, scans_held_not_quiet = 0, not_a_weapon = 0, skipped_named = 0, churn_held = 0 },
+    make_times = {},
+    said = 0, last = "-", lines = {},
+}
+
+do
+local W = CFG.wmesh
+
+function W.note(text)
+    W.last = text
+    W.lines[#W.lines + 1] = string.format("%.1f %s", os.clock(), text)
+    while #W.lines > 24 do table.remove(W.lines, 1) end
+    if W.said < W.SAY_MAX then
+        W.said = W.said + 1
+        say("weapon model: " .. text)
+    end
+end
+
+-- switched on: a crash marker of the last session is forgiven when the owner ticks the box again
+function W.alive() return W.on and not tracer.wmesh_suspect end
+-- what the panel and the debug file say: the body's game phase only runs while there is a body, so the status it writes can be old
+function W.state()
+    if tracer.wmesh_suspect then return "off: the last session ended inside it" end
+    if not W.on then return "off" end
+    return W.status
+end
+function W.set_on(v)
+    W.on = v == true
+    if W.on then tracer.wmesh_suspect = nil end -- (ticked by hand: try again)
+    W.note("the weapon model is " .. (W.on and "ON" or "off"))
+end
+
+-- a resource path without its extension, "/" separators
+local function stem(p, ext)
+    if type(p) ~= "string" then return nil end
+    p = p:gsub("\\", "/")
+    if ext and p:sub(-#ext):lower() == ext then p = p:sub(1, -#ext - 1) end
+    return p
+end
+
+-- a path that is safe to put on the wire and to hand to the game's loader
+function W.valid_path(p)
+    return type(p) == "string" and #p >= 3 and #p <= W.MAX_PATH and p:match("^[%w_%-%./]+$") ~= nil and not p:find("..", 1, true)
+        and p:sub(1, 1) ~= "/" and not p:find("//", 1, true)
+end
+
+local function drawn(go)
+    for _, m in ipairs({ "get_Draw", "get_DrawSelf" }) do
+        local ok, v = pcall(function() return go:call(m) end)
+        if ok and type(v) == "boolean" then return v end
+    end
+    return nil
+end
+
+-- One child of my player: the record of a weapon / item that is drawn and has a mesh and a material, or nil (and why not).
+function W.eval(go, name)
+    local MP = CFG.mprobe
+    local is_wp = name:match("^wp%d%d%d%d") ~= nil and not name:find("Light", 1, true)
+    local is_item = false
+    if not is_wp and not name:match("^Shadow") and not name:find("Light", 1, true) then
+        local okc, c = pcall(function() return go:call("getComponent(System.Type)", sdk.typeof("app.Item")) end)
+        is_item = okc and c ~= nil
+    end
+    if not (is_wp or is_item) then return nil end
+    if drawn(go) ~= true then return nil end
+    local okm, mc = pcall(function() return go:call("getComponent(System.Type)", sdk.typeof("via.render.Mesh")) end)
+    if not okm or mc == nil then return nil end
+    local mesh = MP.text((MP.try(mc, { "getMesh", "get_Mesh" })))
+    local mdf = MP.text((MP.try(mc, { "get_Material", "getMaterial" })))
+    if not mesh or not mdf then return nil end
+    -- (10.16) a weapon only: an app.Item that is not a wp#### object counts only when its model is a Weapon/ file (the 10.15 file sent a Props/ puzzle object, the antiseptic bottle ...)
+    if not is_wp and not stem(mesh, ".mesh"):lower():match("^weapon/") then
+        W.n.not_a_weapon = W.n.not_a_weapon + 1
+        return nil
+    end
+    local numb = (name .. " " .. mesh):lower():match("wp%d%d%d%d")
+    if numb and W.SKIP[numb] then
+        W.n.skipped_named = W.n.skipped_named + 1
+        W.skipped_last = name .. ": " .. W.SKIP[numb]
+        return nil
+    end
+    local rec = { go = go, name = name, mesh = stem(mesh, ".mesh"), mdf = stem(mdf, ".mdf2"), px = 0, py = 0, pz = 0, qw = 1, qx = 0, qy = 0, qz = 0, joint = "R_Wep" }
+    rec.knife = name:lower():find("knife", 1, true) ~= nil or rec.mesh:lower():find("knife", 1, true) ~= nil
+    pcall(function()
+        local tr = go:call("get_Transform")
+        local lp, lq = tr:call("get_LocalPosition"), tr:call("get_LocalRotation")
+        if lp and type(lp.x) == "number" then rec.px, rec.py, rec.pz = lp.x, lp.y, lp.z end
+        if lq and type(lq.w) == "number" then rec.qw, rec.qx, rec.qy, rec.qz = lq.w, lq.x, lq.y, lq.z end
+        local j = tr:call("get_ParentJoint")
+        if type(j) == "string" and j:match("^[%w_]+$") and #j <= 24 then rec.joint = j end
+    end)
+    return rec
+end
+
+-- The weapon in my hand: the drawn child of my player (the knife only when nothing else is drawn). rec, why.
+function W.scan_local()
+    W.n.scans = W.n.scans + 1
+    local go = player_object()
+    if not go then return nil, "there is no player object" end
+    local okx, xf = pcall(function() return go:call("get_Transform") end)
+    if not okx or xf == nil then return nil, "the player has no transform" end
+    local best, knife, count = nil, nil, 0
+    local function walk(t, depth)
+        local okc, child = pcall(function() return t:call("get_Child") end)
+        if not okc then return end
+        local guard = 0
+        while child ~= nil and guard < 80 and count < W.MAX_OBJECTS and not best do
+            guard, count = guard + 1, count + 1
+            local okg, cgo = pcall(function() return child:call("get_GameObject") end)
+            if okg and cgo ~= nil then
+                local nm = CFG.wpn.go_name(cgo)
+                if nm then
+                    local rec = W.eval(cgo, nm)
+                    if rec then
+                        if rec.knife then knife = knife or rec else best = rec end
+                    end
+                end
+                if not best and depth < W.MAX_DEPTH then walk(child, depth + 1) end
+            end
+            local okn, nxt = pcall(function() return child:call("get_Next") end)
+            child = okn and nxt or nil
+        end
+    end
+    walk(xf, 1)
+    local rec = best or knife
+    if rec then return rec, nil end
+    return nil, count == 0 and "nothing hangs under the player" or "nothing drawn in my hand"
+end
+
+-- The message text of a weapon record, or nil when its paths can't go over.
+function W.encode(rec)
+    if not (W.valid_path(rec.mesh) and W.valid_path(rec.mdf)) then
+        W.n.bad_path = W.n.bad_path + 1
+        return nil, "a path the wire can't carry: " .. tostring(rec.mesh)
+    end
+    local text = string.format("w|%s|%s|%.3f|%.3f|%.3f|%.4f|%.4f|%.4f|%.4f|%s", rec.mesh, rec.mdf == rec.mesh and "=" or rec.mdf,
+        rec.px, rec.py, rec.pz, rec.qw, rec.qx, rec.qy, rec.qz, rec.joint)
+    if #text > 180 then
+        W.n.too_long = W.n.too_long + 1
+        return nil, "the message would be " .. #text .. " characters"
+    end
+    return text
+end
+
+-- SENDER: looked at twice a second while the other player is here; sent when it changes (at most once a second) and every KEEPALIVE seconds.
+function W.sender(now, there)
+    if not W.alive() or not there then
+        W.scan_at, W.local_rec = -100, nil
+        return
+    end
+    if now - W.scan_at < W.SCAN_EVERY then return end
+    W.scan_at = now
+    -- (10.16) the walk over the player's children is not made while the game loads or plays a cutscene
+    local quiet = CFG.guard and CFG.guard.why(now)
+    if quiet then
+        W.n.scans_held_not_quiet = W.n.scans_held_not_quiet + 1
+        W.local_why = "waiting: " .. quiet
+        return
+    end
+    local ok, rec, why = pcall(W.scan_local)
+    if not ok then
+        W.n.errors = W.n.errors + 1
+        W.local_why = "error: " .. tostring(rec):sub(1, 80)
+        return
+    end
+    local text, key
+    if rec then
+        W.n.found = W.n.found + 1
+        local why2
+        text, why2 = W.encode(rec)
+        if not text then W.local_why = why2 return end
+        key = rec.mesh .. "|" .. rec.mdf
+        W.local_why = nil
+        -- a knife only counts after it has been in the hand for KNIFE_SETTLE seconds (a gun coming out leaves it drawn for a moment)
+        if rec.knife and text ~= W.sent_text then
+            W.knife_since = W.knife_since or now
+            if now - W.knife_since < W.KNIFE_SETTLE then return end
+        else
+            W.knife_since = nil
+        end
+    else
+        W.n.none = W.n.none + 1
+        W.knife_since = nil
+        W.local_why = why
+        W.local_rec = nil
+        -- nothing in my hand: the other game is told once, and only when it was told about a weapon before (nothing sent means nothing shown there; a "w|-"
+        -- every 8 s for nothing filled the 32-message ring of the outbox and pushed real messages out of it: the 10.15 regression run's revive check)
+        if W.sent_text == nil or W.sent_text == "w|-" then return end
+        text, key = "w|-", "-"
+    end
+    W.local_rec = rec and { name = rec.name, mesh = rec.mesh, mdf = rec.mdf, joint = rec.joint, knife = rec.knife } or nil
+    local changed = text ~= W.sent_text
+    if (changed and now - W.sent_at >= W.SEND_GAP) or (not changed and now - W.sent_at >= W.KEEPALIVE) or (changed and key ~= W.sent_key) then
+        W.sent_text, W.sent_key, W.sent_at = text, key, now
+        W.n.sent = W.n.sent + 1
+        net_send(W.MSG, text)
+        if changed and key ~= "-" then W.note("I hold " .. tostring(rec and rec.name) .. " (" .. key .. "), sent") end
+    end
+end
+
+-- RECEIVER: the other player's weapon. Nothing is made here: the game phase tick does it (W.tick).
+function W.on_msg(payload)
+    local rest = tostring(payload or ""):match("^w|(.*)$")
+    if not rest then W.n.rejected = W.n.rejected + 1 return end
+    W.n.received = W.n.received + 1
+    local now = os.clock()
+    if rest == "-" then
+        W.got, W.got_at = nil, now
+        return
+    end
+    local num = "([%-%d%.]+)"
+    local mesh, mdf, px, py, pz, qw, qx, qy, qz, joint = rest:match("^([^|]+)|([^|]+)|" .. num .. "|" .. num .. "|" .. num .. "|" .. num .. "|" .. num .. "|" .. num .. "|" .. num .. "|([%w_]+)$")
+    if not mesh then W.n.rejected = W.n.rejected + 1 return end
+    if mdf == "=" then mdf = mesh end
+    px, py, pz, qw, qx, qy, qz = tonumber(px), tonumber(py), tonumber(pz), tonumber(qw), tonumber(qx), tonumber(qy), tonumber(qz)
+    local nums = { px, py, pz, qw, qx, qy, qz }
+    for i = 1, 7 do
+        if type(nums[i]) ~= "number" or nums[i] ~= nums[i] or math.abs(nums[i]) > 1000 then W.n.rejected = W.n.rejected + 1 return end
+    end
+    local ql = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+    if not (W.valid_path(mesh) and W.valid_path(mdf)) or #joint > 24 or ql < 0.5 or math.abs(px) > 3 or math.abs(py) > 3 or math.abs(pz) > 3 then
+        W.n.rejected = W.n.rejected + 1
+        return
+    end
+    local numb = mesh:lower():match("wp%d%d%d%d")
+    if numb and W.SKIP[numb] then -- (10.16) an older sender may still send it
+        W.n.skipped_named = W.n.skipped_named + 1
+        return
+    end
+    qw, qx, qy, qz = qw / ql, qx / ql, qy / ql, qz / ql
+    W.got = { mesh = mesh, mdf = mdf, key = mesh .. "|" .. mdf, px = px, py = py, pz = pz, qw = qw, qx = qx, qy = qy, qz = qz, joint = joint,
+        grip = string.format("%.3f %.3f %.3f %.4f %.4f %.4f %.4f %s", px, py, pz, qw, qx, qy, qz, joint) }
+    W.got_at = now
+end
+
+-- Detach, hide and (when its mesh is loaded) destroy every copy this module made. Game calls: the game phase only.
+function W.drop(why)
+    local list = W.all
+    W.all, W.copy = {}, nil
+    if #list == 0 then return end
+    pcall(tracer.crumb, "wmesh", "drop " .. tostring(why))
+    for _, c in ipairs(list) do
+        pcall(function() c.xf:call("set_Parent", nil) end)
+        pcall(function() c.go:call("set_DrawSelf", false) end)
+        local loaded = c.mc == nil or CFG.body.part_ready(c.mc)
+        if loaded then
+            pcall(function() sdk.find_type_definition("via.GameObject"):get_method("destroy(via.GameObject)"):call(nil, c.go) end)
+            W.n.dropped = W.n.dropped + 1
+        else
+            W.n.kept_loading = W.n.kept_loading + 1 -- its mesh is still loading: hidden and detached, not destroyed
+        end
+    end
+    pcall(tracer.crumb, "clean", "weapon model dropped")
+    W.note(string.format("took %d copy(ies) down (%s)", #list, tostring(why)))
+end
+
+-- The scene changed (or the body was lost with it): the game took the objects, so they are let go and never touched again.
+function W.forget(why)
+    local n = #W.all
+    W.all, W.copy = {}, nil
+    if n > 0 then
+        W.n.forgotten = W.n.forgotten + n
+        W.note(string.format("let go of %d copy(ies) (%s)", n, tostring(why)))
+    end
+end
+
+local function fail(g, why)
+    W.fails[g.key] = (W.fails[g.key] or 0) + 1
+    W.status = "failed: " .. why
+    W.note(string.format("%s: %s (try %d of %d)", g.key, why, W.fails[g.key], W.MAX_FAILS))
+    W.drop("failed")
+end
+
+-- Which joint of the body to hang it on: the sender's joint, else R_Wep, R_Hand, R_Wrist, whichever the body has. nil when none.
+function W.pick_joint(g)
+    local set = CFG.body.joint_set(CFG.body.xf)
+    for _, j in ipairs({ g.joint, table.unpack(W.JOINTS) }) do
+        if set[j] then return j end
+    end
+    local hints = {}
+    for nm in pairs(set) do
+        if #hints < 12 and (nm:lower():find("wep", 1, true) or nm:lower():find("hand", 1, true)) then hints[#hints + 1] = nm end
+    end
+    table.sort(hints)
+    return nil, "the body has none of " .. g.joint .. ", " .. table.concat(W.JOINTS, ", ") .. " (hand-like joints it has: " .. table.concat(hints, " ") .. ")"
+end
+
+function W.apply_grip(c, g)
+    local ok, err = pcall(function()
+        if c.joint and c.xf:call("get_ParentJoint") ~= c.joint then c.xf:call("set_ParentJoint", c.joint) end
+        c.xf:call("set_LocalPosition", Vector3f.new(g.px, g.py, g.pz))
+        c.xf:call("set_LocalRotation", Quaternion.new(g.qw, g.qx, g.qy, g.qz))
+    end)
+    if ok then c.grip = g.grip else W.n.errors = W.n.errors + 1 end
+    return ok
+end
+
+-- Step 1: the object, its mesh component and the two files (the mesh is not drawn and not on the body yet).
+function W.make(g, now)
+    local B, L = CFG.body, CFG.load
+    if L.on == false or tracer.loader_suspect then return fail(g, "loading model files by path is switched off") end
+    pcall(tracer.crumb, "wmesh", "make " .. g.key)
+    local mh, why1 = L.holder("mesh", g.mesh .. ".mesh")
+    local th, why2 = L.holder("material", g.mdf .. ".mdf2")
+    if not mh or not th then
+        W.n.load_failed = W.n.load_failed + 1
+        pcall(tracer.crumb, "clean", "weapon model: load failed")
+        return fail(g, "a file would not load (" .. tostring(not mh and why1 or why2) .. ")")
+    end
+    local go, why = B.create("re7mp_weapon")
+    if not go then
+        pcall(tracer.crumb, "clean", "weapon model: no object")
+        return fail(g, "no object (" .. tostring(why) .. ")")
+    end
+    local c = { go = go, key = g.key, body = B.go, scene = B.scene, made_at = now }
+    W.all[#W.all + 1] = c
+    W.copy = c
+    pcall(function() c.xf = go:call("get_Transform") end)
+    pcall(function() go:call("set_DrawSelf", false) end) -- not drawn until it is on the hand
+    local okc, mc = pcall(function() return go:call("createComponent", sdk.typeof("via.render.Mesh")) end)
+    if not okc or mc == nil or c.xf == nil then
+        pcall(tracer.crumb, "clean", "weapon model: no mesh component")
+        return fail(g, "no mesh component (" .. (okc and "the game answered nothing" or tostring(mc):sub(1, 80)) .. ")")
+    end
+    c.mc = mc
+    local used = B.give_resource(mc, { "setMesh", "set_Mesh" }, mh, { "getMesh", "get_Mesh" }, true)
+    local usedm = B.give_resource(mc, { "setMaterial", "set_Material" }, th, { "get_Material", "getMaterial" }, true)
+    pcall(tracer.crumb, "clean", "weapon model: made")
+    if not used or not usedm then return fail(g, "the " .. (not used and "mesh" or "material") .. " was not taken") end
+    W.n.made = W.n.made + 1
+    W.status = "loading " .. g.key
+    W.note(string.format("made a copy of %s, waiting for its mesh", g.key))
+    return true
+end
+
+-- Step 2, every tick until done: wait for the mesh, then parent it, joint it, set the grip and draw it.
+function W.finish(c, g, now)
+    local B = CFG.body
+    if c.parented then
+        if c.grip ~= g.grip and now - W.grip_at >= 1 then -- how it sits in the hand changed (the sender's numbers moved)
+            W.grip_at = now
+            if W.apply_grip(c, g) then W.n.regrip = W.n.regrip + 1 end
+        end
+        return
+    end
+    if not B.part_ready(c.mc) then
+        W.n.ready_wait = (W.n.ready_wait or 0) + 1
+        if now - c.made_at > W.LOAD_WAIT then
+            W.n.timeouts = W.n.timeouts + 1
+            fail(g, "the mesh did not load in " .. W.LOAD_WAIT .. " s")
+        end
+        return
+    end
+    local joint, whyj = W.pick_joint(g)
+    if not joint then
+        W.n.no_joint = W.n.no_joint + 1
+        fail(g, whyj)
+        W.fails[g.key] = W.MAX_FAILS -- the body will not grow a joint: no more tries for this weapon
+        return
+    end
+    pcall(tracer.crumb, "wmesh", "parent " .. g.key .. " on " .. joint)
+    c.joint = joint
+    local ok, err = pcall(function()
+        pcall(function() c.mc:call("set_DrawDefault", true) end)
+        pcall(function() c.mc:call("set_Enabled", false) end)
+        pcall(function() c.mc:call("set_Enabled", true) end)
+        c.xf:call("set_Parent", B.xf)
+        c.xf:call("set_SameJointsConstraint", false)
+        c.xf:call("set_ParentJoint", joint)
+    end)
+    if not ok then
+        pcall(tracer.crumb, "clean", "weapon model: parenting failed")
+        return fail(g, "parenting failed (" .. tostring(err):sub(1, 80) .. ")")
+    end
+    c.parented = true
+    W.apply_grip(c, g)
+    pcall(function() c.go:call("set_DrawSelf", true) end)
+    pcall(tracer.crumb, "clean", "weapon model: on the hand")
+    W.n.parented = W.n.parented + 1
+    W.status = "on the hand: " .. g.key
+    W.note(string.format("%s is on the other player's %s (grip %s)", g.key, joint, g.grip))
+end
+
+-- The game phase tick (called from CFG.body.tick).
+function W.tick(now)
+    local B = CFG.body
+    if not W.alive() then
+        if #W.all > 0 then W.drop("the weapon model is off") end
+        W.status = tracer.wmesh_suspect and "off: the last session ended inside it" or "off"
+        return
+    end
+    -- (10.16) while the game loads the copies are let go and never touched (the game frees them with the scene); during a cutscene or just after nothing new is made or changed
+    local quiet = CFG.guard and CFG.guard.why(now)
+    if quiet then
+        if CFG.busy and CFG.busy.busy and #W.all > 0 then W.forget("the game is loading") end
+        W.n.held_not_quiet = W.n.held_not_quiet + 1
+        W.status = "waiting: " .. quiet
+        return
+    end
+    local g = W.got
+    if g and W.got_at and now - W.got_at > W.TTL then
+        W.got = nil
+        g = nil
+        W.n.expired = W.n.expired + 1
+    end
+    if not (B.go and B.xf and B.mc) then
+        if #W.all > 0 then W.forget("no body of the other player") end
+        W.status = "no body of the other player here"
+        return
+    end
+    local c = W.copy
+    if c and (c.body ~= B.go or c.scene ~= B.scene) then
+        W.drop("the body was made again")
+        c = nil
+    end
+    if c and (not g or c.key ~= g.key) then
+        W.drop(g and "the weapon changed" or "nothing in their hand")
+        c = nil
+    end
+    if not g then
+        if W.status:find("^on the hand") or W.status:find("^loading") then W.status = "nothing in their hand" end
+        return
+    end
+    if not c then
+        if (W.fails[g.key] or 0) >= W.MAX_FAILS then
+            W.status = "gave up on " .. g.key .. " (" .. W.fails[g.key] .. " failed tries)"
+            return
+        end
+        if now - W.make_at < W.MAKE_EVERY then return end
+        -- (10.16) at most MAKES_PER_MIN copies in a minute: a weapon that flips in and out of the hand must not make and destroy objects for ever
+        local recent = {}
+        for _, t in ipairs(W.make_times) do if now - t < 60 then recent[#recent + 1] = t end end
+        W.make_times = recent
+        if #recent >= W.MAKES_PER_MIN then
+            W.n.churn_held = W.n.churn_held + 1
+            W.status = "waiting: " .. #recent .. " copies were made in the last minute"
+            return
+        end
+        W.make_at = now
+        W.make_times[#W.make_times + 1] = now
+        if not W.make(g, now) then return end
+        c = W.copy
+    end
+    if c then W.finish(c, g, now) end
+end
+
+function W.report()
+    local g = W.got
+    local c = W.copy
+    return { about = "10.15: the other player's weapon on their body. Message 17 carries the held weapon's mesh and material file and how it sits in the hand; this game makes ONE mesh object from the files, "
+            .. "hangs it on the body's right-hand joint (SameJointsConstraint off) and sets the grip. Unverified in the real game; the knife needs half a second in the hand.",
+        on = W.on, crash_marker = tracer.wmesh_suspect or nil, status = W.state(), i_hold = W.local_rec, why_not = W.local_why, last_sent = W.sent_text,
+        they_hold = g and { mesh = g.mesh, material = g.mdf, joint = g.joint, grip = g.grip, heard_s_ago = W.got_at and math.floor((os.clock() - W.got_at) * 10) / 10 or nil } or nil,
+        copy = c and { key = c.key, parented = c.parented == true, joint = c.joint, grip = c.grip, age_s = math.floor((os.clock() - c.made_at) * 10) / 10 } or nil,
+        counts = W.n, failed_tries = W.fails, last = W.last, skipped_last = W.skipped_last, lines = W.lines }
+end
+
+net_on(W.MSG, function(payload) W.on_msg(payload) end)
+end -- do
+
+----------------------------------------------------------------------------------------------
+-- (10.15) MOLDED COPIES ON THE JOINER (EXPERIMENTAL, OFF unless ticked, unverified in the real game). The ghosts (red boxes, enemy models) only show where the host's
+-- Molded are. With this switch on, the joiner's OWN game brings the same Molded out (its spawn point has the same GUID) and moves that real body onto the host's position
+-- every frame, the way Molded Together does for the copy of a Molded that the friend's game runs. What its notes (docs/NOTES.md, v0.47b to v0.49, tried there with bots) say,
+-- built in here:
+--   * the game's spawner brings a Molded out on request: app.EnemyGeneratorManager.requestSpawn(app.EnemySpawnInfo, System.Int32 0). It refuses while the spot is in view, so it is
+--     asked every 2 s for 20 s. NEVER the 3-argument form requestSpawn(spawnInfo, true, 0): it raised c0000005. A spawn point that says IsSpawned with no body (the body went back
+--     to the pool) gets IsSpawned = false and one more request. The call reports "Invoke threw an exception" and spawns anyway.
+--   * every Molded body is a child of its generator's MoldedPool, and while it is, a position set from outside changes only its local transform (its world matrix stops following
+--     for good). So the body is taken out of the pool (transform.set_Parent(nil); the pool is at the origin, nothing moves) and MovementController.warp(vec3, quat) moves it.
+--   * the game puts a far body to sleep (UpdateSelf off): it is woken (UpdateSelf and DrawSelf on) only while its spawn point still has THIS body (a body the game swaps for
+--     another one is let go: waking both left two bodies with one id), and its mesh is switched on again every second.
+--   * its own AI is off while it is a copy (MotionFsm disabled, EnemyOrder.requestThinkOff) and the host's clip is played on layer 0 (changeMotion with the host's bank, motion and
+--     frame). No component is ever switched on blindly: "all components" broke the Molded (some start off on purpose).
+--   * the host's Molded dies: the copy gets one hit far bigger than its health, credited to my player (the game scales damage), up to 3 times.
+--   * the ghost (model or box) of a Molded that has a copy here is not drawn; its invisible box stays, so my shots at it still go to the host as before.
+--   * a copy is let go when the host stops sending it (asleep, gone), when the data is old, when the switch goes off or the scene changes: its AI comes back, and a body I woke goes
+--     back to sleep and into its pool.
+-- Every game call that changes something is traced (stage "molded": a session that ends inside one switches this off at the next start). At most MAX copies.
+----------------------------------------------------------------------------------------------
+CFG.molded = {
+    on = false,
+    MAX = 8, ASK_EVERY = 2, ASK_FOR = 20, REASK_AFTER = 30, SCAN_EVERY = 1, VIS_EVERY = 1, CRUMB_EVERY = 2, WARP_FAILS = 5, REFUSE_FOR = 60, PLAY_RETRY = 1, WARP_HOLD = 0.25, KEY_EVERY = 0.25,
+    copies = {},      -- wire name -> the copy: { name, id, go, xf, addr, s, pool, woke, brain_off, mc, mesh, motion, layer, bank, mid, rec }
+    want = {},        -- spawn id -> { since, until_t, asked, reset }: a Molded the host has out that this game has not brought out yet
+    asked_at = {},    -- spawn id -> when it was last given up on (not asked again for REASK_AFTER seconds)
+    dead_ids = {},    -- spawn ids of Molded that died here for the host's word: not brought out again in this scene
+    refused = {},     -- spawn id -> when its copy was let go because the body could not be moved (not taken again for REFUSE_FOR seconds)
+    owner = nil, scene = nil, scan_at = -100, ask_at = -100, crumb_at = -100, crumbed = false,
+    n = { taken = 0, released = 0, forgotten = 0, asked = 0, resets = 0, unpooled = 0, repooled = 0, woke = 0, slept = 0, killed = 0, kill_failed = 0, warps = 0, warp_errors = 0,
+        plays = 0, plays_missing = 0, play_errors = 0, swapped = 0, refused = 0, warps_skipped = 0, errors = 0 },
+    last = "off", lines = {},
+}
+
+function CFG.molded.note(text)
+    local M = CFG.molded
+    M.last = text
+    M.lines[#M.lines + 1] = string.format("%.1f %s", os.clock(), text)
+    while #M.lines > 30 do table.remove(M.lines, 1) end
+    say("molded copies: " .. text)
+end
+
+-- Is it on? A session that ended inside it switches it off at the next start (tracer.molded_suspect, from the marker file).
+function CFG.molded.alive()
+    local M = CFG.molded
+    if tracer.molded_suspect and M.on then M.on, M.last = false, "switched off: the last session ended inside it" end
+    return M.on == true
+end
+
+function CFG.molded.set_on(v)
+    local M = CFG.molded
+    M.on = v == true
+    if M.on then tracer.molded_suspect = nil end -- (ticked again by the player: tried again)
+    M.note(M.on and "switched on in the panel" or "switched off in the panel")
+    if not M.on then pcall(M.release_all, "switched off") end
+end
+
+-- A component of the object by the game's class (is_a on the base class), else by a Lua pattern on its class name.
+function CFG.molded.find_comp(go, base, pat)
+    local okc, comps = pcall(function() return go:call("get_Components") end)
+    if not okc or comps == nil then return nil end
+    for _, c in ipairs(CFG.mold.items(comps) or {}) do
+        local okt, td = pcall(function() return c:get_type_definition() end)
+        if okt and td then
+            local oki, isa = pcall(function() return td:is_a(base) end)
+            if oki and isa == true then return c end
+            local okn, full = pcall(function() return td:get_full_name() end)
+            if okn and type(full) == "string" and pat and full:find(pat) then return c end
+        end
+    end
+    return nil
+end
+
+-- The body's parent when it is a pool (a name with "Pool" in it): out of it, so a position set from outside takes. The pool is remembered.
+function CFG.molded.unpool(c)
+    local M = CFG.molded
+    if c.pool then return end
+    local okp, par = pcall(function() return c.xf:call("get_Parent") end)
+    if not okp or par == nil then return end
+    local okn, pn = pcall(function() return par:call("get_GameObject"):call("get_Name") end)
+    if not okn or type(pn) ~= "string" or not pn:find("Pool", 1, true) then return end
+    if pcall(c.xf.call, c.xf, "set_Parent", nil) then
+        c.pool = par
+        M.n.unpooled = M.n.unpooled + 1
+    end
+end
+
+function CFG.molded.repool(c)
+    local M = CFG.molded
+    local par = c.pool
+    if not par then return end
+    c.pool = nil
+    local okp, now_par = pcall(function() return c.xf:call("get_Parent") end)
+    if okp and now_par == nil and pcall(c.xf.call, c.xf, "set_Parent", par) then M.n.repooled = M.n.repooled + 1 end
+end
+
+-- The game sleeps a far body (UpdateSelf off; it stays drawn but frozen): wake it. `force` wakes it for good (taking it), else only while the spawn point still has this body.
+function CFG.molded.wake(c)
+    local M = CFG.molded
+    local ok, up = pcall(function() return c.go:call("get_UpdateSelf") end)
+    if ok and up == false then
+        pcall(c.go.call, c.go, "set_UpdateSelf", true)
+        pcall(c.go.call, c.go, "set_DrawSelf", true)
+        c.woke = true
+        M.n.woke = M.n.woke + 1
+        return true
+    end
+    return false
+end
+
+-- Visible: a Molded waits hidden in a wall and its own AI shows it as it climbs out; with the AI off the copy stayed invisible (the other mod's 2026-11-03 "invisible monsters").
+function CFG.molded.visible(c)
+    local okd, drawn = pcall(function() return c.go:call("get_DrawSelf") end)
+    if okd and drawn == false then pcall(c.go.call, c.go, "set_DrawSelf", true) end
+    if c.mesh == nil then
+        local okm, m = pcall(function() return c.go:call("getComponent(System.Type)", sdk.typeof("via.render.Mesh")) end)
+        c.mesh = okm and m or false
+    end
+    local m = c.mesh
+    if m then
+        local oke, en = pcall(function() return m:call("get_Enabled") end)
+        if oke and en == false then pcall(m.call, m, "set_Enabled", true) end
+        local okw, dd = pcall(function() return m:call("get_DrawDefault") end)
+        if okw and dd == false then pcall(m.call, m, "set_DrawDefault", true) end
+    end
+end
+
+-- Its own AI off (on = false) or back (on = true): the animation controller (MotionFsm) and the enemy's order component. Nothing else is touched.
+function CFG.molded.brain(c, on)
+    local M = CFG.molded
+    local okf, fsm = pcall(function() return c.go:call("getComponent(System.Type)", sdk.typeof("via.motion.MotionFsm")) end)
+    if okf and fsm ~= nil then pcall(fsm.call, fsm, "set_Enabled", on) end
+    if c.order == nil then c.order = M.find_comp(c.go, "app.EnemyOrder", "^app%.Em%d+Order$") or false end
+    if c.order then
+        if M.owner == nil then
+            local oko, ms = pcall(function() return sdk.create_managed_string("re7mp") end)
+            if oko and ms ~= nil then
+                M.owner = ms
+                pcall(function() ms:add_ref() end)
+            end
+        end
+        if M.owner ~= nil then pcall(c.order.call, c.order, on and "requestThinkOn" or "requestThinkOff", M.owner) end
+    end
+    c.brain_off = not on
+end
+
+-- The address of the body the spawn point with this id has now (from the last read of the spawn points), or nil when that is not known.
+function CFG.molded.current_body(id)
+    for _, p in ipairs(CFG.mold.points) do
+        if p.id == id then
+            if p.inst == nil then return false end
+            local ok, a = pcall(p.inst.get_address, p.inst)
+            return ok and a or nil
+        end
+    end
+    return nil
+end
+
+-- Takes a body of this game as the copy of the host's Molded <name>.
+function CFG.molded.take(name, id, p, now)
+    local M = CFG.molded
+    local go = p.inst
+    local c = { name = name, id = id, go = go, s = p.s, taken_at = now, vis_at = now }
+    local oka, addr = pcall(go.get_address, go)
+    c.addr = oka and addr or nil
+    local okx, xf = pcall(function() return go:call("get_Transform") end)
+    if not okx or xf == nil then M.n.errors = M.n.errors + 1 return end
+    c.xf = xf
+    pcall(tracer.crumb, "molded", "taking " .. name)
+    M.unpool(c)
+    M.wake(c)
+    M.visible(c)
+    M.brain(c, false)
+    pcall(tracer.crumb, "clean", "molded body taken")
+    M.copies[name] = c
+    M.want[id] = nil
+    M.n.taken = M.n.taken + 1
+    M.note(string.format("%s: this game's body of spawn point %s is a copy of the host's now%s%s", name, id, c.pool and " (out of its pool)" or "", c.woke and " (woken)" or ""))
+end
+
+-- Lets a copy go: its AI back; a body I woke goes back to sleep and into its pool, one the game had awake stays as it is.
+function CFG.molded.release(name, why)
+    local M = CFG.molded
+    local c = M.copies[name]
+    M.copies[name] = nil
+    if c == nil then return end
+    pcall(tracer.crumb, "molded", "letting go of " .. name)
+    M.brain(c, true)
+    c.bank, c.mid = nil, nil
+    if c.woke then
+        pcall(c.go.call, c.go, "set_UpdateSelf", false)
+        pcall(c.go.call, c.go, "set_DrawSelf", false)
+        M.n.slept = M.n.slept + 1
+    end
+    local okup, up = pcall(function() return c.go:call("get_Update") end)
+    if c.pool and (c.woke or (okup and up == false)) then M.repool(c) end
+    pcall(tracer.crumb, "clean", "molded body let go")
+    M.n.released = M.n.released + 1
+    M.note(string.format("%s: let go (%s)", name, why))
+end
+
+function CFG.molded.release_all(why)
+    local M = CFG.molded
+    local names = {}
+    for name in pairs(M.copies) do names[#names + 1] = name end
+    for _, name in ipairs(names) do pcall(M.release, name, why) end
+    M.want = {}
+end
+
+-- The scene is another one: the game took the old bodies down, so nothing is called on them.
+function CFG.molded.forget(why)
+    local M = CFG.molded
+    local n = 0
+    for _ in pairs(M.copies) do n = n + 1 end
+    M.copies, M.want, M.dead_ids, M.asked_at, M.refused = {}, {}, {}, {}, {}
+    if n > 0 then
+        M.n.forgotten = M.n.forgotten + n
+        M.note(string.format("%d copy(ies) forgotten (%s)", n, why))
+    end
+end
+
+-- The host's Molded is dead: this game's copy gets a hit far bigger than its health (the game scales damage, so up to 3 times), and the spawn id is not brought out again.
+function CFG.molded.finish(name, c)
+    local M = CFG.molded
+    M.copies[name] = nil
+    M.dead_ids[c.id] = true
+    local rec = c.rec or { name = name, go = c.go, xf = c.xf, family = enemy.base(name) }
+    pcall(tracer.crumb, "molded", "killing " .. name)
+    local done = false
+    for _ = 1, 3 do
+        local okh, hp = pcall(read_health, rec)
+        if not okh or type(hp) ~= "number" or hp <= 0 then hp = 400 end
+        pcall(enemy.hit.apply, rec, hp * 4 + 1000)
+        local okd, dead = pcall(enemy_is_dead, rec)
+        if okd and dead then done = true break end
+    end
+    pcall(tracer.crumb, "clean", "molded kill finished")
+    if done then M.n.killed = M.n.killed + 1 else M.n.kill_failed = M.n.kill_failed + 1 end
+    M.note(string.format("%s: the host's Molded is dead; this game's copy %s", name, done and "was killed" or "could not be killed (3 hits)"))
+end
+
+-- Moves the copy onto the host's Molded: MovementController.warp(position, a turn about Y that faces the way the host's faces).
+function CFG.molded.warp(c, e)
+    local M = CFG.molded
+    if c.mc == nil then
+        local okc, mc = pcall(function() return c.go:call("getComponent(System.Type)", sdk.typeof("app.MovementController")) end)
+        c.mc = okc and mc or false
+    end
+    local ok = false
+    if c.mc then
+        local f = rotate(unit_quat(e), { 0, 0, 1 })
+        local yaw = math.atan(f[1], f[3])
+        local now = os.clock()
+        -- a Molded that stands still on the host is put there once and then every WARP_HOLD seconds, not on every frame (the profile: 60 calls a second for each copy)
+        local w = c.warped
+        if w and now - w.at < M.WARP_HOLD and math.abs(w.x - e.rx) < 0.01 and math.abs(w.y - e.ry) < 0.01 and math.abs(w.z - e.rz) < 0.01 and math.abs(w.yaw - yaw) < 0.02 then
+            M.n.warps_skipped = M.n.warps_skipped + 1
+            return true
+        end
+        ok = pcall(c.mc.call, c.mc, "warp(via.vec3, via.Quaternion)", Vector3f.new(e.rx, e.ry, e.rz), Quaternion.new(math.cos(yaw / 2), 0, math.sin(yaw / 2), 0))
+        if ok then c.warped = { x = e.rx, y = e.ry, z = e.rz, yaw = yaw, at = now } end
+    end
+    if ok then
+        M.n.warps = M.n.warps + 1
+        c.warp_fails = 0
+    else
+        M.n.warp_errors = M.n.warp_errors + 1
+        c.warp_fails = (c.warp_fails or 0) + 1 -- (a copy that cannot be moved is no copy: drive lets it go after WARP_FAILS in a row)
+    end
+    return ok
+end
+
+-- The host's clip on this body's layer 0 (bank, motion and the frame it has reached by now); the frame is corrected when it drifts.
+function CFG.molded.play(c, e, now)
+    local M, A = CFG.molded, CFG.eanim
+    if not (A and e.bank and e.motion) then return end
+    local bank, mid = math.floor(e.bank), math.floor(e.motion)
+    if mid >= A.EMPTY then return end
+    if c.layer == nil then
+        c.motion = A.motion_of(c.go)
+        c.layer = c.motion and CFG.door.get(c.motion, "getLayer", 0) or false
+    end
+    local L = c.layer
+    if not L then return end
+    local frame = (e.frame or 0) + math.max(0, now - (e.frame_at or now)) * A.FPS
+    if c.bank ~= bank or c.mid ~= mid then
+        if c.miss and c.miss.bank == bank and c.miss.mid == mid and now - c.miss.t < A.MISS_S then return end
+        if c.play_retry and now < c.play_retry then return end
+        local has = A.has_clip(c.motion, bank, mid)
+        if has == false then
+            c.miss = { bank = bank, mid = mid, t = now }
+            M.n.plays_missing = M.n.plays_missing + 1
+            return
+        end
+        c.miss = nil
+        local ok = A.play(L, bank, mid, frame)
+        if ok then
+            c.bank, c.mid, c.fixed_at, c.play_retry = bank, mid, now, nil
+            M.n.plays = M.n.plays + 1
+        else
+            M.n.play_errors = M.n.play_errors + 1
+            c.play_retry = now + M.PLAY_RETRY -- (a call that failed fails again: tried once a second, not every frame)
+        end
+    elseif now - (c.fixed_at or 0) >= 1 then
+        c.fixed_at = now -- (looked at once a second, whether or not it had drifted: the profile found the frame being read on every frame)
+        local f = tonumber(CFG.door.get(L, "get_Frame"))
+        if f ~= nil and math.abs(f - frame) > 4 and e.frame_at and now - e.frame_at < 1 then
+            CFG.door.try(L, "set_Frame", frame + 0.0)
+        end
+    end
+end
+
+-- One copy, every frame.
+function CFG.molded.drive(name, c, e, now)
+    local M = CFG.molded
+    if now - c.vis_at >= M.VIS_EVERY then
+        c.vis_at = now
+        local cur = M.current_body(c.id)
+        if cur == false or (cur ~= nil and c.addr ~= nil and cur ~= c.addr) then
+            M.n.swapped = M.n.swapped + 1
+            M.release(name, "its spawn point has another body now")
+            return
+        end
+        M.wake(c) -- (only here: while the spawn point still has this body)
+        M.visible(c)
+        M.unpool(c)
+    end
+    if not M.warp(c, e) and (c.warp_fails or 0) >= M.WARP_FAILS then
+        M.refused[c.id] = now
+        M.n.refused = M.n.refused + 1
+        M.release(name, string.format("its position could not be set %d times in a row", c.warp_fails))
+        return
+    end
+    M.play(c, e, now)
+end
+
+-- Every second: the host's Molded this game has no copy of. A body already out is taken; a spawn point with none is asked to bring one out.
+function CFG.molded.scan(now)
+    local M = CFG.molded
+    local scene = scene_object()
+    if not scene then return end
+    local by_id = {}
+    for _, p in ipairs(CFG.mold.read_points(scene, now)) do by_id[p.id] = p end
+    local n = 0
+    for _ in pairs(M.copies) do n = n + 1 end
+    for name, e in pairs(enemy.remote) do
+        local id = name:match("^[Ee][Mm]4%d%d%d_(%x%x%x%x%x%x%x%x%x%x%x%x)$")
+        if id and e.alive and not e.inactive and e.rx and M.copies[name] == nil and not M.dead_ids[id] and now - (M.refused[id] or -1000) >= M.REFUSE_FOR then
+            local p = by_id[id]
+            if p ~= nil then -- (no such spawn point here: another chapter, or an area that is not loaded)
+                if p.inst ~= nil then
+                    if n < M.MAX then
+                        M.take(name, id, p, now)
+                        n = n + 1
+                    end
+                elseif M.want[id] == nil and now - (M.asked_at[id] or -100) >= M.REASK_AFTER then
+                    M.want[id] = { since = now, until_t = now + M.ASK_FOR }
+                end
+            end
+        end
+    end
+end
+
+-- Every 2 s: ask the spawn points of the wanted ids (the other mod's spawn_requests).
+function CFG.molded.ask(now)
+    local M = CFG.molded
+    if next(M.want) == nil then return end
+    local gm = sdk.get_managed_singleton("app.EnemyGeneratorManager")
+    local by_id = {}
+    for _, p in ipairs(CFG.mold.points) do by_id[p.id] = p end
+    for id, w in pairs(M.want) do
+        local p = by_id[id]
+        if now > w.until_t or p == nil then
+            M.want[id], M.asked_at[id] = nil, now
+        elseif gm then
+            local oki, inst = pcall(function() return p.s:get_field("EnemyInstance") end)
+            local oks, spawned = pcall(function() return p.s:get_field("IsSpawned") end)
+            inst, spawned = oki and inst or nil, oks and spawned == true
+            if spawned and inst == nil and not w.reset then
+                w.reset, w.asked = true, true
+                pcall(tracer.crumb, "molded", "IsSpawned = false and requestSpawn " .. id)
+                pcall(p.s.set_field, p.s, "IsSpawned", false)
+                pcall(gm.call, gm, "requestSpawn(app.EnemySpawnInfo, System.Int32)", p.s, 0)
+                pcall(tracer.crumb, "clean", "molded spawn asked")
+                M.n.asked, M.n.resets = M.n.asked + 1, M.n.resets + 1
+                M.note("spawn point " .. id .. ": marked spawned with no body here, asked again")
+            elseif spawned or inst ~= nil then
+                M.want[id], M.asked_at[id] = nil, now -- out already (the next scan takes it), or it was and is gone by the game's own doing
+            else
+                if not w.asked then M.note("spawn point " .. id .. ": asking the game to bring its Molded out here") end
+                w.asked = true
+                pcall(tracer.crumb, "molded", "requestSpawn " .. id)
+                pcall(gm.call, gm, "requestSpawn(app.EnemySpawnInfo, System.Int32)", p.s, 0)
+                pcall(tracer.crumb, "clean", "molded spawn asked")
+                M.n.asked = M.n.asked + 1
+            end
+        end
+    end
+end
+
+-- JOINER, every frame (called by enemy_update once the received positions are smoothed).
+function CFG.molded.update(now, dt)
+    local M = CFG.molded
+    if not M.alive() then
+        if next(M.copies) then M.release_all("switched off") end
+        return
+    end
+    if CFG.busy and CFG.busy.busy then
+        if next(M.copies) then M.forget("the game is loading") end
+        return
+    end
+    if now - enemy.remote_at > 3 then
+        if next(M.copies) then M.release_all("no data from the host") end
+        return
+    end
+    if now - (M.key_at or -100) >= M.KEY_EVERY then -- (the scene is looked at four times a second: the profile found three native calls a frame for it)
+        M.key_at = now
+        local key = CFG.body.scene_key()
+        if M.scene ~= nil and key ~= M.scene then M.forget("the scene changed") end
+        M.scene = key
+    end
+    if now - M.scan_at >= M.SCAN_EVERY then
+        M.scan_at = now
+        local ok, err = pcall(M.scan, now)
+        if not ok then M.n.errors, M.last_error = M.n.errors + 1, tostring(err):sub(1, 100) end
+    end
+    if now - M.ask_at >= M.ASK_EVERY then
+        M.ask_at = now
+        local ok, err = pcall(M.ask, now)
+        if not ok then M.n.errors, M.last_error = M.n.errors + 1, tostring(err):sub(1, 100) end
+    end
+    local names = {}
+    for name in pairs(M.copies) do names[#names + 1] = name end
+    for _, name in ipairs(names) do
+        local c, e = M.copies[name], enemy.remote[name]
+        if c and (e == nil or e.inactive or not e.rx) then
+            M.release(name, "the host no longer sends it")
+        elseif c and not e.alive then
+            M.finish(name, c)
+        elseif c and c.dead_here then
+            -- (10.21) this body died here first (CFG.kill asked the host to kill its own): it is not moved onto the host's Molded or given its clips, and stays the copy of it so
+            -- the scan does not take another body for the same name. M.finish still runs when the host's dies too (an already dead body: it is done at once).
+        elseif c then
+            local ok, err = pcall(M.drive, name, c, e, now)
+            if not ok then
+                M.n.errors, M.last_error = M.n.errors + 1, tostring(err):sub(1, 100)
+                pcall(M.release, name, "error: " .. tostring(err):sub(1, 60))
+            end
+        end
+    end
+    -- the crash marker while copies are being moved (written twice a second at most; "clean" once none is left)
+    local any = next(M.copies) ~= nil
+    if any and now - M.crumb_at >= M.CRUMB_EVERY then
+        M.crumb_at, M.crumbed = now, true
+        pcall(tracer.crumb, "molded", "moving copies of the host's Molded")
+    elseif not any and M.crumbed then
+        M.crumbed = false
+        pcall(tracer.crumb, "clean", "molded: no copy left")
+    end
+end
+
+function CFG.molded.report()
+    local M = CFG.molded
+    local live = {}
+    for name, c in pairs(M.copies) do
+        live[#live + 1] = { name = name, spawn = c.id, out_of_pool = c.pool ~= nil, woke = c.woke == true, ai_off = c.brain_off == true, clip = c.bank and (c.bank .. "/" .. tostring(c.mid)) or nil }
+    end
+    table.sort(live, function(a, b) return a.name < b.name end)
+    local wants = {}
+    for id in pairs(M.want) do wants[#wants + 1] = id end
+    table.sort(wants)
+    return { about = "10.15, EXPERIMENTAL and unverified in the game: this game brings out the Molded the host has out (requestSpawn on the spawn point with the same GUID), takes the body out of its pool and moves it onto the host's every frame, with the host's clip. Off unless ticked.",
+        on = M.on, previous_session_ended_inside_it = tracer.molded_suspect == true, last = M.last, last_error = M.last_error, counts = M.n,
+        copies = live, waiting_for_spawn = wants, lines = M.lines }
 end
 
 ----------------------------------------------------------------------------------------------
@@ -15063,7 +20014,7 @@ function CFG.ff.report()
     local now = os.clock()
     return { on = F.on, scale = F.scale, shots_tested = F.shots, missed = F.misses, behind_a_wall = F.walled, sent = F.sent, received = F.received,
         applied = F.applied, refused = F.refused, last = F.last,
-        -- (9.33) what the other player (or the loopback bot, which takes the hit itself since 9.33) says its health is now
+        -- (9.33) what the other player (or Ethan's friend, which takes the hit itself since 9.33) says its health is now
         their_health = r and r.hp and { hp = r.hp, max = r.max, downed = r.downed, reported_s_ago = r.at and (math.floor((now - r.at) * 10 + 0.5) / 10) or nil } or nil }
 end
 
@@ -15628,6 +20579,7 @@ CFG.pup = {
     wanted = {},              -- names wanted at the last step, nearest first
     step_at = -100, scene = nil, busy = false, last = "no enemy models yet", lines = {},
     made = 0, destroyed = 0, failures = 0, dropped = 0, errors = 0, queued = 0,
+    real_seen = {},           -- 10.21: enemy name -> when it was last NOT given a model because this game's own real body stands on it
 }
 
 function CFG.pup.note(text)
@@ -15638,9 +20590,16 @@ function CFG.pup.note(text)
     give.trail("enemy models: " .. text)
 end
 
+-- (10.21) OFF unless the box is ticked. The models stand in the model's rest pose (a T-pose: no animation exists for them, see the header), and with the host's enemies already
+-- moved onto the joiner's own bodies (mode 3, on by default since 10.19) the model was a second, motionless copy beside the real one. What stays when this is off: the real
+-- body where mode 3 has one, the red box where this game has none (the fallback that was always there). The old saved choice (settings key pup_on) is not read any more:
+-- it held "true" for everybody, because the old default saved itself the first time the box was drawn.
 function CFG.pup.enabled()
     local P = CFG.pup
-    if P.on == nil then P.on = not tracer.puppet_suspect end
+    if P.on == nil then P.on = false end
+    -- (10.21) a session that ended inside the making of a model beats a REMEMBERED "on" too (10.20 only looked at the marker when nothing was remembered, which after the first run was never):
+    -- off for this session, and ticking the box again clears the marker
+    if tracer.puppet_suspect then return false end
     return P.on == true
 end
 
@@ -15651,11 +20610,12 @@ function CFG.pup.covers(name)
     return P.on == true and r ~= nil and r.state == "ready" and r.go ~= nil and r.loaded ~= false and not P.box_too -- (9.36: a model whose file the game has not loaded yet stays a box)
 end
 
--- (9.36) The name of the model to draw for an enemy. The loopback bot's circling "Em3000" is drawn as the model chosen in the picker (CFG.bm).
+-- (9.36) The name of the model to draw for an enemy. Ethan's friend's circling "Em3000" is drawn as the model chosen in the picker (CFG.bm).
 function CFG.pup.model_of(name)
     local bm = CFG.bm
-    if bm and bm.choice and name == "Em3000" and state.remote_name == "Loopback Bot" then return bm.choice end
-    return name
+    local base = enemy.base(name) -- (10.15: "Em4000_3fa91c2e9b4d", one Molded of several, is drawn as the Em4000 model)
+    if bm and bm.choice and base == "Em3000" and CFG.friend.present() then return bm.choice end
+    return base
 end
 
 -- (9.36) the model to copy: from this scene, else from its files. Ethan only from the scene (under both of his names).
@@ -15692,7 +20652,11 @@ function CFG.pup.pick(now)
     if not lp then return out end
     for name, e in pairs(enemy.remote) do
         local walled = enemy.wall[name] and enemy.wall[name].hide
-        if e.x and e.rx and e.alive and not e.inactive and not walled then
+        local copied = CFG.molded ~= nil and CFG.molded.copies[name] ~= nil -- (10.15) this game has the real body of it: no ghost model
+        -- (10.21) ...and the same for an ordinary enemy mode 3 has moved onto the host's: its real body is there, a model beside it would be the T-pose of the 22 Nov screenshot
+        local real = enemy.real_body(name, now)
+        if real then P.real_seen[name] = now end
+        if e.x and e.rx and e.alive and not e.inactive and not walled and not copied and not real then
             local d = math.sqrt((e.rx - lp.x) ^ 2 + (e.ry - lp.y) ^ 2 + (e.rz - lp.z) ^ 2)
             if d <= P.RANGE then out[#out + 1] = { name = name, d = d } end
         end
@@ -15992,15 +20956,20 @@ function CFG.pup.report()
             part_notes = rec.part_notes, checked = rec.check_text }
     end
     table.sort(rows, function(a, b) return a.enemy < b.enemy end)
-    return { on = P.on, box_too = P.box_too, made = P.made, destroyed = P.destroyed, failures = P.failures, scenes_dropped = P.dropped,
+    local real = {}
+    local nowc = os.clock()
+    for name, at in pairs(P.real_seen) do if nowc - at <= 10 then real[#real + 1] = name end end
+    table.sort(real)
+    return { about = "10.21: OFF unless ticked (the T-pose stand-in of the 22 Nov screenshot). Never made for an enemy whose real body this game has moved onto the host's (mode 3) or a Molded copy of it.",
+        on = P.enabled(), remembered_choice = P.on, off_by_the_crash_marker = tracer.puppet_suspect == true or nil, box_too = P.box_too, real_body_there_so_no_model = real, made = P.made, destroyed = P.destroyed, failures = P.failures, scenes_dropped = P.dropped,
         errors = P.errors, queued = P.queued, wanted = P.wanted, last = P.last, models = rows, lines = P.lines,
         late_parts = { on = P.late_parts, made = P.late_made, joined = P.late_joined, refused_for_the_skeleton = P.late_refused, timed_out = P.late_timeout, made_again_after_s = P.PART_RETRY, made_again = P.late_retried, body_wait_s = P.BODY_WAIT },
         previous_session_ended_in_a_make = tracer.puppet_suspect == true }
 end
 
 ----------------------------------------------------------------------------------------------
--- 9.36: WHICH MODELS WORK, and the loopback bot's enemy picker.
--- The tester asked for a way to change the enemy the loopback bot shows "to any enemy that we can get, so I can see which models have errors and which
+-- 9.36: WHICH MODELS WORK, and Ethan's friend's enemy picker.
+-- The tester asked for a way to change the enemy Ethan's friend shows "to any enemy that we can get, so I can see which models have errors and which
 -- models I still need to collect". The exe sends the circling enemy as "Em3000" (Jack Baker); the script draws it as the model chosen here (a Lua-only
 -- remap: CFG.pup.model_of). For every model the list says what is known: how many of its meshes are in models.json (collected), whether its files are known
 -- to the loader, what happened the last time it was made (made / failed and why / how many parts) and what the every-5-seconds check found. The table is
@@ -16010,7 +20979,7 @@ CFG.bm = {
     choice = nil,            -- nil = Jack Baker as the exe sends it; else a model name such as "Em2000" or "Pl3000"
     status = {},             -- family -> { tried, ok, failed, last, why, source, parts, check, check_ok, build }
     ids = nil, changes = 0, dirty = false, save_at = 0, SAVE_EVERY = 30, saved = 0, save_error = nil, loaded_n = 0,
-    last = "the loopback bot's enemy is Jack Baker (Em3000), as the exe sends it",
+    last = "Ethan's friend's enemy is Jack Baker (Em3000), as the exe sends it",
 }
 
 function CFG.bm.list()
@@ -16123,7 +21092,7 @@ function CFG.bm.set(fam)
     if fam == nil or fam == "em3000" then M.choice = nil else M.choice = fam:sub(1, 1):upper() .. fam:sub(2) end
     M.changes = M.changes + 1
     local shown = M.choice or "Em3000"
-    M.last = string.format("the loopback bot's enemy is now %s%s", shown, CFG.ids.label(shown) and (" (" .. CFG.ids.label(shown) .. ")") or "")
+    M.last = string.format("Ethan's friend's enemy is now %s%s", shown, CFG.ids.label(shown) and (" (" .. CFG.ids.label(shown) .. ")") or "")
     say("model picker: " .. M.last)
     M.reset_bot()
 end
@@ -16145,9 +21114,15 @@ function CFG.bm.load()
     if type(d) == "table" and type(d.material_files) == "table" then -- (9.38) material files that worked after the first guess failed
         for mesh, mdf in pairs(d.material_files) do
             -- (9.39) only a file the script itself may pick (not another character's: 9.38 kept Ethan's hand file for Clancy and his hands were black)
+            -- (10.8: a kept file that is another than the built-in one is dropped in material_path, when the built-in one is in use)
             if ok_pair(mesh, mdf) then
                 local c, auto = CFG.load.material_candidates(mesh)
-                for i = 1, auto do if c[i] == mdf then CFG.load.mdf_ok[mesh] = mdf end end
+                -- (10.12) Ethan's hands (pl0010, pl0020) wear their own file; 10.11 kept the BODY's (pl0000.mdf2) for them after a slow load and the hands were untextured
+                local own_hand = mesh:match("^Character/Player/pl0000/pl0000/pl00[12]0%.mesh$") and mdf:match("/pl0000%.mdf2$")
+                if own_hand then CFG.load.mdf_dirty = true end -- (forgotten here; the next save cleans model_status.json)
+                if not own_hand then
+                    for i = 1, auto do if c[i] == mdf then CFG.load.mdf_ok[mesh] = mdf end end
+                end
             end
         end
     end
@@ -16194,8 +21169,8 @@ end
 
 ----------------------------------------------------------------------------------------------
 -- 9.36: THE EVERY-5-SECONDS MODEL CHECK. "Clancy's hands are untextured ... maybe we should add a check for whether or not a model is loaded every
--- 5 seconds; if there is no enemy on either player's screen (except the loopback bot's) then every 10 seconds. This should stop enemies from loading in
--- without a head." Every EVERY seconds (EVERY_QUIET while no enemy is near, on either screen; the loopback bot's enemies do not count) one model after the
+-- 5 seconds; if there is no enemy on either player's screen (except Ethan's friend's) then every 10 seconds. This should stop enemies from loading in
+-- without a head." Every EVERY seconds (EVERY_QUIET while no enemy is near, on either screen; Ethan's friend's enemies do not count) one model after the
 -- other is looked at, one per frame: the other player's body, and every enemy model. For each mesh (body and parts) it reads MeshReady, MaterialReady, the
 -- materials and - where the engine answers - every texture slot (getMaterialTexture: a slot with no texture is the "untextured" look). A model with
 -- fewer parts than it should have is also a finding. A finding must be seen BAD_NEEDED checks in a row (a slow load is not a fault) and only after
@@ -16205,12 +21180,38 @@ end
 -- (stage "verify"); a session that ended inside one switches the check off at the next start.
 ----------------------------------------------------------------------------------------------
 CFG.verify = {
-    on = true, EVERY = 5, EVERY_QUIET = 10, GRACE = 4, BAD_NEEDED = 2, MAX_FIXES = 2, YOUNG = 30, FAST_EVERY = 2, fast_at = -100, fast_runs = 0, material_tries = 0, real_mat_tries = 0, MAT_WAIT = 10,
+    on = true, EVERY = 3, EVERY_QUIET = 8, GRACE = 3, BAD_NEEDED = 2, MAX_FIXES = 2, YOUNG = 30, FAST_EVERY = 1.5, -- (10.4: the check every 5 s -> 3 s, quiet 10 -> 8, grace 4 -> 3, the fast runs 2 -> 1.5)
+    fast_at = -100, fast_runs = 0, material_tries = 0, real_mat_tries = 0, MAT_WAIT = 10,
     at = -100, runs = 0, checked = 0, bad_found = 0, fixes = 0, gave_up = 0, errors = 0, last = "has not run yet", interval = 5, quiet = false, enemies = 0,
     todo = {}, rows = {}, count = {}, fixed = {}, log = {}, real_fixes = 0, last_error = nil,
     tex_calls = 0, tex_answers = 0, tex_api = nil, holder_methods = nil, holder_ready = nil, holder_probed = false,
     broken = nil,
+    -- (10.10) "the constant model check even when the model is loaded is causing an fps dip, if it completes or fails once, just leave it as is": a body (or enemy model) gets ONE verdict
+    -- (fine, or given up on) and is not read again until it is made again (its signature changes). done: key -> signature; skipped_runs: looks that found everything already settled.
+    done = {}, done_n = 0, skipped_runs = 0,
 }
+
+-- The signature of the model standing under this key now: a model that is made again (new body, parts made again, switch of character) has a new one and is looked at again.
+function CFG.verify.sig(key, rec)
+    if key == "(other player's body)" then
+        local R = CFG.real
+        return tostring(R.model) .. "@" .. tostring(R.since)
+    end
+    return rec and (tostring(rec.model or key) .. "@" .. tostring(rec.made_at) .. "#" .. tostring(rec.kids and #rec.kids or 0)) or nil
+end
+function CFG.verify.is_done(key, rec)
+    local V = CFG.verify
+    local d = V.done[key]
+    return d ~= nil and d.sig == V.sig(key, rec)
+end
+function CFG.verify.finish(key, rec, verdict, now)
+    local V = CFG.verify
+    local sig = V.sig(key, rec)
+    if not sig then return end
+    if not (V.done[key] and V.done[key].sig == sig) then V.done_n = V.done_n + 1 end
+    V.done[key] = { sig = sig, verdict = verdict, at = math.floor(now or 0) }
+    if V.rows[key] then V.rows[key].settled = verdict .. ": not looked at again until it is made again" end
+end
 
 function CFG.verify.note(text)
     local V = CFG.verify
@@ -16220,12 +21221,12 @@ function CFG.verify.note(text)
     say("model check: " .. text)
 end
 
--- Is any enemy near, on either player's screen? (The loopback bot's enemies do not count; mine in my own scene and the other player's do.)
+-- Is any enemy near, on either player's screen? (Ethan's friend's enemies do not count; mine in my own scene and the other player's do.)
 function CFG.verify.enemies_around(now)
     local n = 0
     if enemy.roots and #enemy.roots > 0 and now - enemy.last_scan < 5 then n = n + #enemy.roots end
     if enemy.local_roots and #enemy.local_roots > 0 and now - enemy.local_scan < 5 then n = n + #enemy.local_roots end
-    if state.remote_name ~= "Loopback Bot" and now - enemy.remote_at <= 3 then
+    if not CFG.friend.present() and now - enemy.remote_at <= 3 then
         for _, e in pairs(enemy.remote) do if e.alive and not e.inactive then n = n + 1 end end
     end
     return n
@@ -16323,6 +21324,7 @@ function CFG.verify.reset(name)
     local V = CFG.verify
     V.count[name], V.fixed[name] = nil, nil
     V.rows[name] = nil
+    V.done[name] = nil
 end
 
 -- One enemy model. Returns nothing; counts, fixes and writes the row.
@@ -16375,6 +21377,7 @@ function CFG.verify.check_pup(name, rec, now)
         rec.check_text = "ok"
         V.count[name] = 0
         pcall(CFG.bm.note_check, model, "ok at " .. math.floor(now) .. " s", true)
+        if waiting == 0 and age >= V.GRACE then V.finish(name, rec, "fine", now) end -- (10.10) one verdict is enough
         return
     end
     if settling then return end
@@ -16425,6 +21428,7 @@ function CFG.verify.check_pup(name, rec, now)
             V.gave_up = V.gave_up + 1
             V.note(string.format("%s (%s): still wrong after %d fixes (%s); left as it is", name, model, f.n, problems[1]))
         end
+        if not (#no_mat > 0 and not body_bad and rec.src_parts and #rec.src_parts > 0 and age < V.MAT_WAIT) then V.finish(name, rec, "given up", now) end -- (10.10) failed for good: left as it is, not read again
         return
     end
     f.n = f.n + 1
@@ -16473,9 +21477,15 @@ function CFG.verify.check_real(now)
     -- (9.38: Mia was on for 130 s, then Ethan) did not show how she had been
     V.last_reads = V.last_reads or {}
     V.last_reads[tostring(R.model)] = { at_s = math.floor(now), age_s = R.since and math.floor(now - R.since) or nil, status = (#problems == 0) and "ok" or "problem", problems = problems, read = detail }
-    if #problems == 0 then V.count[key] = 0 pcall(CFG.bm.note_check, R.model, "ok at " .. math.floor(now) .. " s", true) return end
+    if #problems == 0 then
+        V.count[key] = 0
+        pcall(CFG.bm.note_check, R.model, "ok at " .. math.floor(now) .. " s", true)
+        if waiting == 0 and not (R.since and now - R.since < V.GRACE) then V.finish(key, nil, "fine", now) end -- (10.10) one verdict is enough: the body is not read again until it is made again
+        return
+    end
     pcall(CFG.bm.note_check, R.model, problems[1], false)
     if waiting > 0 or (R.since and now - R.since < V.GRACE) then return end
+    if CFG.settle and CFG.settle.busy() then return end -- (10.1) the check after a switch or a load-in is rebuilding this body: the two do not both do it
     V.count[key] = (V.count[key] or 0) + 1
     V.bad_found = V.bad_found + 1
     if V.count[key] < V.BAD_NEEDED then return end
@@ -16488,14 +21498,223 @@ function CFG.verify.check_real(now)
         if #tried > 0 then
             V.real_mat_tries, V.material_tries, V.fixes, V.count[key] = V.real_mat_tries + 1, V.material_tries + 1, V.fixes + 1, 0
             V.note(string.format("the other player's body (%s): no materials on %s; making it again with another material file", tostring(R.model), table.concat(tried, ", ")))
+            pcall(CFG.settle.adopt)
             pcall(R.retry)
             return
         end
     end
-    if V.real_fixes >= 1 then return end -- once per session: making the other player's body again is not free
+    if V.real_fixes >= 1 then -- once per session: making the other player's body again is not free (10.10: and then it is left as it is, not read again; but not while another material file is still to be tried)
+        if not (#no_mat > 0 and V.real_mat_tries < 6) then V.finish(key, nil, "given up", now) end
+        return
+    end
     V.real_fixes, V.fixes, V.count[key] = V.real_fixes + 1, V.fixes + 1, 0
     V.note(string.format("the other player's body (%s): %s; making it again", tostring(R.model), problems[1]))
+    pcall(CFG.settle.adopt)
     pcall(R.retry)
+end
+
+----------------------------------------------------------------------------------------------
+-- 10.1: THE MODEL CHECK AFTER A SWITCH OR A LOAD-IN. "Add a check after 4 seconds when someone has switched character or loaded in: it should
+-- check the model and rebuild it if it is broken; if it is still broken after 2 seconds, rebuild again. If a model is still broken, inform me at
+-- the top left as usual so I can tell it works; if it works, no need to announce."
+-- A body that has just been made (the other player loaded in, switched character, or a new scene took the old body) is looked at FIRST seconds after
+-- it is up, with the same reading the every-5-seconds check uses (CFG.verify.read / problems: mesh and materials loaded, every texture slot filled,
+-- the head part there). Fine: nothing is said. Broken: the body is made again (a part with no materials gets the next material file first, as the
+-- every-5-seconds check does) and looked at AGAIN seconds after the new one is up; still broken: made again once more (MAX_REBUILDS in all); still
+-- broken after that: the top left says so (once). A part that is still loading is waited for (WAIT_LOAD s at most) before it counts. While this runs,
+-- the every-5-seconds check leaves the other player's body alone, so the two never rebuild it twice. Everything is in the debug file (health.model_settle).
+----------------------------------------------------------------------------------------------
+CFG.settle = {
+    on = true, FIRST = 3, AGAIN = 1, MAX_REBUILDS = 2, WAIT_LOAD = 14, UP_WAIT = 35, -- (10.4: the first look 4 s -> 3 s, the looks after a rebuild 2 s -> 1 s)
+    BODY_WAIT = 5, -- (10.13) the MAIN body's own materials are waited for this long, not WAIT_LOAD: the 17 Nov file shows Mia's body without materials for 12+ s with no verdict at all
+    -- (WAIT_LOAD: longer than the body module's own 10 s for a part, so it takes a part away first)
+    stage = "idle",           -- idle | up (waiting for the body to be up) | clock (counting to the next look)
+    seen_since = nil,         -- R.since of the body last seen
+    model = nil, look_at = nil, rebuilds = 0, rebuilding = false, wait_from = nil, load_wait_from = nil, up_from = nil, failed_seen = nil,
+    triggers = 0, looks = 0, fine = 0, rebuilt = 0, announced = 0, last = "has not run yet", log = {}, last_problems = nil,
+}
+
+function CFG.settle.note(text)
+    local S = CFG.settle
+    S.last = tostring(text):sub(1, 200)
+    S.log[#S.log + 1] = string.format("%.0f s: %s", os.clock(), S.last)
+    while #S.log > 24 do table.remove(S.log, 1) end
+    say("model settle: " .. S.last)
+end
+
+function CFG.settle.busy() return CFG.settle.on and CFG.settle.stage ~= "idle" end
+
+-- The every-5-seconds check is about to make the body again by itself (later breakage, not a switch or a load-in): the body that comes up is not a new
+-- start for the check after a switch, or a body that stays broken would be rebuilt and announced again and again.
+function CFG.settle.adopt() CFG.settle.adopt_next = true end
+
+-- The only thing this check says on screen: a model that is still broken (or could not be made). Shown at the top left like the chat lines.
+function CFG.settle.announce(text)
+    local S = CFG.settle
+    S.announced = S.announced + 1
+    chat_add("Model", text)
+    S.note("told you: " .. text)
+end
+
+-- Reads the other player's body and its parts. Returns the problems (a list of text), the number of parts still loading, and the parts with no materials.
+function CFG.settle.evaluate(expired, body_expired)
+    local V, B, R = CFG.verify, CFG.body, CFG.real
+    local problems, waiting, no_mat, waiting_names = {}, 0, {}, {}
+    local function look(label, mc, xf, mesh)
+        local r = V.read(mc, xf)
+        -- (10.12) a part whose materials are still being streamed in (MaterialReady false, or no materials yet) is WAITED for like a part that is not attached yet,
+        -- WAIT_LOAD s in all. The 15 Nov file: at 3 s after the body came up Ethan's hands read "no materials", the next material file was taken at once (the BODY's,
+        -- pl0000.mdf2), the body was made again and that wrong file was kept for the next start: the hands were untextured from then on. Four other bodies in the
+        -- same file were rebuilt for the same reason ("the materials are not loaded") and were fine after the rebuild.
+        -- (10.13) ...but the MAIN body is only waited for BODY_WAIT s: with no materials after that it is rebuilt (the rebuild is what fixed every one so far).
+        local streaming = not (label == "body" and (body_expired or expired) or expired) and (r.mat == false or r.mats == 0)
+        if streaming then
+            waiting = waiting + 1
+            waiting_names[#waiting_names + 1] = label
+        end
+        for _, pr in ipairs(V.problems(r)) do
+            if not (streaming and (pr:find("MaterialReady", 1, true) or pr:find("no materials", 1, true))) then problems[#problems + 1] = label .. ": " .. pr end
+        end
+        if mesh and B.from_file and r.mesh ~= false and r.mats == 0 and not streaming and CFG.load.has_next_material(mesh) then no_mat[#no_mat + 1] = mesh end
+    end
+    look("body", B.mc, B.xf)
+    local names = {}
+    for _, k in ipairs(B.kids) do
+        if k.waiting then waiting = waiting + 1 waiting_names[#waiting_names + 1] = tostring(k.name) elseif k.mc then look(tostring(k.name), k.mc, k.xf, k.mesh) end
+        names[tostring(k.name)] = true
+    end
+    -- a full-model body must have its lower body / head (the first of the pack's parts): a body without a head is the fault this check is for
+    local entry = CFG.pack and CFG.pack.entry(R.model)
+    if entry and entry.parts[1] and waiting == 0 then
+        local need = entry.parts[1]:match("([^/]+)%.mesh$")
+        if need and not names[need] then problems[#problems + 1] = "parts: " .. need .. " (lower body and head) is not on the body" end
+    end
+    return problems, waiting, no_mat, waiting_names
+end
+
+function CFG.settle.update(now)
+    local S, R, B = CFG.settle, CFG.real, CFG.body
+    if tracer.verify_suspect and S.on then S.on, S.last = false, "switched off: the last session ended inside a model check" end
+    if not S.on or not R.on then S.stage = "idle" return end
+    -- the body could not be made at all
+    if R.stage == "failed" then
+        if S.failed_seen ~= R.failures then
+            S.failed_seen = R.failures
+            S.stage = "idle"
+            if CFG.pack and CFG.pack.bad[CFG.ids.family(R.model) or ""] == nil then -- (a pack failure announces itself)
+                S.announce(string.format("The other player's body (%s) could not be made: %s", tostring(R.model), tostring(R.why)))
+            end
+        end
+        return
+    end
+    -- a body just came up: a new one (loaded in, switched, a new scene) starts the count; one made by this check continues it
+    if R.stage == "running" and B.go and R.since ~= S.seen_since then
+        S.seen_since = R.since
+        S.up_from = nil
+        if S.adopt_next and not S.rebuilding then
+            S.adopt_next = false
+            S.stage, S.model = "idle", R.model
+            S.note(string.format("a body (%s) made again by the every-5-seconds check is up: not counted as a new start", tostring(R.model)))
+        elseif S.rebuilding and S.model == R.model then
+            S.rebuilding = false
+            S.stage, S.look_at, S.load_wait_from = "clock", now + S.AGAIN, nil
+            S.note(string.format("the rebuilt body (%s) is up; looking at it in %d s (rebuild %d of %d)", tostring(R.model), S.AGAIN, S.rebuilds, S.MAX_REBUILDS))
+        else
+            S.rebuilding, S.rebuilds, S.model, S.triggers = false, 0, R.model, S.triggers + 1
+            S.mat_moved = false -- (10.8) a body's slow first look does not count against the next body's pack files
+            CFG.load.strikes = {}
+            S.stage, S.look_at, S.load_wait_from = "clock", now + S.FIRST, nil
+            S.note(string.format("a body (%s) is up; looking at it in %d s", tostring(R.model), S.FIRST))
+        end
+        return
+    end
+    if S.stage == "up" then -- a rebuild was started: it has to come up in UP_WAIT s
+        if S.up_from and now - S.up_from > S.UP_WAIT then
+            if S.rebuilds < S.MAX_REBUILDS then
+                S.rebuilds, S.rebuilt, S.up_from = S.rebuilds + 1, S.rebuilt + 1, now
+                S.note("the rebuilt body did not come up in " .. S.UP_WAIT .. " s; making it again")
+                pcall(R.retry)
+            else
+                S.stage, S.rebuilding = "idle", false
+                S.announce(string.format("The other player's body (%s) is still not there after %d rebuilds (%s).", tostring(R.model), S.rebuilds, tostring(R.status)))
+            end
+        end
+        return
+    end
+    if S.stage ~= "clock" then return end
+    if R.stage ~= "running" or not B.go then return end
+    if S.model ~= R.model then S.stage = "idle" return end -- (it was switched again: that body's own start will count)
+    if now < S.look_at then return end
+    pcall(tracer.crumb, "verify", "model settle")
+    local waited_s = S.load_wait_from ~= nil and now - S.load_wait_from or 0
+    local ok, problems, waiting, no_mat, waiting_names = pcall(S.evaluate, S.load_wait_from ~= nil and waited_s >= S.WAIT_LOAD, S.load_wait_from ~= nil and waited_s >= S.BODY_WAIT)
+    pcall(tracer.crumb, "clean", "model check finished")
+    if not ok then
+        S.stage = "idle"
+        S.note("the look failed: " .. tostring(problems):sub(1, 100))
+        return
+    end
+    S.looks = S.looks + 1
+    local body_no_materials = false -- (10.13) the main body's own materials, still missing after BODY_WAIT s: that is a fault even while a part is still loading
+    for _, pr in ipairs(problems) do
+        if pr:sub(1, 5) == "body:" and (pr:find("MaterialReady", 1, true) or pr:find("no materials", 1, true)) then body_no_materials = true end
+    end
+    if waiting > 0 and not body_no_materials then -- a part is still loading: not a fault yet
+        S.load_wait_from = S.load_wait_from or now
+        if now - S.load_wait_from < S.WAIT_LOAD then S.look_at = now + 1 return end
+        for _, nm in ipairs(waiting_names or {}) do problems[#problems + 1] = string.format("%s: still loading after %d s", nm, S.WAIT_LOAD) end
+        if #(waiting_names or {}) == 0 then problems[#problems + 1] = string.format("%d part(s) are still loading after %d s", waiting, S.WAIT_LOAD) end
+    end
+    S.load_wait_from = nil
+    S.last_problems = problems
+    if #problems == 0 then
+        S.fine = S.fine + 1
+        S.stage = "idle"
+        S.note(string.format("the body (%s) is fine%s", tostring(R.model), S.rebuilds > 0 and (" after " .. S.rebuilds .. " rebuild(s)") or ""))
+        return
+    end
+    -- (10.7) only optional parts (hands that are not from the pack) are what is wrong: those are left out, the pack's body stays, and the body is made once more
+    local max_rebuilds = S.MAX_REBUILDS + (S.mat_moved and 1 or 0) -- (10.8) one more when a part's material file was changed by the last rebuild: the new file needs its own look
+    if S.rebuilds >= max_rebuilds and B.from_file and CFG.pack and CFG.pack.active(R.model) then
+        local P, dropped_now, others = CFG.pack, {}, 0
+        for _, pr in ipairs(problems) do
+            local label = pr:match("^([%w_]+):")
+            if label and P.optional(R.model, label) then dropped_now[#dropped_now + 1] = { label, pr } else others = others + 1 end
+        end
+        if #dropped_now > 0 and others == 0 then
+            for _, d in ipairs(dropped_now) do P.drop(R.model, d[1], d[2]) end
+            S.note(string.format("the body (%s) is broken only in parts that are not from the pack (%s): they are left out, making it again", tostring(R.model), dropped_now[1][2]))
+            S.rebuilds = max_rebuilds - 1
+        end
+    end
+    if S.rebuilds >= max_rebuilds then
+        S.stage = "idle"
+        if B.from_file and CFG.pack and CFG.pack.active(R.model) then
+            -- a body made from the full model pack that stays broken: the game's own model takes over (it announces that); the new body gets its own check
+            S.note(string.format("the pack's body (%s) is still broken after %d rebuilds: %s", tostring(R.model), S.rebuilds, problems[1]))
+            if pcall(CFG.pack.failed, R.model, string.format("still broken after %d rebuilds: %s", S.rebuilds, problems[1])) then return end
+        end
+        S.announce(string.format("The other player's body (%s) is still broken after %d rebuilds: %s", tostring(R.model), S.rebuilds, problems[1]))
+        return
+    end
+    S.rebuilds, S.rebuilt = S.rebuilds + 1, S.rebuilt + 1
+    local tried = {}
+    for _, mesh in ipairs(no_mat or {}) do -- a part with no materials: its next material file, as the every-5-seconds check does
+        local np = CFG.load.next_material(mesh)
+        if np then tried[#tried + 1] = tostring(mesh:match("([^/]+)%.mesh$")) .. " -> " .. np end
+    end
+    if #tried > 0 then CFG.verify.real_mat_tries, CFG.verify.material_tries, S.mat_moved = CFG.verify.real_mat_tries + 1, CFG.verify.material_tries + 1, true end -- (the same count the every-5-seconds check keeps: one change of file per rebuild)
+    S.note(string.format("the body (%s) is broken: %s; making it again (rebuild %d of %d)%s", tostring(R.model), problems[1], S.rebuilds, max_rebuilds,
+        #tried > 0 and ("; other material file for " .. table.concat(tried, ", ")) or ""))
+    S.rebuilding, S.stage, S.up_from = true, "up", now
+    pcall(R.retry)
+end
+
+function CFG.settle.report()
+    local S = CFG.settle
+    return { on = S.on, first_look_s = S.FIRST, next_looks_s = S.AGAIN, body_materials_wait_s = S.BODY_WAIT, max_rebuilds = S.MAX_REBUILDS, stage = S.stage, watching = S.model, rebuilds_now = S.rebuilds,
+        bodies_started = S.triggers, looks = S.looks, found_fine = S.fine, rebuilds_made = S.rebuilt, told_you = S.announced, last = S.last,
+        last_problems = S.last_problems, log = S.log }
 end
 
 -- Called every frame (cheap): decides when a run starts and looks at one model per frame.
@@ -16513,21 +21732,29 @@ function CFG.verify.update(now)
                 V.fast_at = now
                 local young = {}
                 for name, rec in pairs(P.list) do
-                    if rec.state == "ready" and rec.go and rec.loaded ~= false and now - (rec.made_at or now) < V.YOUNG then young[#young + 1] = name end
+                    if rec.state == "ready" and rec.go and rec.loaded ~= false and now - (rec.made_at or now) < V.YOUNG and not V.is_done(name, rec) then young[#young + 1] = name end
                 end
                 if #young > 0 then table.sort(young) V.todo, V.fast_runs = young, V.fast_runs + 1 end
             end
             return
         end
         V.at, V.runs = now, V.runs + 1
-        local todo = {}
-        if R.on and R.stage == "running" and CFG.body.go then todo[#todo + 1] = "(other player's body)" end
+        local todo, settled = {}, 0
+        if R.on and R.stage == "running" and CFG.body.go then
+            if V.is_done("(other player's body)") then settled = settled + 1 else todo[#todo + 1] = "(other player's body)" end
+        end
         for name, rec in pairs(P.list) do
-            if rec.state == "ready" and rec.go then todo[#todo + 1] = name end
+            if rec.state == "ready" and rec.go then
+                if V.is_done(name, rec) then settled = settled + 1 else todo[#todo + 1] = name end
+            end
         end
         table.sort(todo)
         V.todo = todo
-        if #todo == 0 then V.last = string.format("run %d: nothing to check (no model of mine is standing)", V.runs) end
+        if #todo == 0 then
+            if settled > 0 then V.skipped_runs = V.skipped_runs + 1 end
+            V.last = settled > 0 and string.format("run %d: the %d model(s) standing each had their one check (fine, or given up on); nothing is read again until one is made again", V.runs, settled)
+                or string.format("run %d: nothing to check (no model of mine is standing)", V.runs)
+        end
         return
     end
     local key = table.remove(V.todo, 1)
@@ -16551,13 +21778,1883 @@ end
 function CFG.verify.report()
     local V = CFG.verify
     local rows = {}
-    for k, v in pairs(V.rows) do rows[#rows + 1] = { model_of = k, model = v.model, status = v.status, parts = v.parts, parts_expected = v.parts_expected, waiting = v.waiting, age_s = v.age_s, problems = v.problems, read = v.read } end
+    for k, v in pairs(V.rows) do rows[#rows + 1] = { model_of = k, model = v.model, status = v.status, parts = v.parts, parts_expected = v.parts_expected, waiting = v.waiting, age_s = v.age_s, problems = v.problems, read = v.read, settled = v.settled } end
     table.sort(rows, function(a, b) return a.model_of < b.model_of end)
     return { on = V.on, switched_off_because = V.broken, every_s = V.EVERY, every_s_when_no_enemy_is_near = V.EVERY_QUIET, interval_now_s = V.interval, enemies_near_now = V.enemies,
         quiet_now = V.quiet, runs = V.runs, models_looked_at = V.checked, findings = V.bad_found, fixes = V.fixes, gave_up_on = V.gave_up, errors = V.errors, last_error = V.last_error,
         grace_s = V.GRACE, young_models_every_s = V.FAST_EVERY, young_means_made_in_the_last_s = V.YOUNG, fast_runs = V.fast_runs, other_material_file_tries = V.material_tries, findings_in_a_row_needed = V.BAD_NEEDED, max_fixes_per_enemy_and_scene = V.MAX_FIXES, last = V.last,
         texture_check = { answers = V.tex_answers, asks = V.tex_calls, works = V.tex_api, holder_methods = V.holder_methods, holder_ready_call = V.holder_ready },
+        one_verdict_each = "(10.10) a model that was checked once (fine, or given up on) is not read again until it is made again", models_with_their_verdict = V.done_n, looks_with_nothing_left_to_read = V.skipped_runs,
         models = rows, last_read_of_each_body = V.last_reads, log = V.log }
+end
+
+----------------------------------------------------------------------------------------------
+-- 10.1: WHICH REFRAMEWORK BUILD IS THIS? Written once at load and kept in the debug file (health.reframework), so every report says which build it
+-- came from. (A crash report with the March 2025 build and one with a nightly are different things: see README, "Which REFramework".)
+-- The Lua API has reframework:get_tag() / get_commit_hash() / get_commit_count() / get_branch() / get_build_date() / get_build_time().
+----------------------------------------------------------------------------------------------
+CFG.fw = { info = nil }
+function CFG.fw.read()
+    local F = CFG.fw
+    if F.info then return F.info end
+    local info = {}
+    local function ask(key, name)
+        local ok, v = pcall(function() return reframework[name](reframework) end)
+        if ok and v ~= nil then info[key] = tostring(v) end
+    end
+    ask("tag", "get_tag") ask("tag_long", "get_tag_long") ask("commit", "get_commit_hash") ask("commits_past_tag", "get_commit_count")
+    ask("branch", "get_branch") ask("build_date", "get_build_date") ask("build_time", "get_build_time")
+    -- what this REFramework can do that the script uses: the missing ones are named
+    local missing = {}
+    for _, n in ipairs({ "on_pre_application_entry", "on_application_entry", "on_script_reset", "on_frame", "on_draw_ui" }) do
+        if not re[n] then missing[#missing + 1] = "re." .. n end
+    end
+    info.missing_calls = #missing > 0 and table.concat(missing, ", ") or nil
+    info.nightly_like = info.commits_past_tag ~= nil and (tonumber(info.commits_past_tag) or 0) > 50 or nil
+    F.info = info
+    return info
+end
+function CFG.fw.report()
+    local i = CFG.fw.read()
+    return { tag = i.tag, commit = i.commit, commits_past_tag = i.commits_past_tag, branch = i.branch, build_date = i.build_date, build_time = i.build_time,
+        missing_calls = i.missing_calls, looks_like_a_nightly = i.nightly_like or false }
+end
+
+----------------------------------------------------------------------------------------------
+-- 10.1: THE MOTION BANK DETECTOR FOR ETHAN. "Add a motion bank detector for Ethan and apply the same motions to what the other player is doing,
+-- according to what they are doing."
+-- Ethan's own animation is bank / clip numbers on layer 0 of his Motion component (his object has 29 banks and thousands of clips). While I play
+-- Ethan this reads that pair four times a second and works out what it is:
+--   * the NAME the game gives the clip (getMotionInfo + MotionName, asked once per pair: "pl0000_Hands_Walk_Loop" ...) turned into one of the clip
+--     labels of the other player's body by plain words in it (walk, jog / run, crouch, reload, guard ...), and
+--   * what I was doing while it played (my pose flags and my speed, the way the other player's body is chosen from them): a pair that is seen often
+--     with one label gets it when its name says nothing.
+-- The table (pair -> name, label, how often) is kept between sessions in re7mp/motion_banks.json and is in the debug file (health.motion_banks), with
+-- Ethan's banks (index, .motlist path, clip count) read once, so the next build can play the game's own clips. Sent: when my pair changes (and every
+-- SEND_EVERY s) an event "mot" with "<bank>_<clip>_<label>". Received: the other player's body takes the label for what the flags cannot say (a
+-- reload, a melee swing); walking, running, crouching, aiming and the rest keep coming from the flags and the speed, which are measured, while a
+-- name is a guess (a pair whose label disagrees with the flags is counted as a conflict, so how good the names are shows in the file).
+-- Nothing here changes Ethan or the game: it only reads. Unverified in the real game.
+----------------------------------------------------------------------------------------------
+CFG.mbank = {
+    on = true, EVERY = 0.25, SEND_EVERY = 1.5, REMOTE_TTL = 3.5, SAVE_EVERY = 20, MAX_IDS = 300, MIN_SAMPLES = 4, MIN_SHARE = 0.7,
+    ACTION = { gun_reload = true, melee = true },   -- the labels the other player's flags cannot show: the received label is used for these
+    ids = {}, tally = {},
+    cur = nil, read_at = -100, save_at = -100, dirty = false, loaded = false,
+    sent_at = -100, sent_key = nil, sent = 0, remote = nil, received = 0, applied = 0, ignored = 0, conflicts = 0, agreed = 0,
+    reads = 0, unread = 0, errors = 0, names_found = 0, names_missing = 0, last = "has not run yet", last_error = nil,
+    speed = 0, pos = nil, pos_at = nil, info = nil,
+    -- (10.4) THE OTHER LAYERS: a block, a heal ... play on layers 1 and 2 over layer 0's locomotion tree (see CFG.mbank.read_overlay)
+    OVER_LAYERS = 8, OVER_STALE = 0.6, OVER_SEND = 0.15, OVERLAY = { guard = true, heal = true, melee = true, gun_reload = true },
+    lay = {}, ov = nil, ov_sent_key = nil, ov_sent_at = -100, ov_sent = 0, ov_received = 0, ov_remote = nil, ov_errors = 0, ov_last_error = nil,
+    ov_seen = {}, ov_reads = 0, ov_loop_fed = 0,
+    -- (10.10) THE SMALL ACTIONS ("use behaviour detectors and animations that molded together has found including small animations like moving the van door"): the other mod found that
+    -- Ethan's own Motion plays them on layers 1 to 7 (touching a door 9012, a wall 9000 / 9002, the codex 2700 / 2701, a block 2300, a kick, a ladder ...) with a JOINT MASK that
+    -- keeps the legs on the walk underneath, and sends the first clip of 1000 or more on layers 4, 1, 2, 3, 5, 6, 7 (0 for a whole-body move of 610 or more). The same here: the
+    -- clip, its layer, mask and blend mode go out as the "act" event, and the other body plays it on a SECOND layer of its Motion over the walk (CFG.gmot.act_drive).
+    act_on = true, ACT_LAYERS = { 4, 1, 2, 3, 5, 6, 7 }, ACT_MIN = 1000, ACT_SEND = 0.15, ACT_TTL = 3.5, act = nil, act_sent_key = "none", act_sent_at = -100, act_sent = 0,
+    act_received = 0, act_remote = nil, act_ignored = 0, act_seen = {}, act_seen_n = 0,
+    -- (10.14) the SECOND small action (the other mod's "action2": the same or another clip on another upper layer, usually the other arm): the "actb" event, the body's layer 2
+    act2 = nil, act2_sent_key = "none", act2_sent_at = -100, act2_sent = 0, act2_received = 0, act2_remote = nil,
+}
+
+-- The clip label a clip NAME stands for (nil when it says nothing): the plain words in it, after the character prefix is taken off.
+function CFG.mbank.label_of_name(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local n = name:lower():gsub("^pl%d+_", "")
+    local function has(...)
+        for _, w in ipairs({ ... }) do if n:find(w, 1, true) then return true end end
+        return false
+    end
+    if has("reload") then return "gun_reload" end
+    if has("knife", "melee", "punch", "swing", "stab") then return "melee" end
+    if has("guard", "block") then return "guard" end
+    if has("heal", "recover", "syringe", "herb", "inject") then return "heal" end
+    if has("shoot", "fire") then return "gun_shoot" end
+    if has("aim") then return "gun_aim" end
+    if has("crouch") then return has("walk", "move") and "crouch_walk" or "crouch" end
+    if has("jog", "run", "dash", "sprint") then return "run" end
+    if has("walk") then return "walk" end
+    if has("stand", "idle", "wait") then return "idle" end
+    return nil
+end
+
+-- The label of a pair: its name's, else the one it was seen with most (when it was seen enough times with it), else nil.
+function CFG.mbank.label_for(row)
+    if not row then return nil end
+    if row.name_label then return row.name_label, "name" end
+    local M = CFG.mbank
+    local best, best_n, total = nil, 0, 0
+    for label, per in pairs(M.tally) do
+        local n = per[row.key] or 0
+        total = total + n
+        if n > best_n then best, best_n = label, n end
+    end
+    if best and total >= M.MIN_SAMPLES and best_n / total >= M.MIN_SHARE then return best, "pose" end
+    return nil
+end
+
+-- The clip's name from the Motion component (asked once per pair; the same call the enemy clips use to ask whether a clip is there).
+function CFG.mbank.name_of(m, bank, motion)
+    local M = CFG.mbank
+    if M.info == nil then
+        M.info = false
+        local ok, i = pcall(sdk.create_instance, "via.motion.MotionInfo")
+        if ok and i then
+            M.info = i
+            pcall(function() i:add_ref() end)
+        end
+    end
+    if not M.info then return nil end
+    pcall(tracer.crumb, "mbank", string.format("Ethan clip name %d/%d", bank, motion))
+    local ok, r = pcall(function() return m:call("getMotionInfo(System.UInt32, System.UInt32, via.motion.MotionInfo)", bank, motion, M.info) end)
+    local name
+    if ok and r == true then
+        local okn, nm = pcall(function() return M.info:call("get_MotionName") end)
+        if okn and nm ~= nil then name = tostring(as_text(nm) or nm) end
+    end
+    pcall(tracer.crumb, "clean", "motion call finished")
+    if name == "" then name = nil end
+    return name and name:sub(1, 80) or nil
+end
+
+-- Ethan's own Motion component, only while I play him.
+function CFG.mbank.motion_of_player()
+    local go = mgr and mgr.player
+    if go == nil then return nil end
+    local okw, who = pcall(CFG.who.playing)
+    if not okw or who ~= "ethan" then return nil end
+    local ok, m = pcall(function() return go:call("getComponent(System.Type)", sdk.typeof("via.motion.Motion")) end)
+    if not ok or m == nil then return nil end
+    return m, go
+end
+
+function CFG.mbank.load()
+    local M = CFG.mbank
+    if M.loaded then return end
+    M.loaded = true
+    local ok, d = pcall(FILES.read, "motion_banks")
+    if not ok or type(d) ~= "table" or type(d.ids) ~= "table" then return end
+    for _, r in ipairs(d.ids) do
+        if type(r) == "table" and tonumber(r.bank) and tonumber(r.motion) then
+            local key = math.floor(r.bank) .. "/" .. math.floor(r.motion)
+            M.ids[key] = { key = key, bank = math.floor(r.bank), motion = math.floor(r.motion), name = type(r.name) == "string" and r.name or nil,
+                name_label = type(r.name) == "string" and CFG.mbank.label_of_name(r.name) or nil, name_tried = type(r.name) == "string" and 9 or 0,
+                seen = tonumber(r.seen) or 0, last = -1e9 }
+            if type(r.with) == "table" then
+                for label, n in pairs(r.with) do
+                    if type(label) == "string" and tonumber(n) then
+                        M.tally[label] = M.tally[label] or {}
+                        M.tally[label][key] = tonumber(n)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function CFG.mbank.save(now)
+    local M = CFG.mbank
+    if not M.dirty or now - M.save_at < M.SAVE_EVERY then return end
+    M.save_at, M.dirty = now, false
+    local rows = {}
+    for _, r in pairs(M.ids) do rows[#rows + 1] = r end
+    table.sort(rows, function(a, b) return (a.seen or 0) > (b.seen or 0) end)
+    local out = {}
+    for i = 1, math.min(#rows, M.MAX_IDS) do
+        local r = rows[i]
+        local with = {}
+        for label, per in pairs(M.tally) do if per[r.key] then with[label] = per[r.key] end end
+        out[#out + 1] = { bank = r.bank, motion = r.motion, name = r.name, seen = r.seen, with = with }
+    end
+    pcall(json.dump_file, FILES.path("motion_banks"), { build = CFG.BUILD, about = "re7mp: the bank / clip pairs Ethan's layer 0 played, the name the game gives each, and what he was doing while it played. Kept between sessions.", ids = out })
+end
+
+-- The record of a bank / clip pair (made when first seen, its name asked for twice at most). nil when too many pairs are known.
+function CFG.mbank.touch(m, bank, motion, now)
+    local M = CFG.mbank
+    local key = math.floor(bank) .. "/" .. math.floor(motion)
+    local row = M.ids[key]
+    if not row then
+        if M.count_ids == nil then M.count_ids = 0 for _ in pairs(M.ids) do M.count_ids = M.count_ids + 1 end end
+        if M.count_ids >= M.MAX_IDS * 2 then return nil end
+        row = { key = key, bank = math.floor(bank), motion = math.floor(motion), seen = 0, name_tried = 0, last = now }
+        M.ids[key], M.count_ids = row, M.count_ids + 1
+    end
+    row.seen, row.last, M.dirty = row.seen + 1, now, true
+    if row.name == nil and row.name_tried < 2 then
+        row.name_tried = row.name_tried + 1
+        local nm = M.name_of(m, row.bank, row.motion)
+        if nm then
+            row.name, row.name_label = nm, M.label_of_name(nm)
+            M.names_found = M.names_found + 1
+        else
+            M.names_missing = M.names_missing + 1
+        end
+    end
+    return row
+end
+
+-- (10.4) THE OTHER LAYERS. Layer 0 of Ethan's Motion is the locomotion TREE: its pair is 0/0 "pl0000_Idle" or 0/1 "pl0000_Move" (nodes with -1
+-- frames), so it says idle or move whatever he does inside it. A block (Hands_Guard_Start / _Loop / _End = 0/2305, 0/2300, 0/2306), a heal, a
+-- swat plays on layers 1 and 2 over it: the 10.2 watch saw the guard pairs on layers 1 and 2 while layer 0 stayed on 0/0 and 0/1. The detector only
+-- read layer 0, so a block was "idle" ("it is triggering a separate animation id but it is idle"). Now layers 1 to OVER_LAYERS - 1 are read too; the
+-- lowest one that holds a clip that is still moving (a layer that keeps its last clip but stopped is not counted after OVER_STALE s) and whose NAME is a
+-- block / heal / melee / reload is "the overlay": sent as the "mol" event, and OR-ed into the guard and heal flags. Every pair seen on those layers is
+-- counted in M.ov_seen (the debug file) so the next build knows what else plays there.
+function CFG.mbank.read_overlay(m, now, tb)
+    local M = CFG.mbank
+    local lc = tonumber(m:call("getLayerCount")) or 0
+    M.ov_reads = M.ov_reads + 1
+    local best
+    local acts = {} -- (10.10) layer -> the moving clip of 1000 or more on it (bank 0 only: bank 1 is the camera's own shake / crouch clips, bank 2 the chainsaw arms; the other mod shares none of them either)
+    for li = 1, math.min(lc, M.OVER_LAYERS) - 1 do
+        local layer = m:call("getLayer", li)
+        local st = M.lay[li]
+        if not st then st = {} M.lay[li] = st end
+        local rawid, bank = nil, nil
+        if layer ~= nil then
+            rawid, bank = tonumber(layer:call("get_MotionID")), tonumber(layer:call("get_MotionBankID"))
+        end
+        if rawid and bank and rawid == rawid and bank == bank and rawid >= 0 and rawid < CFG.mot.EMPTY and bank >= 0 and bank < 1e6 then
+            local fr = tonumber(layer:call("get_Frame"))
+            if fr ~= nil and (fr ~= fr or math.abs(fr) > 1e7) then fr = nil end
+            local key = math.floor(bank) .. "/" .. math.floor(rawid)
+            if st.key ~= key or (fr ~= nil and fr ~= st.frame) then st.moved_at = now end
+            st.key, st.frame = key, fr
+            if st.moved_at and now - st.moved_at <= M.OVER_STALE then
+                local row = M.touch(m, bank, rawid, now)
+                -- (10.14) a clip of a bank the game added for a move (3 to 31, as the other mod shares them) goes out too: its bank goes out as "b|" messages (CFG.jack)
+                local bk = math.floor(bank)
+                if (rawid >= M.ACT_MIN and bk == 0) or (bk >= CFG.jack.MIN_BANK and bk <= 31 and rawid < 65536) then
+                    acts[li] = { layer = li, bank = bk, motion = math.floor(rawid), key = key, frame = fr, name = row and row.name or nil, type = tb }
+                end
+                if row then
+                    local seen = M.ov_seen[key]
+                    if not seen then
+                        local n = 0
+                        for _ in pairs(M.ov_seen) do n = n + 1 end
+                        if n < 40 then
+                            seen = { layer = li, name = row.name, label = row.name_label, n = 0 }
+                            M.ov_seen[key] = seen
+                        end
+                    end
+                    if seen then seen.n = seen.n + 1 end
+                    if best == nil and row.name_label and M.OVERLAY[row.name_label] then
+                        best = { bank = row.bank, motion = row.motion, key = key, name = row.name, label = row.name_label, layer = li, frame = fr, type = tb }
+                    end
+                end
+            end
+        else
+            st.key, st.frame, st.moved_at = nil, nil, nil
+        end
+    end
+    M.ov = best
+    M.pick_act(m, acts, now) -- (10.10)
+end
+
+-- (10.10) The small action to send: the first clip of ACT_MIN or more on the layers in the other mod's order (4, 1, 2, 3, 5, 6, 7), that is not the block / heal overlay already sent as "mol".
+-- With its joint mask and blend mode (what keeps the legs out of it), read from that layer. Every one seen is written down (health.motion_banks.small_actions.seen).
+function CFG.mbank.pick_act(m, acts, now)
+    local M = CFG.mbank
+    local picks = {}
+    for _, li in ipairs(M.ACT_LAYERS) do
+        local a = acts[li]
+        local id = a and a.motion or 0
+        local hold = a ~= nil and a.bank == 0 and ((id >= 2000 and id < 2100) or (id >= 2200 and id <= 2204)) -- the weapon's hold poses: their masks take the legs too (the other mod plays them only standing still); the clips of the pose flags show them
+        -- (10.14) a block is sent as "mol" (the whole-body clip, the fallback) AND as the small action (the arms, with their mask: the legs keep walking); a heal, a melee swing and a reload only as "mol"
+        local overlay = a ~= nil and M.ov ~= nil and M.ov.key == a.key and M.ov.label ~= "guard"
+        if a and not hold and not overlay then
+            local mask, blend
+            pcall(function()
+                local layer = m:call("getLayer", li)
+                mask, blend = tonumber(layer:call("get_JointMaskID")), tonumber(layer:call("get_BlendMode"))
+            end)
+            a.mask, a.blend = mask and math.floor(mask) or 0, blend and math.floor(blend) or 0
+            local seen = M.act_seen[a.key]
+            if seen == nil and M.act_seen_n < 60 then
+                M.act_seen_n = M.act_seen_n + 1
+                seen = { layer = li, name = a.name, mask = a.mask, blend = a.blend, n = 0 }
+                M.act_seen[a.key] = seen
+            end
+            if seen then seen.n = seen.n + 1 end
+            if #picks < 2 then picks[#picks + 1] = a end
+        end
+    end
+    M.act = M.act_on and picks[1] or nil
+    M.act2 = M.act_on and picks[2] or nil -- (10.14)
+end
+
+-- Is the overlay (a block, a heal ...) of my own Ethan this label right now?
+function CFG.mbank.overlay_is(label, now)
+    local M = CFG.mbank
+    return M.on and M.ov ~= nil and M.ov.label == label and now - M.read_at < 1.0
+end
+
+-- Reads my own animation (called every frame; does something EVERY seconds).
+function CFG.mbank.update(now)
+    local M, C = CFG.mbank, CFG.clip
+    if tracer.mbank_suspect and M.on then M.on, M.last = false, "switched off: the last session ended inside it" end
+    if not M.on then return end
+    if now - M.read_at < M.EVERY then return end
+    local dt = now - M.read_at
+    M.read_at = now
+    M.load()
+    -- my speed, from where I stand (the other player's body is chosen from the same number)
+    local lp = state.local_pos
+    if lp then
+        if M.pos and M.pos_at and now - M.pos_at > 0 and now - M.pos_at < 1 then
+            local v = math.sqrt((lp.x - M.pos.x) ^ 2 + (lp.z - M.pos.z) ^ 2) / (now - M.pos_at)
+            if v < 12 then M.speed = M.speed + (v - M.speed) * 0.5 end -- (a jump of 12 m/s or more is a teleport, not walking)
+        end
+        M.pos, M.pos_at = { x = lp.x, z = lp.z }, now
+    end
+    local m, go = M.motion_of_player()
+    pcall(CFG.jack.sender, m, go, now) -- (10.14) a scripted move of mine (the van door, a ladder ...) and the banks my body has added, to the other player
+    if not m then M.cur, M.ov = nil, nil return end
+    local ok, err = pcall(function()
+        local bank, motion, frame = C.motion0(go)
+        if bank == nil or motion == nil or motion >= 1e9 then M.unread = M.unread + 1 M.cur, M.ov = nil, nil return end
+        -- (10.14) in a scripted move layer 0 plays a number of THAT MOVE'S list: not one of Ethan's clips, so it is not learned, and is not sent as "mot" (the other player is told by "j|")
+        if CFG.jack.mine(now) then M.cur, M.ov, M.act, M.act2 = nil, nil, nil, nil return end
+        M.reads = M.reads + 1
+        local row = M.touch(m, bank, motion, now)
+        if row == nil then return end
+        local key = row.key
+        -- what I am doing while it plays (the label the flags and my speed give)
+        local label_now = C.auto_label(state.local_pose or {}, M.speed)
+        M.tally[label_now] = M.tally[label_now] or {}
+        M.tally[label_now][key] = (M.tally[label_now][key] or 0) + 1
+        local label, how = M.label_for(row)
+        -- (10.2) which weapon set's banks are active on my Motion (0 = bare hands): the other player's body asks for the same set before it plays the clip
+        local tb
+        if M.type_ok ~= false then
+            local okt, tv = pcall(function() return m:call("get_TargetBankType") end)
+            tv = okt and tonumber(tv) or nil
+            if tv and tv == tv and tv >= 0 and tv < 100 then
+                tb = math.floor(tv)
+            else
+                M.type_fail = (M.type_fail or 0) + 1
+                if M.type_fail >= 5 then M.type_ok = false end
+            end
+        end
+        M.cur = { bank = row.bank, motion = row.motion, frame = frame, key = key, name = row.name, label = label, how = how, doing = label_now, type = tb }
+        if label and how == "name" and label ~= label_now and not M.ACTION[label] then M.conflicts = M.conflicts + 1 elseif label then M.agreed = M.agreed + 1 end
+        local oko, erro = pcall(M.read_overlay, m, now, tb) -- (10.4) the other layers: a block or a heal is not on layer 0
+        if not oko then
+            M.ov, M.ov_errors, M.ov_last_error = nil, M.ov_errors + 1, tostring(erro):sub(1, 140)
+            if M.ov_errors <= 3 then say("motion banks (other layers) error: " .. M.ov_last_error) end
+        end
+    end)
+    if not ok then
+        M.errors = M.errors + 1
+        M.last_error = tostring(err):sub(1, 140)
+        if M.errors <= 3 then say("motion banks error: " .. M.last_error) end
+    end
+    -- tell the other player (when the pair changes, and now and then)
+    local c = M.cur
+    if c and peer_present(now) and pstat.send_event and ((c.key .. "/" .. tostring(c.type)) ~= M.sent_key or now - M.sent_at >= M.SEND_EVERY) and now - M.sent_at >= 0.25 then
+        M.sent_key, M.sent_at, M.sent = c.key .. "/" .. tostring(c.type), now, M.sent + 1
+        pcall(pstat.send_event, "mot", string.format("%d_%d_%s%s", c.bank, c.motion, c.label or "none", c.type and ("." .. c.type) or ""))
+    end
+    -- (10.4) the overlay (a block, a heal): its own event, "mol", when it changes (and now and then while it lasts); "0_0_none" when it ends
+    local ov = M.ov
+    local okey = ov and (ov.key .. "/" .. tostring(ov.type)) or "none"
+    local oarg = ov and string.format("%d_%d_%s%s", ov.bank, ov.motion, ov.label, ov.type and ("." .. ov.type) or "") or "0_0_none"
+    if peer_present(now) and pstat.send_event and (okey ~= M.ov_sent_key or (ov and now - M.ov_sent_at >= M.SEND_EVERY)) and now - M.ov_sent_at >= M.OVER_SEND then
+        M.ov_sent_key, M.ov_sent_at, M.ov_sent = okey, now, M.ov_sent + 1
+        pcall(pstat.send_event, "mol", oarg)
+    end
+    -- (10.10) the small action (touching a door, the codex ...): "act", <layer>_<bank>_<clip>_<mask>_<blend> (. weapon set), "0_0_0_0_0" when it ends
+    -- (10.14) and the second one, "actb" (the same arguments): the other mod's second action slot
+    for _, sl in ipairs({ { "act", M.act, "act_sent_key", "act_sent_at", "act_sent", 1 }, { "actb", M.act2, "act2_sent_key", "act2_sent_at", "act2_sent", 2 } }) do
+        local ev, a, kk, kt, kn, slot = sl[1], sl[2], sl[3], sl[4], sl[5], sl[6]
+        local akey = a and (a.key .. "/" .. tostring(a.layer) .. "/" .. tostring(a.mask) .. "/" .. tostring(a.blend)) or "none"
+        local aarg = a and string.format("%d_%d_%d_%d_%d%s", a.layer, a.bank, a.motion, a.mask or 0, a.blend or 0, a.type and ("." .. a.type) or "") or "0_0_0_0_0"
+        if peer_present(now) and pstat.send_event and (akey ~= M[kk] or (a and now - M[kt] >= M.SEND_EVERY)) and now - M[kt] >= M.ACT_SEND then
+            M[kk], M[kt], M[kn] = akey, now, M[kn] + 1
+            pcall(pstat.send_event, ev, aarg)
+            if a then M.note_act("I play " .. (a.name or a.key) .. " on layer " .. a.layer .. " (mask " .. tostring(a.mask) .. ", blend mode " .. tostring(a.blend) .. ")" .. (slot == 2 and " as the second action" or "") .. ": sent") end
+        end
+        if CFG.friend.present() and CFG.who and CFG.who.bot_act == "copy" and peer_present(now) then pcall(M.on_remote_act, aarg, now, slot) end
+    end
+    -- Ethan's friend copies me, but the program only copies the position packets: its body is told my clips here, so its animation can be tried alone
+    if CFG.friend.present() and CFG.who and CFG.who.bot_act == "copy" and peer_present(now) then
+        if c then pcall(M.on_remote, string.format("%d_%d_%s%s", c.bank, c.motion, c.label or "none", c.type and ("." .. c.type) or ""), now) end
+        pcall(M.on_remote_overlay, oarg, now)
+        M.ov_loop_fed = M.ov_loop_fed + 1
+    end
+    M.save(now)
+    M.last = M.cur and string.format("%s%s -> %s%s", M.cur.key, M.cur.name and (" " .. M.cur.name) or "", M.cur.label or "(no label yet)",
+        M.ov and string.format("; %s on layer %d: %s", M.ov.key, M.ov.layer, M.ov.label) or "") or "I am not playing Ethan, or his animation can't be read"
+end
+
+-- The other player's "mot" event: "<bank>_<clip>_<label>".
+function CFG.mbank.on_remote(arg, now)
+    local M = CFG.mbank
+    local b, m, label, tb = tostring(arg):match("^(%d+)_(%d+)_([%w_]+)%.?(%d*)$")
+    if not b then M.ignored = M.ignored + 1 return end
+    M.received = M.received + 1
+    M.remote = { bank = tonumber(b), motion = tonumber(m), label = label ~= "none" and label or nil, at = now, type = tonumber(tb) } -- (10.2: type = their weapon set)
+end
+
+-- The other player's "mol" event (10.4): the clip of their overlay layer (a block, a heal), "0_0_none" when it ended.
+function CFG.mbank.on_remote_overlay(arg, now)
+    local M = CFG.mbank
+    local b, m, label, tb = tostring(arg):match("^(%d+)_(%d+)_([%w_]+)%.?(%d*)$")
+    if not b then M.ignored = M.ignored + 1 return end
+    M.ov_received = M.ov_received + 1
+    if label == "none" then M.ov_remote = nil return end
+    M.ov_remote = { bank = tonumber(b), motion = tonumber(m), label = label, at = now, type = tonumber(tb) }
+end
+
+-- (10.10) The other player's "act" event: "<layer>_<bank>_<clip>_<mask>_<blend>[.<set>]" (all zero = it ended).
+function CFG.mbank.on_remote_act(arg, now, slot)
+    local M = CFG.mbank
+    local l, b, m, mask, blend, tb = tostring(arg):match("^(%d+)_(%d+)_(%d+)_(%d+)_(%d+)%.?(%d*)$")
+    if not l then M.act_ignored = M.act_ignored + 1 return end
+    local field = slot == 2 and "act2_remote" or "act_remote" -- (10.14) the second action: the "actb" event
+    if slot == 2 then M.act2_received = M.act2_received + 1 else M.act_received = M.act_received + 1 end
+    -- it ended: all zero (a layer 0 is never a small action; the clip number alone can be 0 in a bank the game added)
+    if tonumber(l) == 0 then M[field] = nil return end
+    M[field] = { layer = tonumber(l), bank = tonumber(b), motion = tonumber(m), mask = tonumber(mask), blend = tonumber(blend), type = tonumber(tb), at = now }
+end
+
+-- (10.10) lines about the small actions (the last 20, also in the log): what was sent, received and played.
+function CFG.mbank.note_act(text)
+    local M = CFG.mbank
+    M.act_lines = M.act_lines or {}
+    local line = tostring(text):sub(1, 200)
+    if M.act_lines[#M.act_lines] == line then return end
+    M.act_lines[#M.act_lines + 1] = line
+    if #M.act_lines > 20 then table.remove(M.act_lines, 1) end
+    say("small actions: " .. line)
+end
+
+-- The overlay clip of the other player right now (a table) or nil.
+function CFG.mbank.overlay_remote(now)
+    local M = CFG.mbank
+    local r = M.ov_remote
+    if not M.on or not r or now - r.at > M.REMOTE_TTL then return nil end
+    return r
+end
+
+-- The clip label the other player's body should play for what they are doing, when it is something the flags cannot say; nil = the flags decide.
+function CFG.mbank.action_label(now)
+    local M = CFG.mbank
+    if CFG.jack.active(now) then return nil end -- (10.14) in a scripted move of theirs the pair and the labels they send are a prop's list's, not Ethan's: the flags decide
+    local ov = M.overlay_remote(now)
+    if ov and ov.label and CFG.clip.get(ov.label) ~= nil then return ov.label end -- (10.4) a block or heal on their overlay layer: the recorded clip is the fallback
+    local r = M.remote
+    if not M.on or not r or not r.label or now - r.at > M.REMOTE_TTL then return nil end
+    if not M.ACTION[r.label] then return nil end
+    if CFG.clip.get(r.label) == nil then return nil end -- no clip for it: the flags' label is better than T pose
+    if M.applied_key ~= r.label then M.applied_key, M.applied = r.label, M.applied + 1 end
+    return r.label
+end
+
+function CFG.mbank.report()
+    local M = CFG.mbank
+    local rows = {}
+    for _, r in pairs(M.ids) do
+        local label, how = M.label_for(r)
+        local with = {}
+        for l, per in pairs(M.tally) do if per[r.key] then with[l] = per[r.key] end end
+        rows[#rows + 1] = { pair = r.key, name = r.name, label = label, label_from = how, seen = r.seen, seen_while = with }
+    end
+    table.sort(rows, function(a, b) return (a.seen or 0) > (b.seen or 0) end)
+    while #rows > 60 do table.remove(rows) end
+    return { on = M.on, now = M.cur, last = M.last, reads = M.reads, could_not_read = M.unread, errors = M.errors, last_error = M.last_error,
+        names_found = M.names_found, names_missing = M.names_missing, names_agree_with_what_i_was_doing = M.agreed, names_disagree = M.conflicts,
+        sent = M.sent, received = M.received, ignored = M.ignored, used_for_their_body = M.applied, their_last = M.remote,
+        ethan_banks = "listed by the 'Enemy animations (.motlist)' button (re7mp/motlists.json), not by this detector", my_speed = math.floor(M.speed * 100) / 100, pairs = rows,
+        other_layers = { about = "10.4: layers 1 and up of my Ethan's Motion (a block or a heal plays there, layer 0 stays on the Idle / Move tree node); the pair on them that is a block, heal, melee or reload is the overlay",
+            overlay_now = M.ov, layers_read = M.ov_reads, errors = M.ov_errors, last_error = M.ov_last_error, sent = M.ov_sent, received = M.ov_received,
+            their_overlay = M.ov_remote, fed_to_the_friend = M.ov_loop_fed, every_pair_seen_on_those_layers = M.ov_seen },
+        small_actions = { about = "10.10: the clips of 1000 or more on layers 1 to 7 of my Ethan's Motion (touching a door, a wall, the codex ... as the other mod found), sent as the 'act' event with their joint mask and blend mode; the other body plays them on a second layer",
+            on = M.act_on, playing_now = M.act, sent = M.act_sent, received = M.act_received, ignored = M.act_ignored, theirs_now = M.act_remote, seen = M.act_seen, lines = M.act_lines,
+            second = { about = "10.14: the second action ('actb', the other mod's action2: another upper layer, usually the other arm), played on the body's layer 2", playing_now = M.act2, sent = M.act2_sent, received = M.act2_received, theirs_now = M.act2_remote } },
+        scripted_moves = CFG.jack.report() }
+end
+
+----------------------------------------------------------------------------------------------
+-- 10.2: ALL ANIMATION FROM THE MOTION BANK. Until 10.1 the other player's body was posed by CLIPS I RECORDED (joint angles of Ethan's walk, run ...,
+-- played by CFG.clip). Now the game's own clips play on it: the body gets a via.motion.Motion component, given the bank asset and the joint map of
+-- MY player's Motion (the other mod's way of animating a copy of a character), a hand-built TreeLayer, and layer 0 is told which bank / clip to play
+-- with the six-parameter changeMotion (the call the enemy clips use). WHICH clip, in this order:
+--   1. the pair the other player's Ethan plays right now (the "mot" event; used when this Motion has that clip, after asking for their weapon set),
+--   2. by what they are doing (the label CFG.clip chooses): the clip of that NAME in the bank (Hands_Walk_Loop for walk ...),
+--   3. a pair the detector (CFG.mbank) learned for that label,
+--   4. nothing found: the recorded clip plays for that label, as before (the Motion is switched off meanwhile).
+-- Everything is in steps (one native call each, a crash marker before it) and ends in a SELF-TEST (the walk clip plays; the layer's frame must
+-- advance and the body's joints must move). Any failure puts the recorded clips back at once and says so at the top left. A crash inside a step
+-- switches this off at the next start. NONE OF THIS could be tried without the game: health.game_motion in the debug file says what each step did.
+CFG.gmot = {
+    on = true, loaded = false, EVERY = 0.1, SRC_EVERY = 2, MESH_WAIT = 40, LOAD_WAIT = 20, SCAN_PER_TICK = 120, TEST_SECS = 1.0, SAMPLE_EVERY = 0.3,
+    WATCH_EVERY = 1.0, MAX_FREEZES = 3, MAX_LINES = 80, BLEND = 6.0, MISS_RETRY = 10, NONE_HOLD = 0.3, MAX_NAMES = 400, MIN_MOVE = 0.04,
+    -- the clip names (without the pl0000_ prefix) each thing the other player does is shown by; "hold" = the clip stands on its first frame
+    NAMES = {
+        idle = { "Hands_StandDamage_Loop", "Hands_Stand_Loop" }, -- (the other mod found that Hands_Stand_Loop does not bind on a fresh layer, so it is the last choice)
+        inventory = { "Hands_StandDamage_Loop", "Hands_Stand_Loop" },
+        walk = { "Hands_Walk_Loop" }, run = { "Hands_Jog_Loop" },
+        crouch_walk = { "Hands_WalkCrouch_Loop" },
+        -- (10.7) the bank has a crouch clip of its own (0/12; 0/13 is the same with the damage arms); 10.6 stood the body on the first frame of the crouch WALK
+        crouch = { "Hands_Crouch_Loop", "Hands_CrouchDamage_Loop" },
+    },
+    -- (10.7) Ethan's layer 0 plays the same tree node (0/0 Idle, 0/1 Move) while he stands, crouches, walks crouched, blocks or has the inventory open: the node's
+    -- parameters, which a body made here does not have, make the difference. So for these states the pair they play says nothing, and the clip of the state's NAME plays.
+    OWN_CLIP = { crouch = true, crouch_walk = true, inventory = true },
+    STANDARD = { "Hands_StandDamage_Loop", "Hands_Stand_Loop", "Hands_Walk_Loop", "Hands_Jog_Loop", "Hands_WalkCrouch_Loop", "Hands_Crouch_Loop", "Hands_CrouchDamage_Loop" },
+    state = "waiting", why = "has not run yet", lines = {}, clips = {}, names = {}, missing = {}, miss_logged = 0, ticks = 0, tick_at = -100, src_at = -100,
+    errors = 0, fails = 0, played_text = 0, shown = 0,
+    n = { sources = 0, bodies = 0, plays = 0, their_clip = 0, their_layer = 0, by_name = 0, learned = 0, scripted = 0, missing = 0, change_errors = 0, type_sets = 0, freezes = 0,
+        hand_backs = 0, tests_passed = 0, scans_skipped = 0, no_clip = {} },
+    -- (10.4) the joints the animation drives: a body that lacks most of them cannot be animated (the rig check says which)
+    RIG_JOINTS = { "Hip", "Waist", "Stomach", "Chest", "Neck", "Head", "L_Shoulder", "L_UpperArm", "L_Forearm", "L_Hand", "R_Shoulder", "R_UpperArm", "R_Forearm", "R_Hand",
+        "L_Thigh", "L_Shin", "L_Foot", "L_Toe", "R_Thigh", "R_Shin", "R_Foot", "R_Toe" },
+    RIG_MIN = 14,
+}
+
+function CFG.gmot.note(text, journal)
+    local G = CFG.gmot
+    G.lines[#G.lines + 1] = string.format("%7.1f  %s", os.clock() % 100000, text)
+    while #G.lines > G.MAX_LINES do table.remove(G.lines, 1) end
+    if journal then say("game motion: " .. text) end
+end
+
+-- The file kept between sessions: {"on": true / false}.
+function CFG.gmot.load()
+    local G = CFG.gmot
+    if G.loaded then return end
+    G.loaded = true
+    local ok, d = pcall(FILES.read, "game_motion")
+    if ok and type(d) == "table" and type(d.on) == "boolean" then G.on = d.on end
+end
+
+function CFG.gmot.set_on(v)
+    local G = CFG.gmot
+    G.on, G.loaded = v == true, true
+    pcall(json.dump_file, FILES.path("game_motion"), { on = G.on, build = CFG.BUILD, about = "re7mp: the other player's body is animated by the game's own motion bank clips (true) or by the recorded clips (false)." })
+    if G.on then
+        tracer.gmot_suspect = nil
+        G.state, G.why, G.fails, G.n.freezes = "waiting", "switched on", 0, 0
+        G.missing = {}
+        if G.rec then G.rec.stage, G.rec.test, G.rec.next = (G.rec.m and G.rec.stage == "ready") and "test" or G.rec.stage, {}, 0 end
+    else
+        G.hand_back("switched off")
+        G.state, G.why = "off", "switched off in the panel"
+    end
+    G.note(G.on and "switched on in the panel" or "switched off in the panel", true)
+end
+
+function CFG.gmot.num(layer, name)
+    local ok, v = pcall(function() return layer:call(name) end)
+    v = ok and tonumber(v) or nil
+    if v ~= nil and (v ~= v or math.abs(v) > 1e7) then v = nil end
+    return v
+end
+
+-- What the Motion component says it holds, as a line (the numbers the other mod logs after each step).
+function CFG.gmot.counts(m)
+    local parts = {}
+    for _, g in ipairs({ "getLayerCount", "getActiveMotionBankCount", "getMotionBankCount", "getDynamicMotionBankCount", "get_JointsConstructed", "get_JointCount", "get_Enabled" }) do
+        local ok, v = pcall(function() return m:call(g) end)
+        parts[#parts + 1] = g:gsub("^get_?", "") .. "=" .. tostring(ok and v or "?")
+    end
+    return table.concat(parts, " ")
+end
+
+-- My own player's bank asset and joint map (the two things a Motion needs to know the clips and the skeleton). Ethan's are wanted: another
+-- character's are kept only until Ethan's can be read.
+function CFG.gmot.capture(now)
+    local G = CFG.gmot
+    if now - G.src_at < G.SRC_EVERY then return G.src ~= nil end
+    G.src_at = now
+    local m, go = CFG.mbank.motion_of_player()
+    local who = "ethan"
+    if not m then
+        go = mgr and mgr.player
+        if go == nil then G.src_why = "my player is not found yet" return G.src ~= nil end
+        local ok, mm = pcall(function() return go:call("getComponent(System.Type)", sdk.typeof("via.motion.Motion")) end)
+        if not ok or mm == nil then G.src_why = "my player has no Motion component" return G.src ~= nil end
+        m, who = mm, tostring(CFG.who.playing() or "other")
+    end
+    local okad, addr = pcall(function() return go:get_address() end)
+    addr = okad and addr or nil
+    if G.src and ((addr ~= nil and G.src.addr == addr) or (addr == nil and G.src.go == go) or (G.src.who == "ethan" and who ~= "ethan")) then return true end
+    pcall(tracer.crumb, "gmot", "read my player's bank asset and joint map")
+    local ba, jm
+    pcall(function() ba = m:call("get_MotionBankAsset") end)
+    pcall(function() jm = m:call("get_JointMap") end)
+    pcall(tracer.crumb, "clean", "game motion read finished")
+    if ba == nil then G.src_why = "my player's Motion has no bank asset" return G.src ~= nil end
+    pcall(function() ba:add_ref() end)
+    if jm ~= nil then pcall(function() jm:add_ref() end) end
+    local function text_of(o, getter)
+        if o == nil then return nil end
+        local ok, v = pcall(function() return o:call(getter) end)
+        return ok and v ~= nil and tostring(as_text(v) or v):sub(1, 140) or nil
+    end
+    local function type_of(o)
+        if o == nil then return nil end
+        local ok, v = pcall(function() return o:get_type_definition():get_full_name() end)
+        return ok and v and tostring(v) or nil
+    end
+    G.src = { who = who, addr = addr, go = go, bank = ba, jmap = jm, bank_path = text_of(ba, "get_ResourcePath"), jmap_path = text_of(jm, "get_ResourcePath"),
+        bank_type = type_of(ba), jmap_type = type_of(jm), at = now }
+    G.n.sources = G.n.sources + 1
+    G.note(string.format("source: %s's Motion; bank asset %s [%s], joint map %s [%s]", who, tostring(G.src.bank_path), tostring(G.src.bank_type),
+        tostring(G.src.jmap_path), tostring(G.src.jmap_type)), true)
+    return true
+end
+
+-- Whether a clip is in a bank this body's Motion has active: true / false, nil when it cannot be told.
+function CFG.gmot.has_clip(rec, bank, id)
+    local G = CFG.gmot
+    if G.info == nil then
+        G.info = false
+        local ok, i = pcall(sdk.create_instance, "via.motion.MotionInfo")
+        if ok and i then
+            G.info = i
+            pcall(function() i:add_ref() end)
+        end
+    end
+    if not G.info then return nil end
+    local ok, r = pcall(function() return rec.m:call("getMotionInfo(System.UInt32, System.UInt32, via.motion.MotionInfo)", bank, id, G.info) end)
+    if not ok then return nil end
+    return r == true
+end
+
+-- Which weapon set's banks are active on this Motion (0 = bare hands).
+function CFG.gmot.set_type(rec, t)
+    local G = CFG.gmot
+    if rec.type == t then return end
+    pcall(tracer.crumb, "gmot", "set_TargetBankType " .. tostring(t))
+    local ok, err = pcall(function() return rec.m:call("set_TargetBankType", t) end)
+    pcall(tracer.crumb, "clean", "game motion set type finished")
+    G.n.type_sets = G.n.type_sets + 1
+    if ok then
+        rec.type = t
+        G.note("weapon set " .. tostring(t) .. " asked for")
+    else
+        G.note("set_TargetBankType(" .. tostring(t) .. ") failed: " .. tostring(err):sub(1, 60))
+    end
+end
+
+-- (10.10) The item set. The other mod measured that the healing clips (2790 Recovery, 2792 Injection, 2794 Glasses ...) are in none of the weapon sets Ethan holds while he uses the item
+-- ("2790 bound nothing on sets 0 and 30"): they bind in set 200 (its ITEM_SET). So a clip of 1000 or more that their set does not have is looked for in set 200 before the body falls
+-- back to bare hands. The set is put back (to 0) when it is not there either.
+CFG.gmot.ITEM_SET = 200
+function CFG.gmot.pair_ok(rec, bank, id, t)
+    local G = CFG.gmot
+    if t ~= rec.type then G.set_type(rec, t) end
+    local has = G.has_clip(rec, bank, id)
+    if has ~= true and bank == 0 and id >= 1000 and t ~= G.ITEM_SET then
+        G.set_type(rec, G.ITEM_SET)
+        has = G.has_clip(rec, bank, id)
+        if has == true then
+            G.n.item_set = (G.n.item_set or 0) + 1
+            if G.n.item_set <= 6 then G.note(string.format("clip %d/%d is not in their weapon set %s: it is in the item set (%d), played from there", bank, id, tostring(t), G.ITEM_SET), true) end
+            return true
+        end
+    end
+    if has ~= true and rec.type ~= 0 and (t ~= 0 or rec.type == G.ITEM_SET) then G.set_type(rec, 0) end -- (their weapon set did not have it: back to bare hands)
+    return has == true
+end
+
+-- A fresh, constructed TreeLayer on slot 0 (the other mod's recipe: without .ctor a clip never binds). Returns layer 0 or nil.
+function CFG.gmot.build_layer(rec)
+    local G = CFG.gmot
+    local m = rec.m
+    local layer
+    pcall(function() layer = m:call("getLayer", 0) end)
+    if layer ~= nil and not rec.rebuild then return layer end
+    pcall(tracer.crumb, "gmot", "build the TreeLayer")
+    local before = G.num(m, "getLayerCount")
+    if not rec.rebuild then pcall(function() m:call("setLayerCount", 1) end) pcall(function() layer = m:call("getLayer", 0) end) end
+    if layer == nil or rec.rebuild then
+        local okt, tl = pcall(sdk.create_instance, "via.motion.TreeLayer")
+        if okt and tl then
+            pcall(function() tl:add_ref() end)
+            local okc = pcall(function() tl:call(".ctor") end)
+            pcall(function() m:call("setLayerCount", 1) end)
+            local oks, err = pcall(function() m:call("setLayer", 0, tl) end)
+            pcall(function() layer = m:call("getLayer", 0) end)
+            G.note(string.format("TreeLayer made (.ctor %s), setLayer(0)%s -> layer 0 %s (layers before: %s)", tostring(okc), oks and "" or (" ERR " .. tostring(err):sub(1, 60)),
+                layer and "ok" or "still missing", tostring(before)))
+        else
+            G.note("create_instance(via.motion.TreeLayer) failed")
+        end
+    end
+    rec.rebuild = nil
+    pcall(tracer.crumb, "clean", "game motion layer finished")
+    return layer
+end
+
+-- The six-parameter changeMotion (frame, blend, interpolation mode and curve), as the enemy clips call it.
+function CFG.gmot.change(layer, bank, id, blend)
+    local G = CFG.gmot
+    if G.meth == nil then
+        G.meth = false
+        pcall(function()
+            for _, mm in ipairs(layer:get_type_definition():get_methods()) do
+                if mm:get_name() == "changeMotion" and mm:get_num_params() == 6 then G.meth = mm end
+            end
+        end)
+    end
+    if G.meth then return pcall(function() return G.meth:call(layer, bank, id, 0.0, blend, 2, 0) end) end
+    return pcall(function() return layer:call("changeMotion", bank, id, 0.0, blend, 2, 0) end)
+end
+
+-- Plays a pair on layer 0 (and switches the Motion on).
+function CFG.gmot.play(rec, want, now)
+    local G = CFG.gmot
+    if want.type ~= nil and want.type ~= rec.type then G.set_type(rec, want.type) end
+    local layer = G.build_layer(rec)
+    if layer == nil then G.fail("layer 0 is not there") return false end
+    pcall(tracer.crumb, "gmot", "changeMotion " .. want.key)
+    pcall(function() layer:call("set_Resource", nil) end) -- (a motion tree on the layer would override a direct clip)
+    local ok, err = G.change(layer, want.bank, want.id, G.BLEND)
+    pcall(function() layer:call("set_Speed", want.speed or 1.0) end)
+    pcall(function() rec.m:call("set_Enabled", true) end)
+    pcall(tracer.crumb, "clean", "game motion played")
+    if not ok then
+        G.n.change_errors = G.n.change_errors + 1
+        G.missing[want.key] = now
+        G.note(string.format("changeMotion %s FAILED: %s", want.key, tostring(err):sub(1, 80)), G.n.change_errors <= 3)
+        if G.n.change_errors >= 6 then G.fail("changeMotion keeps failing: " .. tostring(err):sub(1, 60)) end
+        return false
+    end
+    want.at, want.layer_speed = now, want.speed or 1.0
+    G.cur = want
+    G.n.plays = G.n.plays + 1
+    local field = want.how == "their clip" and "their_clip" or (want.how == "their layer clip" and "their_layer" or (want.how == "scripted move" and "scripted" or (want.how:find("^clip name") and "by_name" or "learned")))
+    G.n[field] = G.n[field] + 1
+    G.shown = G.shown + 1
+    G.note(string.format("playing %s [%s] for %s (%s), speed %.2f", want.key, want.name or "?", tostring(want.label), want.how, want.speed or 1), G.shown <= 12)
+    return true
+end
+
+function CFG.gmot.hand_back(why)
+    local G = CFG.gmot
+    local rec = G.rec
+    if G.cur ~= nil or G.testing then
+        G.cur, G.testing = nil, false
+        G.n.hand_backs = G.n.hand_backs + 1
+        G.note("the recorded clip animates the body again: " .. tostring(why))
+    end
+    if rec and rec.m then pcall(function() rec.m:call("set_Enabled", false) end) end
+end
+
+function CFG.gmot.drop(why)
+    local G = CFG.gmot
+    if G.rec then G.note("the body's Motion is let go: " .. tostring(why)) end
+    G.rec, G.cur, G.testing = nil, nil, false
+end
+
+function CFG.gmot.fail(why)
+    local G = CFG.gmot
+    if G.state == "failed" then return end
+    G.state, G.why, G.fails = "failed", why, G.fails + 1
+    G.hand_back("failed")
+    G.note("FAILED: " .. why .. " (the recorded clips animate the body; tick the box in 'Other player's body' to try again)", true)
+    pcall(chat_add, "Motion", "The game's own animations could not be used (" .. tostring(why):sub(1, 80) .. "). The recorded ones are used instead.")
+end
+
+function CFG.gmot.drives()
+    local G = CFG.gmot
+    return G.on == true and G.state ~= "failed" and G.rec ~= nil and (G.testing == true or G.cur ~= nil)
+end
+
+-- The pair to play now, or nil (then the recorded clip plays).
+function CFG.gmot.want(rec, now)
+    local G, C, M = CFG.gmot, CFG.clip, CFG.mbank
+    G.label = nil
+    -- (10.14) a scripted move of theirs (the van door, a ladder, a kick ...) plays from the move's own motion list, before everything else; while one is going on
+    -- and cannot be played here, their layer-0 pair (a number of that list, not one of Ethan's clips) is not taken for an Ethan clip either
+    local okj, jw, jheld = pcall(CFG.jack.want, rec, now)
+    if okj and jw then
+        G.label = "scripted"
+        return jw
+    end
+    local skip_remote = okj and jheld == true
+    -- (10.7) a crouch, a crouched walk and the inventory (a block or the inventory while crouched is a crouch: C.choose) are not shown by the generic Idle /
+    -- Move node the pair says. The clip recorded from the real Ethan for that state plays (the game's clip of the state's name when there is no recorded one).
+    local okl, own_label = pcall(C.choose)
+    if not (okl and type(own_label) == "string" and G.OWN_CLIP[own_label]) then own_label = nil end
+    G.own_label = own_label
+    if own_label ~= nil and C.get(own_label) ~= nil then
+        G.label = own_label
+        G.n.own_recorded = (G.n.own_recorded or 0) + 1
+        return nil
+    end
+    -- (10.4) 0. the clip on the other player's OVERLAY layer (a block, a heal: it plays on layers 1 and 2 over their locomotion tree, the "mol" event)
+    local ovr = (own_label == nil and not skip_remote) and M.overlay_remote(now) or nil
+    if ovr and ovr.label == "guard" and G.arms_guard(rec, now) then ovr = nil end -- (10.14) the block is played by the arms on two layers (the legs keep walking)
+    if ovr and ovr.bank and ovr.motion then
+        local key = string.format("%d/%d/%d", ovr.bank, ovr.motion, ovr.type or 0)
+        local when = G.missing[key]
+        if not when or now - when > G.MISS_RETRY then
+            if G.pair_ok(rec, ovr.bank, ovr.motion, ovr.type or 0) then
+                G.label = ovr.label
+                local name = G.cur and G.cur.key == key and G.cur.name or nil
+                if name == nil then pcall(function() name = tostring(as_text(G.info:call("get_MotionName")) or G.info:call("get_MotionName")):sub(1, 60) end) end
+                return { key = key, bank = ovr.bank, id = ovr.motion, type = ovr.type or 0, speed = 1.0, how = "their layer clip", label = ovr.label, name = name }
+            end
+            G.missing[key] = now
+            G.n.missing = G.n.missing + 1
+            if G.miss_logged < 12 then
+                G.miss_logged = G.miss_logged + 1
+                G.note(string.format("their overlay clip %s (%s) is not in my Motion's banks (weapon set %s): another way is used", key, tostring(ovr.label), tostring(ovr.type)), true)
+            end
+        end
+    end
+    local r = M.remote
+    if own_label == nil and not skip_remote and M.on and r and r.bank and r.motion and now - r.at <= M.REMOTE_TTL then
+        local key = string.format("%d/%d/%d", r.bank, r.motion, r.type or 0)
+        local when = G.missing[key]
+        if not when or now - when > G.MISS_RETRY then
+            if G.pair_ok(rec, r.bank, r.motion, r.type or 0) then
+                G.label = r.label
+                return { key = key, bank = r.bank, id = r.motion, type = r.type or 0, speed = 1.0, how = "their clip", label = r.label,
+                    name = M.ids[r.bank .. "/" .. r.motion] and M.ids[r.bank .. "/" .. r.motion].name }
+            end
+            G.missing[key] = now
+            G.n.missing = G.n.missing + 1
+            if G.miss_logged < 12 then
+                G.miss_logged = G.miss_logged + 1
+                G.note(string.format("their clip %s (%s) is not in my Motion's banks (weapon set %s): another way is used", key, tostring(r.label), tostring(r.type)), true)
+            end
+        end
+    end
+    local okc, label = pcall(C.choose)
+    if not okc or type(label) ~= "string" then return nil end
+    if own_label then label = own_label end
+    G.label = label
+    local list = G.NAMES[label]
+    if list then
+        for _, suffix in ipairs(list) do
+            local c = G.clips[suffix]
+            if c and not G.missing[c.bank .. "/" .. c.id .. "/0"] then
+                local sp = 1.0
+                if list.hold then
+                    sp = 0.0
+                elseif label == "walk" or label == "run" or label == "crouch_walk" then
+                    local rc = C.get(label)
+                    local ref = rc and tonumber(rc.speed) or 0
+                    if ref > 0.3 then sp = math.max(0.6, math.min(1.5, (state.speed or ref) / ref)) end
+                end
+                return { key = string.format("%d/%d/0", c.bank, c.id), bank = c.bank, id = c.id, type = 0, speed = sp, how = "clip name " .. suffix, label = label, name = c.name }
+            end
+        end
+    end
+    local per = M.tally[label]
+    if per then
+        local best, bn = nil, 0
+        for key, n in pairs(per) do if n > bn then best, bn = key, n end end
+        local row = best and bn >= M.MIN_SAMPLES and M.ids[best] or nil
+        if row and G.pair_ok(rec, row.bank, row.motion, 0) then
+            return { key = string.format("%d/%d/0", row.bank, row.motion), bank = row.bank, id = row.motion, type = 0, speed = 1.0, how = "learned for " .. label, label = label, name = row.name }
+        end
+    end
+    G.n.no_clip[label] = (G.n.no_clip[label] or 0) + 1
+    return nil
+end
+
+-- (10.8) WHAT PLAYS FOR EACH THING IT DOES, written down at every choice (health.game_motion.by_state): the bank clip's pair and how it was found, or the clip saved
+-- from the owner's Ethan (the file it came from), or nothing. The 14 Nov test asked which of crouch / block / inventory had no clip in the bank: this is the answer.
+do
+    local want_inner = CFG.gmot.want
+    CFG.gmot.by_state = {}
+    function CFG.gmot.want(rec, now)
+        local G = CFG.gmot
+        local w = want_inner(rec, now)
+        local ok = pcall(function()
+            local label = tostring(G.label or (w and w.label) or "other")
+            local text
+            if w then
+                text = string.format("the game's clip %s%s (%s)", w.key, w.name and (" " .. w.name) or "", tostring(w.how))
+            elseif G.own_label and CFG.clip.get(G.own_label) ~= nil then
+                text = string.format("saved clip from your Ethan (%s)%s", tostring(CFG.clip.src[G.own_label]),
+                    CFG.clip.arms and (" + the arms of the saved " .. tostring(CFG.clip.arms) .. " clip") or "")
+            else
+                text = "no clip in the bank: the saved clip plays (" .. tostring(CFG.clip.src[label] or "none saved") .. ")"
+            end
+            local e = G.by_state[label]
+            if not e then e = { n = 0 } G.by_state[label] = e end
+            e.n, e.now, e.at = e.n + 1, text, math.floor(now * 10) / 10
+        end)
+        return w
+    end
+end
+
+-- Normal running: choose the pair, play it when it changed, hand back to the recorded clip when there is none.
+function CFG.gmot.drive(rec, now)
+    local G = CFG.gmot
+    local want = G.want(rec, now)
+    if want == nil then
+        G.none_since = G.none_since or now
+        if G.cur and now - G.none_since >= G.NONE_HOLD then G.hand_back("no game clip for " .. tostring(G.label)) end
+        return
+    end
+    G.none_since = nil
+    local c = G.cur
+    if c and c.key == want.key then
+        if math.abs((c.layer_speed or 1) - want.speed) > 0.08 then
+            c.layer_speed = want.speed
+            local layer = G.build_layer(rec)
+            if layer then pcall(function() layer:call("set_Speed", want.speed) end) end
+        end
+        return
+    end
+    G.play(rec, want, now)
+end
+
+-- (10.10) THE SMALL ACTIONS ON A SECOND LAYER, the other mod's recipe (coop_dummy.lua action_layer / run_slot): the body's Motion gets a layer (setLayerCount, a fresh constructed
+-- TreeLayer, setLayer), takes the JOINT MASK and BLEND MODE of the layer the clip came from on the other player's Ethan (the masks are shared: both use Ethan's joint map), and plays the clip
+-- with the six-parameter changeMotion at BlendRate 1 over the walk of layer 0; BlendRate 0 when the action ends. A clip the Motion does not hold is not played (an unbound clip shows the bind
+-- pose, the T-pose): the layer stays muted and it is counted. Only while a game clip drives layer 0 (a Motion with nothing on layer 0 would hold the whole body in its bind pose).
+-- (10.14) TWO SLOTS, as in the other mod (run_slot: "action" on layer 1, "action2" on layer 2, "usually the other arm"): the second move their Ethan plays on another upper layer ("actb")
+-- goes on the body's layer 2 with its own mask. And a clip of one of the banks the game ADDED for a move (bank 3 to 31: their own "b|" messages, CFG.jack) plays too, once that bank is on
+-- the body (until then the layer waits instead of being marked as failed).
+CFG.gmot.SLOTS = {
+    { idx = 1, key = "act_key", at = "act_at", check = "act_check", failed = "act_failed", text = "act_text", n = "act", remote = "act_remote", what = "small action" },
+    { idx = 2, key = "act2_key", at = "act2_at", check = "act2_check", failed = "act2_failed", text = "act2_text", n = "act2", remote = "act2_remote", what = "second small action" },
+}
+CFG.gmot.ARMS_GUARD = true -- (10.14) their block is played by the arms (the small-action layer, their joint mask) when it can be, so the legs keep walking
+
+function CFG.gmot.act_layer(rec, idx)
+    local G = CFG.gmot
+    idx = idx or 1
+    local m = rec.m
+    local lc = G.num(m, "getLayerCount") or 0
+    if lc < idx + 1 then pcall(function() m:call("setLayerCount", idx + 1) end) end
+    local layer
+    pcall(function() layer = m:call("getLayer", idx) end)
+    if layer == nil then
+        local okt, tl = pcall(sdk.create_instance, "via.motion.TreeLayer")
+        if okt and tl then
+            pcall(function() tl:add_ref() end)
+            pcall(function() tl:call(".ctor") end)
+            pcall(function() m:call("setLayer", idx, tl) end)
+            pcall(function() layer = m:call("getLayer", idx) end)
+            G.note("the " .. (idx == 1 and "second" or "third") .. " layer (for small actions) was made: " .. (layer and "ok" or "it is still missing"), true)
+        end
+    end
+    return layer
+end
+
+function CFG.gmot.act_stop(rec, why, S)
+    local G = CFG.gmot
+    S = S or G.SLOTS[1]
+    if not rec[S.key] then return end
+    local layer
+    pcall(function() layer = rec.m:call("getLayer", S.idx) end)
+    if layer then pcall(function() layer:call("set_BlendRate", 0.0) end) end
+    G.n[S.n .. "_stopped"] = (G.n[S.n .. "_stopped"] or 0) + 1
+    G[S.text] = "stopped (" .. tostring(why) .. "): " .. tostring(rec[S.key])
+    rec[S.key], rec[S.at] = nil, nil
+end
+
+-- One slot: the move their Ethan plays on one upper layer, played on the body's layer S.idx.
+function CFG.gmot.act_slot(rec, now, S)
+    local G, M = CFG.gmot, CFG.mbank
+    local a = M.act_on and M[S.remote] or nil
+    if a and now - a.at > M.ACT_TTL then a = nil end
+    if a and not G.drives() then a = nil end
+    if a == nil then
+        if rec[S.key] then G.act_stop(rec, "it ended", S) end
+        return
+    end
+    local key = string.format("%d/%d/%d/%d", a.layer, a.bank, a.motion, a.blend or 0)
+    local failed = G[S.failed] and G[S.failed][key]
+    if rec[S.key] == key then
+        -- the move was started: a clip that bound nothing (no frames) is muted at once (it would show the bind pose)
+        if rec[S.check] and now >= rec[S.check] then
+            rec[S.check] = nil
+            local layer
+            pcall(function() layer = rec.m:call("getLayer", S.idx) end)
+            local endf = layer and G.num(layer, "get_EndFrame")
+            if endf ~= nil and endf <= 0 then
+                G.n[S.n .. "_unbound"] = (G.n[S.n .. "_unbound"] or 0) + 1
+                G[S.failed] = G[S.failed] or {}
+                G[S.failed][key] = now
+                pcall(function() layer:call("set_BlendRate", 0.0) end)
+                G[S.text] = "muted: " .. key .. " bound nothing on this body"
+                rec[S.key] = nil
+            end
+        end
+        return
+    end
+    if failed and now - failed < G.MISS_RETRY then return end
+    -- (10.14) a clip of a bank the other game added: it waits for that bank to be on this body (their "b|" message), without being marked as failed
+    if a.bank >= CFG.jack.MIN_BANK and not CFG.jack.bank_ready(rec, a.bank) then
+        if rec[S.key] then G.act_stop(rec, "its bank is not here", S) end
+        G[S.text] = string.format("waiting for their bank %d (%s) to be added to this body", a.bank, key)
+        G.n[S.n .. "_waiting_bank"] = (G.n[S.n .. "_waiting_bank"] or 0) + 1
+        return
+    end
+    if rec[S.key] then G.act_stop(rec, "another one", S) end
+    local layer = G.act_layer(rec, S.idx)
+    if layer == nil then
+        G[S.failed] = G[S.failed] or {}
+        G[S.failed][key] = now
+        G.n[S.n .. "_nolayer"] = (G.n[S.n .. "_nolayer"] or 0) + 1
+        G[S.text] = "no " .. (S.idx == 1 and "second" or "third") .. " layer could be made"
+        return
+    end
+    local t = a.type or rec.type or 0
+    if not G.pair_ok(rec, a.bank, a.motion, t) then
+        G[S.failed] = G[S.failed] or {}
+        G[S.failed][key] = now
+        G.n[S.n .. "_missing"] = (G.n[S.n .. "_missing"] or 0) + 1
+        G[S.text] = string.format("their %s is not in my Motion's banks (weapon set %s): not played", key, tostring(t))
+        if (G.n[S.n .. "_missing"] or 0) <= 8 then G.note(G[S.text], true) end
+        return
+    end
+    pcall(tracer.crumb, "gmot", S.what .. " " .. key)
+    pcall(function() layer:call("set_JointMaskID", a.mask or 0) end)
+    pcall(function() layer:call("set_BlendMode", a.blend or 0) end)
+    pcall(function() layer:call("set_Resource", nil) end)
+    local ok, err = G.change(layer, a.bank, a.motion, G.BLEND)
+    pcall(function() layer:call("set_Speed", 1.0) end)
+    pcall(function() layer:call("set_BlendRate", 1.0) end)
+    pcall(function() rec.m:call("set_Enabled", true) end)
+    pcall(tracer.crumb, "clean", S.what .. " played")
+    if not ok then
+        G.n[S.n .. "_errors"] = (G.n[S.n .. "_errors"] or 0) + 1
+        G[S.failed] = G[S.failed] or {}
+        G[S.failed][key] = now
+        G[S.text] = "changeMotion " .. key .. " failed: " .. tostring(err):sub(1, 60)
+        return
+    end
+    rec[S.key], rec[S.at], rec[S.check] = key, now, now + 0.2
+    G.n[S.n .. "_played"] = (G.n[S.n .. "_played"] or 0) + 1
+    G[S.text] = string.format("playing %s on layer %d (mask %s, blend mode %s, weapon set %s)", key, S.idx, tostring(a.mask), tostring(a.blend), tostring(t))
+    G.note(G[S.text], (G.n[S.n .. "_played"] or 0) <= 12)
+end
+
+function CFG.gmot.act_drive(rec, now)
+    local G = CFG.gmot
+    if not (rec and rec.m) then return end
+    for _, S in ipairs(G.SLOTS) do G.act_slot(rec, now, S) end
+end
+
+-- (10.14) Is their BLOCK (the clip of their "mol" overlay, a guard) being played by the arms right now, on the small-action layer with the mask their layer had (so their legs keep walking
+-- under it)? Then layer 0 does not play it as a whole-body clip too. False (the 10.4 way, the whole body) when the arms cannot play it: no mask, the clip not in the body's banks or
+-- bound to nothing (the small-action layer marks that as failed), the small actions switched off, or layer 0 is not driven by a game clip (the small action layer needs it).
+function CFG.gmot.arms_guard(rec, now)
+    local G, M = CFG.gmot, CFG.mbank
+    if not (G.ARMS_GUARD and M.act_on) or not G.drives() then return false end
+    local ov, a = M.overlay_remote(now), M.act_remote
+    if not (ov and a and ov.bank == a.bank and ov.motion == a.motion) then return false end
+    if now - a.at > M.ACT_TTL or (a.mask or 0) == 0 then return false end
+    local key = string.format("%d/%d/%d/%d", a.layer, a.bank, a.motion, a.blend or 0)
+    if G.act_failed and G.act_failed[key] then return false end
+    G.n.arms_guard = (G.n.arms_guard or 0) + 1
+    return true
+end
+
+----------------------------------------------------------------------------------------------
+-- 10.14: THE SCRIPTED MOVES AND THE BANKS THE GAME ADDS ("we should build the animations and motions that they have, it has already been synced"). Molded Together (the other mod)
+-- shares two things this script did not:
+--   1. A SCRIPTED MOVE ("motion jack": the van door, a ladder, the sheet metal, the kick on a body bag, the low beams ...). The game takes over the player's animator and plays clips
+--      from the event's OWN motion list on layer 0, in place of bank 0 (Ethan's clips: the pair the "mot" event sends means nothing on the other body). The list is reached through the
+--      running event: Pl0000 > EventActionController (get_isActive) > CurrentTask > get_eventParam > <eventAction>k__BackingField > get_motionJackFsm > getActiveMotionBank(0) >
+--      get_MotionList > get_ResourcePath, with the bank's id; layer 0 plays from that bank id while it lasts. Sent here as "j|<clip>|<path>" (clip -1 = the list only: it goes out
+--      first, so the other body has it before the first clip is told; "j|-" = it is over). The other body adds the list as ITS bank 30 (a DynamicMotionBank that overwrites the id,
+--      then setupMotionBank) and plays the clip: an entry named pl... plays as it is, and one that is not (a ladder's LadderUpL, the tree nodes of the prop) plays as the clip of the
+--      same name in that list (pl0000_Hands_Ladder-Up_L: both names are lower-cased with "pl0000_", "Hands_" and the punctuation taken off). An entry that maps to nothing is not
+--      played (an unbound clip is the T-pose): the body keeps its own walk, and 'mot' is not read as an Ethan clip meanwhile (CFG.gmot.want).
+--   2. The banks the game adds to a body at run time (a grab, a fight move: bank ids 3 to 31): "b|<id>|<overwrite>|<path>" when the list changes and every 15 s, added to the other
+--      body the same way, so a clip from one of them (a small action on bank 3 to 31) can play there.
+-- Message kind 16 (an older script has no handler for it and ignores it). Nothing here changes the game on MY side: it only reads. Every game call is traced (stage "jack": a crash
+-- inside switches the sharing off at the next start). All of it is unverified in the real game.
+----------------------------------------------------------------------------------------------
+CFG.jack = {
+    on = true, MSG = 16, BANK = 30, REPEAT = 1.5, TTL = 4.0, SETTLE = 0.3, ENDED_AFTER = 0.6, BANKS_EVERY = 0.5, BANKS_REPEAT = 15, MAX_DYN = 12,
+    MIN_BANK = 3, MAX_BANK = 63, PATH_MAX = 150, REBUILD_MAX = 60, REBUILD_GAP = 1.0, SCAN_MAX = 600,
+    s = { path = nil, bank = nil, since = 0, t = 0, key = nil, sent_at = -100, clip = -1 }, -- my own scripted move
+    b = { sig = "", read_at = -100, sent_at = -100 },                                       -- the banks my body has added
+    remote = nil,   -- { clip, path, at }: their scripted move now
+    last_path = nil, -- the list of their last scripted move (kept: the other body keeps it until another one comes)
+    banks = {},     -- id -> { path, ow }: the banks their body has added
+    res = {},       -- path -> the resource holder (made once per path)
+    last = "has not run yet", last_error = nil, lines = {}, paths_seen = {}, rebuilds = 0, rebuild_at = -100,
+    n = { reads = 0, read_errors = 0, moves_seen = 0, sent = 0, ends_sent = 0, banks_sent = 0, got = 0, bad = 0, ignored_off = 0, banks_got = 0, rebuilds = 0, rebuild_refused = 0,
+        added = 0, add_failed = 0, direct = 0, own_other = 0, mapped = 0, unmappable = 0, held = 0, played = 0 },
+}
+
+-- Is the sharing on? A session that ended inside it switches it off at the next start (tracer.jack_suspect, from the marker file).
+function CFG.jack.alive()
+    local J = CFG.jack
+    if tracer.jack_suspect and J.on then J.on, J.last = false, "switched off: the last session ended inside it" end
+    return J.on
+end
+
+-- Is their scripted move going on (heard of in the last TTL seconds)?
+function CFG.jack.active(now)
+    local J = CFG.jack
+    return J.on == true and J.remote ~= nil and now - J.remote.at <= J.TTL
+end
+
+function CFG.jack.note(text, journal)
+    local J = CFG.jack
+    J.lines[#J.lines + 1] = string.format("%7.1f  %s", os.clock() % 100000, tostring(text):sub(1, 200))
+    while #J.lines > 40 do table.remove(J.lines, 1) end
+    if journal then say("scripted moves: " .. tostring(text):sub(1, 200)) end
+end
+
+-- A motion list path that may be sent and added: no .., only the characters of a resource path, "motlist" in it.
+function CFG.jack.valid_path(p)
+    return type(p) == "string" and #p >= 3 and #p <= CFG.jack.PATH_MAX and p:match("^[%w_%./%-]+$") ~= nil and not p:find("..", 1, true) and p:find("motlist", 1, true) ~= nil
+end
+
+-- The name of a clip, for matching an entry of a prop's list to the character's clip of the same move: lower case, without "pl0000_", "Hands_" and anything but letters and digits.
+function CFG.jack.norm(n)
+    return (tostring(n):lower():gsub("^pl%d+_", ""):gsub("^hands_", ""):gsub("[^%a%d]", ""))
+end
+
+-- MY scripted move: the path of the event's motion list and the bank id it plays from, or nil (not in one).
+function CFG.jack.read(go)
+    local D = CFG.door
+    local eac = D.get(go, "getComponent(System.Type)", sdk.typeof("app.EventActionController"))
+    if eac == nil or D.get(eac, "get_isActive") ~= true then return nil end
+    -- (only while an event is running: the marker file is not rewritten four times a second for nothing)
+    pcall(tracer.crumb, "jack", "read the list of my scripted move")
+    local task = D.field(eac, "CurrentTask")
+    local ep = task and D.get(task, "get_eventParam")
+    local ea = ep and D.field(ep, "<eventAction>k__BackingField")
+    local jack = ea and D.get(ea, "get_motionJackFsm")
+    local b = jack and D.get(jack, "getActiveMotionBank", 0)
+    local ml = b and D.get(b, "get_MotionList")
+    local path = ml and CFG.mot.path_text(D.get(ml, "get_ResourcePath"))
+    local bank = b and math.floor(tonumber(D.get(b, "get_BankID")) or 0)
+    pcall(tracer.crumb, "clean", "scripted move read finished")
+    if not CFG.jack.valid_path(path) then return nil end
+    return path, bank
+end
+
+-- Sends a message to the other player (and, for Ethan's friend that copies me, straight to my own receiver: it has no other script).
+function CFG.jack.send(text, now)
+    local J = CFG.jack
+    if not peer_present(now) then return end
+    net_send(J.MSG, text)
+    if CFG.friend.present() and CFG.who and CFG.who.bot_act == "copy" then pcall(J.on_msg, text) end
+end
+
+-- Called from CFG.mbank.update (about four times a second), before it reads Ethan's layer 0: my scripted move and the banks my body has added.
+function CFG.jack.sender(m, go, now)
+    local J, D = CFG.jack, CFG.door
+    if not J.alive() then return end
+    local S = J.s
+    local path, bank
+    if m ~= nil and go ~= nil then
+        J.n.reads = J.n.reads + 1
+        local ok, p, b = pcall(J.read, go)
+        if ok then
+            path, bank = p, b
+        else
+            J.n.read_errors, J.last_error = J.n.read_errors + 1, tostring(p):sub(1, 140)
+            if J.n.read_errors <= 3 then say("scripted moves error: " .. J.last_error) end
+        end
+    end
+    if path then
+        if S.path ~= path then
+            S.path, S.bank, S.since, S.key = path, bank, now, nil
+            J.n.moves_seen = J.n.moves_seen + 1
+            local seen = J.paths_seen[path]
+            if seen == nil then
+                local c = 0
+                for _ in pairs(J.paths_seen) do c = c + 1 end
+                if c < 30 then J.paths_seen[path] = 0 seen = 0 end
+            end
+            if seen then J.paths_seen[path] = seen + 1 end
+            J.note(string.format("my Ethan is in a scripted move: its list is %s (bank %d)", path, bank), true)
+        end
+        S.t = now
+        local clip = -1
+        if now - S.since >= J.SETTLE then
+            pcall(tracer.crumb, "jack", "read layer 0 of my scripted move")
+            local layer = D.get(m, "getLayer", 0)
+            local lb = layer and tonumber(D.get(layer, "get_MotionBankID"))
+            local li = layer and tonumber(D.get(layer, "get_MotionID"))
+            pcall(tracer.crumb, "clean", "scripted move layer read finished")
+            if lb == S.bank and li and li == li and li >= 0 and li < 65535 then clip = math.floor(li) end
+        end
+        S.clip = clip
+        local key = path .. "/" .. clip
+        if peer_present(now) and (key ~= S.key or now - S.sent_at >= J.REPEAT) then
+            S.key, S.sent_at = key, now
+            J.n.sent = J.n.sent + 1
+            J.send(string.format("j|%d|%s", clip, path), now)
+        end
+    elseif S.path and now - S.t >= J.ENDED_AFTER then
+        S.path, S.key, S.clip = nil, nil, -1
+        J.n.ends_sent = J.n.ends_sent + 1
+        J.note("my scripted move is over")
+        J.send("j|-", now)
+    end
+    if m ~= nil then J.banks_sender(m, now) end
+end
+
+-- Is my own Ethan in a scripted move right now? (Then the pair on layer 0 is a number of that move's list, and is not learned as one of Ethan's clips.)
+function CFG.jack.mine(now)
+    local J = CFG.jack
+    return J.on == true and J.s.path ~= nil and now - J.s.t < J.ENDED_AFTER + 0.5
+end
+
+-- The banks the game added to my body (ids 3 and up): each goes out as "b|<id>|<overwrite 0/1>|<path>" when the list changes and every BANKS_REPEAT s.
+function CFG.jack.banks_sender(m, now)
+    local J, D = CFG.jack, CFG.door
+    local B = J.b
+    if now - B.read_at < J.BANKS_EVERY then return end
+    B.read_at = now
+    if not peer_present(now) then B.sig = "?" return end -- (read again, and sent, when the other player is here)
+    local list = {}
+    local crumbed = false
+    local ok, err = pcall(function()
+        local n = tonumber(D.get(m, "getDynamicMotionBankCount")) or 0
+        if n > 0 then pcall(tracer.crumb, "jack", "read the banks my body has added") crumbed = true end -- (a body with none: nothing is written)
+        for i = 0, math.min(n, J.MAX_DYN) - 1 do
+            local db = D.get(m, "getDynamicMotionBank", i)
+            if db ~= nil then
+                local id = tonumber(D.get(db, "get_BankID"))
+                local ml = D.get(db, "get_MotionList")
+                local path = ml and CFG.mot.path_text(D.get(ml, "get_ResourcePath"))
+                if id and id == math.floor(id) and id >= J.MIN_BANK and id <= J.MAX_BANK and id ~= J.BANK and J.valid_path(path) then
+                    list[#list + 1] = { id = id, ow = D.get(db, "get_OverwriteBankID") == true and 1 or 0, path = path }
+                end
+            end
+        end
+    end)
+    if crumbed then pcall(tracer.crumb, "clean", "banks read finished") end
+    if not ok then
+        J.n.read_errors, J.last_error = J.n.read_errors + 1, tostring(err):sub(1, 140)
+        return
+    end
+    table.sort(list, function(a, b) return a.id < b.id end)
+    local parts = {}
+    for _, b in ipairs(list) do parts[#parts + 1] = b.id .. "|" .. b.ow .. "|" .. b.path end
+    local sig = table.concat(parts, ";")
+    if sig ~= B.sig or (#list > 0 and now - B.sent_at >= J.BANKS_REPEAT) then
+        if sig ~= B.sig then J.note("the banks my body has added: " .. (sig ~= "" and sig:sub(1, 150) or "none"), #list > 0) end
+        B.sig, B.sent_at = sig, now
+        for _, b in ipairs(list) do
+            J.n.banks_sent = J.n.banks_sent + 1
+            J.send(string.format("b|%d|%d|%s", b.id, b.ow, b.path), now)
+        end
+    end
+end
+
+-- THEIR message (kind 16): "j|<clip>|<path>", "j|-", "b|<id>|<overwrite>|<path>".
+function CFG.jack.on_msg(payload)
+    local J = CFG.jack
+    local text = tostring(payload or "")
+    local now = os.clock()
+    J.n.got = J.n.got + 1
+    if not J.alive() then J.n.ignored_off = J.n.ignored_off + 1 return end
+    if text == "j|-" then
+        if J.remote then J.note("their scripted move is over") end
+        J.remote = nil
+        return
+    end
+    local clip, path = text:match("^j|(%-?%d+)|(%S+)$")
+    if clip then
+        clip = tonumber(clip)
+        if J.valid_path(path) and clip >= -1 and clip < 65535 then
+            if J.remote == nil or J.remote.path ~= path then J.note(string.format("their Ethan is in a scripted move: its list is %s", path), true) end
+            J.remote = { clip = math.floor(clip), path = path, at = now }
+            J.last_path = path
+            return
+        end
+    else
+        local id, ow, bpath = text:match("^b|(%d+)|([01])|(%S+)$")
+        id = tonumber(id)
+        if id and id >= J.MIN_BANK and id <= J.MAX_BANK and id ~= J.BANK and J.valid_path(bpath) then
+            J.n.banks_got = J.n.banks_got + 1
+            local cur = J.banks[id]
+            if cur == nil or cur.path ~= bpath or cur.ow ~= tonumber(ow) then
+                J.banks[id] = { path = bpath, ow = tonumber(ow) }
+                J.note(string.format("their body has the added bank %d: %s", id, bpath), true)
+            end
+            return
+        end
+    end
+    J.n.bad = J.n.bad + 1
+    if J.n.bad <= 3 then J.note("a message that was not understood: " .. text:sub(1, 80), true) end
+end
+
+-- The banks the other body should have: the ones their game added, and the list of their last scripted move as bank 30.
+function CFG.jack.wanted()
+    local J = CFG.jack
+    local out = {}
+    for id, b in pairs(J.banks) do out[id] = b end
+    if J.last_path then out[J.BANK] = { path = J.last_path, ow = 1 } end
+    return out
+end
+
+-- True when this bank's list is on the body now (added without an error).
+function CFG.jack.bank_ready(rec, bank)
+    return rec ~= nil and rec.jack_have ~= nil and rec.jack_have[bank] ~= nil
+end
+
+-- Makes the body's dynamic banks the wanted ones. The other mod found that a list swapped into a slot that is already there is not taken up (the bank went inactive), so a change
+-- resets the count to what the body started with and adds them all again, then setupMotionBank (without it an added bank stays inactive). The layers keep playing through it.
+function CFG.jack.apply(rec, now)
+    local J, G, D = CFG.jack, CFG.gmot, CFG.door
+    if not J.alive() or not (rec and rec.m) then return end
+    local want = J.wanted()
+    local ids = {}
+    for id in pairs(want) do ids[#ids + 1] = id end
+    table.sort(ids)
+    local parts = {}
+    for _, id in ipairs(ids) do parts[#parts + 1] = id .. "|" .. want[id].ow .. "|" .. want[id].path end
+    local sig = table.concat(parts, ";")
+    if sig == (rec.jack_sig or "") then return end
+    if now - J.rebuild_at < J.REBUILD_GAP then return end -- (too soon after the last one: next tick)
+    if J.rebuilds >= J.REBUILD_MAX then
+        J.n.rebuild_refused = J.n.rebuild_refused + 1
+        if J.n.rebuild_refused == 1 then J.note(string.format("%d bank changes were made this session already: no more (a message loop?)", J.rebuilds), true) end
+        rec.jack_sig = sig
+        return
+    end
+    J.rebuild_at, J.rebuilds, rec.jack_sig = now, J.rebuilds + 1, sig
+    J.n.rebuilds = J.n.rebuilds + 1
+    local m = rec.m
+    if rec.dyn_base == nil then rec.dyn_base = tonumber(D.get(m, "getDynamicMotionBankCount")) or 0 end
+    pcall(tracer.crumb, "jack", "add the banks to the body: " .. sig:sub(1, 90))
+    pcall(function() m:call("setDynamicMotionBankCount", rec.dyn_base) end)
+    rec.jack_have, rec.jack_map = {}, nil
+    for _, id in ipairs(ids) do
+        local b = want[id]
+        local step = "start"
+        local ok, err = pcall(function()
+            local hd = J.res[b.path]
+            if hd == nil then
+                step = "resource"
+                local r = sdk.create_resource("via.motion.MotionListResource", b.path)
+                if r == nil then error("no resource made") end
+                r:add_ref()
+                step = "holder"
+                hd = r:create_holder("via.motion.MotionListResourceHolder")
+                if hd == nil then error("no holder made") end
+                hd:add_ref()
+                J.res[b.path] = hd
+            end
+            step = "bank object"
+            local db = sdk.create_instance("via.motion.DynamicMotionBank")
+            if db == nil then error("no bank object") end
+            db:add_ref()
+            db:call(".ctor")
+            step = "set the bank up"
+            db:call("set_MotionList", hd)
+            db:call("set_OverwriteBankID", b.ow == 1)
+            db:call("set_BankID", id)
+            step = "add it to the body"
+            local n = tonumber(m:call("getDynamicMotionBankCount") or 0) or 0
+            m:call("setDynamicMotionBankCount", n + 1)
+            m:call("setDynamicMotionBank", n, db)
+        end)
+        if ok then
+            rec.jack_have[id] = b.path
+            J.n.added = J.n.added + 1
+            J.note(string.format("bank %d added to the body: %s", id, b.path), J.n.added <= 12)
+        else
+            J.n.add_failed = J.n.add_failed + 1
+            J.last_error = string.format("adding bank %d (%s): %s", id, step, tostring(err):sub(1, 100))
+            J.note(J.last_error, J.n.add_failed <= 6)
+        end
+    end
+    pcall(function() m:call("setupMotionBank") end)
+    pcall(tracer.crumb, "clean", "banks added")
+    -- what waited for a bank starts again (a clip told before its bank was here)
+    rec.act_key, rec.act2_key, G.act_failed, G.act2_failed = nil, nil, nil, nil
+    if G.cur and G.cur.bank and G.cur.bank >= J.MIN_BANK then G.cur = nil end
+end
+
+-- (10.17) Is an entry of their list the character's own clip (played as it is)? Its name starts with pl0000 (the first rule, since 10.14); or it carries the actor's tag
+-- (a cutscene's list "c03e20_00_pl0000.motlist" holds "c03e20_00_pl0000_000": the 20 Nov files showed every cutscene refused for this); or it ends in _PL (the player's side of
+-- a clip made for two: "em2000_Common_TakeAx_Stand_PL"); or the list FILE is the character's own (it ends in _pl0000.motlist). Everything else (a prop's or a weapon's own
+-- clip: "sm0316_Interact_ChainCut", "wp1100_Interact_ChainCut") still plays only as the character's clip of the same name, or not at all.
+function CFG.jack.own_clip(name, path)
+    local l = tostring(name):lower()
+    if l:match("^pl%d") then return true, "named pl" end
+    if l:match("_pl%d%d%d%d_") or l:match("_pl%d%d%d%d$") then return true, "the actor's tag pl0000 is in its name" end
+    if l:match("_pl$") then return true, "the player's side of a clip made for two" end
+    if path ~= nil and tostring(path):lower():match("_pl%d%d%d%d%.motlist$") then return true, "the list is the character's own" end
+    return false
+end
+
+-- The clip of the body's bank 30 that a number of THEIR list stands for: the entry itself when its name starts with pl (a character's clip), else the character's clip of the same name in
+-- that list (a ladder's LadderUpL plays as pl0000_Hands_Ladder-Up_L), else nil (it is not played). Asked once per number and list.
+function CFG.jack.real(rec, id)
+    local J, G = CFG.jack, CFG.gmot
+    if rec.jack_map == nil or rec.jack_map.sig ~= rec.jack_sig then rec.jack_map = { sig = rec.jack_sig, ids = {} } end
+    local c = rec.jack_map.ids[id]
+    if c ~= nil then return c.id, c.name end
+    local has = G.has_clip(rec, J.BANK, id)
+    local found, fname
+    if has == nil then
+        found = id -- (cannot be asked: played as it is)
+        J.n.direct = J.n.direct + 1
+    elseif has == true then
+        pcall(tracer.crumb, "jack", "name of their scripted clip " .. id)
+        local name
+        pcall(function() name = tostring(as_text(G.info:call("get_MotionName")) or G.info:call("get_MotionName")) end)
+        local own, why_own = false, nil
+        if name then own, why_own = J.own_clip(name, rec.jack_have and rec.jack_have[J.BANK]) end
+        if own then
+            found, fname = id, name
+            J.n.direct = J.n.direct + 1
+            if why_own ~= "named pl" then
+                J.n.own_other = J.n.own_other + 1
+                J.note(string.format("their entry %d (%s) plays as it is (%s)", id, name, why_own), J.n.own_other <= 16)
+            end
+        elseif name then
+            local want = J.norm(name)
+            local cnt = 0
+            pcall(function() cnt = tonumber(rec.m:call("getMotionCount", J.BANK)) or 0 end)
+            for i = 0, math.min(cnt, J.SCAN_MAX) - 1 do
+                local okk, got = pcall(function() return rec.m:call("getMotionInfoByIndex(System.UInt32, System.UInt32, via.motion.MotionInfo)", J.BANK, i, G.info) end)
+                if okk and got == true then
+                    local n2, id2
+                    pcall(function() n2 = tostring(as_text(G.info:call("get_MotionName")) or G.info:call("get_MotionName")) end)
+                    pcall(function() id2 = tonumber(G.info:call("get_MotionID")) end)
+                    if n2 and id2 and n2:lower():match("^pl%d") and J.norm(n2) == want then
+                        found, fname = math.floor(id2), n2
+                        J.n.mapped = J.n.mapped + 1
+                        J.note(string.format("their entry %d (%s) plays as clip %d (%s)", id, name, found, n2), J.n.mapped <= 12)
+                        break
+                    end
+                end
+            end
+            if found == nil then J.note(string.format("their entry %d (%s) is not a character's clip and no clip of that name is in the list: not played", id, name), J.n.unmappable < 8) end
+        end
+        pcall(tracer.crumb, "clean", "scripted clip name finished")
+    end
+    if found == nil then J.n.unmappable = J.n.unmappable + 1 end
+    rec.jack_map.ids[id] = { id = found, name = fname }
+    return found, fname
+end
+
+-- (CFG.gmot.want, first) The clip of their scripted move: (the pair to play, true) while it can be played here, (nil, true) while it is going on and cannot ("held": their layer-0 pair is a
+-- number of that move's list, not an Ethan clip, so the other paths are skipped), (nil, false) when they are in none.
+function CFG.jack.want(rec, now)
+    local J = CFG.jack
+    local r = J.alive() and J.remote or nil
+    if r == nil then return nil, false end
+    if now - r.at > J.TTL then
+        J.remote = nil
+        J.note(string.format("no news of their scripted move for %.0f s: taken as over", J.TTL))
+        return nil, false
+    end
+    if r.clip < 0 or rec.jack_have == nil or rec.jack_have[J.BANK] ~= r.path then
+        J.n.held = J.n.held + 1
+        return nil, true
+    end
+    local real, name = J.real(rec, r.clip)
+    if real == nil then
+        J.n.held = J.n.held + 1
+        return nil, true
+    end
+    J.n.played = J.n.played + 1
+    return { key = string.format("%d/%d/0", J.BANK, real), bank = J.BANK, id = real, type = 0, speed = 1.0, how = "scripted move", label = "scripted", name = name }, true
+end
+
+function CFG.jack.report()
+    local J = CFG.jack
+    local rec = CFG.gmot.rec
+    return { on = J.on, last = J.last, last_error = J.last_error, counts = J.n,
+        about = "10.14: a scripted move of my Ethan (the van door, a ladder, a kick ...) plays from the event's own motion list: its path goes to the other player ('j' messages, kind 16), who adds it as bank 30 and plays the clip (an entry that is not a character's clip plays as the clip of the same name). The banks the game adds to my body (3 and up) go out as 'b' messages.",
+        mine = { path = J.s.path, bank = J.s.bank, clip = J.s.clip }, theirs = J.remote, their_last_list = J.last_path, their_banks = J.banks,
+        on_the_body = rec and rec.jack_have or nil, lists_seen_from_me = J.paths_seen, bank_changes = J.rebuilds, lines = J.lines }
+end
+
+net_on(CFG.jack.MSG, function(payload) CFG.jack.on_msg(payload) end)
+
+-- Once a second: a layer that stopped moving (and is not at the end of a one-shot clip) is rebuilt and the clip started again.
+function CFG.gmot.watch(rec, now)
+    local G = CFG.gmot
+    if now - (rec.watch_at or -100) < G.WATCH_EVERY then return end
+    rec.watch_at = now
+    local c = G.cur
+    if not c then rec.last_frame, rec.frozen = nil, 0 return end
+    local layer
+    pcall(function() layer = rec.m:call("getLayer", 0) end)
+    if not layer then return end
+    local fr, endf = G.num(layer, "get_Frame"), G.num(layer, "get_EndFrame")
+    c.frame, c.end_frame = fr, endf
+    if (c.layer_speed or 1) > 0.05 and fr and endf and rec.last_frame and math.abs(fr - rec.last_frame) < 1e-4 and fr < endf - 0.5 and now - (c.at or now) > 1.5 then
+        rec.frozen = (rec.frozen or 0) + 1
+        if rec.frozen >= 2 then
+            rec.frozen = 0
+            G.n.freezes = G.n.freezes + 1
+            G.note(string.format("the layer is frozen on %s (frame %.1f of %.1f): rebuilding it", c.key, fr, endf), true)
+            if G.n.freezes >= G.MAX_FREEZES then G.fail("the layer froze " .. G.n.freezes .. " times") return end
+            rec.rebuild, G.cur, rec.act_key, rec.act2_key = true, nil, nil, nil -- (10.10) the layer count is reset by the rebuild: the second layer is gone too (10.14: and the third)
+            G.build_layer(rec)
+        end
+    else
+        rec.frozen = 0
+    end
+    rec.last_frame = fr
+end
+
+-- The angles of some joints of the body (a list of {x, y, z}, false for a joint it cannot read).
+function CFG.gmot.sample_joints(names)
+    local B = CFG.body
+    local out = {}
+    for i, nm in ipairs(names) do
+        if i > 10 then break end
+        local ok, v = pcall(function()
+            local j = B.xf:call("getJointByName", nm)
+            if not j then return nil end
+            local e = j:call("get_LocalEulerAngle")
+            return { e.x, e.y, e.z }
+        end)
+        out[i] = (ok and v) or false
+    end
+    return out
+end
+
+function CFG.gmot.joint_diff(a, b)
+    local sum, n = 0, 0
+    for i = 1, #a do
+        if a[i] and b[i] then
+            n = n + 1
+            for k = 1, 3 do
+                local d = math.abs((tonumber(a[i][k]) or 0) - (tonumber(b[i][k]) or 0))
+                if d > math.pi then d = 2 * math.pi - d end
+                sum = sum + d
+            end
+        end
+    end
+    return sum, n
+end
+
+-- The steps of the setup. Each runs once per call (every 0.1 s) and says what it did.
+-- (10.4) THE RIG: how many of the joints the clips drive this body has (by name), and the Motion's joint count. A body that has fewer than RIG_MIN of
+-- them cannot follow the clips, so the setup stops there and says which joints are missing (the recorded clips animate it as before).
+function CFG.gmot.rig(rec)
+    local G, B = CFG.gmot, CFG.body
+    local have, missing = 0, {}
+    for _, nm in ipairs(G.RIG_JOINTS) do
+        local ok, j = pcall(function() return B.xf:call("getJointByName", nm) end)
+        if ok and j ~= nil then have = have + 1 else missing[#missing + 1] = nm end
+    end
+    rec.rig = { have = have, of = #G.RIG_JOINTS, missing = missing, motion_joints = G.num(rec.m, "get_JointCount") }
+    G.note(string.format("rig: the body has %d of the %d joints the clips drive%s; the Motion counts %s joints", have, #G.RIG_JOINTS,
+        #missing > 0 and (" (missing " .. table.concat(missing, ", ", 1, math.min(#missing, 8)) .. ")") or "", tostring(rec.rig.motion_joints)), true)
+    if have < G.RIG_MIN then
+        -- (10.4) this body cannot follow the game's clips (another rig): the recorded clips animate IT; the next body is tried again
+        rec.rig_bad = string.format("the body has only %d of the %d joints the clips drive", have, #G.RIG_JOINTS)
+        G.note("this body is left to the recorded clips: " .. rec.rig_bad, true)
+        pcall(function() rec.m:call("set_Enabled", false) end)
+        return false
+    end
+    return true
+end
+
+function CFG.gmot.src_key(src)
+    return src and (tostring(src.bank_path or src.who) .. "|" .. tostring(src.jmap_path or "")) or nil
+end
+
+CFG.gmot.STAGES = {
+    mesh = function(G, rec, now)
+        local B = CFG.body
+        local ready, hip = true, false
+        local ok, v = pcall(function() return B.mc:call("get_MeshReady") end)
+        if ok and v == false then ready = false end
+        pcall(function() hip = B.xf:call("getJointByName", "Hip") ~= nil end)
+        if ready and hip then
+            G.note("the body's mesh is ready and has its joints: adding a Motion component")
+            rec.stage, rec.next = "component", now
+        elseif now - rec.t0 > G.MESH_WAIT then
+            G.fail("the body's mesh never became ready (mesh ready " .. tostring(ok and v) .. ", Hip joint " .. tostring(hip) .. ")")
+        else
+            rec.next = now + 0.5
+        end
+    end,
+    component = function(G, rec, now)
+        local B = CFG.body
+        local m
+        pcall(function() m = B.go:call("getComponent(System.Type)", sdk.typeof("via.motion.Motion")) end)
+        local made = false
+        if m == nil then
+            pcall(tracer.crumb, "gmot", "createComponent via.motion.Motion")
+            local ok, r = pcall(function() return B.go:call("createComponent", sdk.typeof("via.motion.Motion")) end)
+            pcall(tracer.crumb, "clean", "game motion component finished")
+            if not ok then G.fail("createComponent(via.motion.Motion) failed: " .. tostring(r):sub(1, 80)) return end
+            m, made = r, true
+        end
+        if m == nil then G.fail("createComponent(via.motion.Motion) gave nothing") return end
+        rec.m = m
+        G.n.bodies = G.n.bodies + 1
+        G.note(string.format("the body's Motion component: %s; %s", made and "created" or "it already had one", G.counts(m)), true)
+        rec.stage, rec.next = "configure", now + 0.1
+    end,
+    configure = function(G, rec, now)
+        local m, src = rec.m, G.src
+        rec.src = src
+        pcall(tracer.crumb, "gmot", "set_MotionBankAsset")
+        local ok1, e1 = pcall(function() m:call("set_MotionBankAsset", src.bank) end)
+        pcall(tracer.crumb, "gmot", "set_JointMap")
+        local ok2, e2 = true, nil
+        if src.jmap ~= nil then ok2, e2 = pcall(function() m:call("set_JointMap", src.jmap) end) end
+        pcall(tracer.crumb, "gmot", "setupMotionBank")
+        local ok3, e3 = pcall(function() m:call("setupMotionBank") end)
+        pcall(tracer.crumb, "clean", "game motion configure finished")
+        G.note(string.format("configured with %s's bank asset: set_MotionBankAsset %s, set_JointMap %s, setupMotionBank %s; %s", src.who, ok1 and "ok" or tostring(e1):sub(1, 50),
+            src.jmap == nil and "(no joint map)" or (ok2 and "ok" or tostring(e2):sub(1, 50)), ok3 and "ok" or tostring(e3):sub(1, 50), G.counts(m)), true)
+        if not ok1 then G.fail("set_MotionBankAsset failed: " .. tostring(e1):sub(1, 60)) return end
+        -- (10.4) A Motion that is on with no clip playing holds the body in its bind pose, arms out (the 10.2 screenshot: the whole 30 s the scan ran, and
+        -- the recorded clips could not pose it either). It is switched OFF here and on again by the first clip played (G.play).
+        if not G.keep_enabled then
+            local okd = pcall(function() m:call("set_Enabled", false) end)
+            G.note("the Motion is switched off until a clip plays (" .. (okd and "ok" or "set_Enabled failed") .. ")")
+        end
+        if not G.rig(rec) then rec.stage, rec.next = "rig_bad", now + 5 return end
+        rec.stage, rec.next = "layer", now + 0.2
+    end,
+    layer = function(G, rec, now)
+        local layer = G.build_layer(rec)
+        if layer == nil then G.fail("the Motion has no layer 0 and one could not be made") return end
+        rec.stage, rec.next, rec.banks_at = "banks", now + 0.3, now
+        G.note("layer 0 is there; waiting for the borrowed banks to load (they load in the background)")
+    end,
+    banks = function(G, rec, now)
+        local nb = G.num(rec.m, "getActiveMotionBankCount") or 0
+        if nb > 0 then
+            G.note(string.format("%d bank(s) active after %.1f s", nb, now - rec.banks_at))
+            rec.stage, rec.next, rec.scan = "scan", now, nil
+        elseif now - rec.banks_at > G.LOAD_WAIT then
+            G.fail("the borrowed banks never became active (" .. G.counts(rec.m) .. ")")
+        else
+            rec.next = now + 0.5
+        end
+    end,
+    scan = function(G, rec, now)
+        local m = rec.m
+        local s = rec.scan
+        if s == nil then
+            -- (10.4) the clip list of this bank asset is kept: a body made again (every rebuild) does not list 5,000 clips again
+            if G.scan_for ~= nil and G.scan_for == G.src_key(rec.src) and next(G.clips) ~= nil then
+                G.n.scans_skipped = G.n.scans_skipped + 1
+                G.note(string.format("the clip list of this bank asset is known (%d names): not listed again", G.scan_total or 0))
+                rec.stage, rec.next, rec.test = "test", now, {}
+                return
+            end
+            G.set_type(rec, 0)
+            rec.type = 0
+            if G.info == nil or G.info == false then G.has_clip(rec, 0, 0) end
+            s = { nb = G.num(m, "getActiveMotionBankCount") or 0, bi = 0, i = 0, total = 0, done = {}, repeated = 0, ids = 0 }
+            rec.scan = s
+            if not G.info then G.fail("a MotionInfo could not be made") return end
+        end
+        local budget = G.SCAN_PER_TICK
+        while budget > 0 do
+            if s.bid == nil then
+                if s.bi >= s.nb then break end
+                local bank, bid
+                pcall(function() bank = m:call("getActiveMotionBank", s.bi) end)
+                if bank then pcall(function() bid = bank:call("get_BankID") end) end
+                s.bi = s.bi + 1
+                s.i = 0
+                -- (10.4) the 29 active banks are one set per weapon type that share the bank ids 0, 1 and 2: each id is listed ONCE (10.2 listed bank 0 26 times, 30 s)
+                if bid ~= nil and s.done[bid] then
+                    s.repeated = s.repeated + 1
+                elseif bid ~= nil then
+                    s.done[bid], s.ids = true, s.ids + 1
+                    s.bid = bid
+                    local okn, nn = pcall(function() return m:call("getMotionCount", bid) end)
+                    s.n = okn and tonumber(nn) or 0
+                    G.note(string.format("bank id %s: %d clips", tostring(bid), s.n))
+                end
+            else
+                if s.i >= s.n then
+                    s.bid = nil
+                else
+                    local i = s.i
+                    s.i = i + 1
+                    budget = budget - 1
+                    local ok, got = pcall(function() return m:call("getMotionInfoByIndex(System.UInt32, System.UInt32, via.motion.MotionInfo)", s.bid, i, G.info) end)
+                    if ok and got == true then
+                        local name, id, frames
+                        pcall(function() name = tostring(as_text(G.info:call("get_MotionName")) or G.info:call("get_MotionName")) end)
+                        pcall(function() id = tonumber(G.info:call("get_MotionID")) end)
+                        pcall(function() frames = tonumber(G.info:call("get_MotionEndFrame")) end)
+                        if name and id then
+                            s.total = s.total + 1
+                            local suffix = name:gsub("^pl%d+_", "")
+                            if G.clips[suffix] == nil then G.clips[suffix] = { bank = s.bid, id = id, frames = frames, name = name } end
+                            if #G.names < G.MAX_NAMES then G.names[#G.names + 1] = string.format("%s/%d %s (%s)", tostring(s.bid), id, name, tostring(frames)) end
+                        end
+                    end
+                end
+            end
+        end
+        if s.bid == nil and s.bi >= s.nb then
+            local found = {}
+            for _, suffix in ipairs(G.STANDARD) do found[#found + 1] = suffix .. "=" .. (G.clips[suffix] and (G.clips[suffix].bank .. "/" .. G.clips[suffix].id) or "none") end
+            G.note(string.format("%d clips listed in %d bank id(s) (%d active banks, %d repeated ids skipped): %s", s.total, s.ids, s.nb, s.repeated, table.concat(found, " ")), true)
+            if s.total == 0 then G.fail("the banks list no clips") return end
+            G.scan_for, G.scan_total = G.src_key(rec.src), s.total
+            rec.stage, rec.next, rec.test = "test", now, {}
+        else
+            rec.next = now + 0.05
+        end
+    end,
+    test = function(G, rec, now)
+        local T = rec.test
+        local C = CFG.clip
+        if not T.started then
+            local c = G.clips["Hands_Walk_Loop"]
+            local rc = C.get("walk")
+            if not c then
+                G.note("no Hands_Walk_Loop to test with: the setup is accepted without the joint test", true)
+                rec.bound, rec.stage = nil, "ready"
+                return
+            end
+            T.names = rc and rc.body and rc.body.names or { "Hip" }
+            G.testing = true
+            if not G.play(rec, { key = string.format("%d/%d/0", c.bank, c.id), bank = c.bank, id = c.id, type = 0, speed = 1.0, how = "clip name Hands_Walk_Loop (self-test)",
+                label = "walk", name = c.name }, now) then
+                G.testing = false
+                return
+            end
+            T.started, T.samples, T.next_sample = now, {}, now + 0.4
+            G.note("self-test: the walk clip plays; its frame must advance and the body's joints must move", true)
+            return
+        end
+        if now >= T.next_sample then
+            T.next_sample = now + G.SAMPLE_EVERY
+            local layer
+            pcall(function() layer = rec.m:call("getLayer", 0) end)
+            T.samples[#T.samples + 1] = { joints = G.sample_joints(T.names), frame = layer and G.num(layer, "get_Frame"), end_frame = layer and G.num(layer, "get_EndFrame") }
+        end
+        if now - T.started < G.TEST_SECS then return end
+        G.testing = false
+        local first, fmin, fmax, moved, nvalid, endf = T.samples[1], nil, nil, 0, 0, nil
+        for _, s in ipairs(T.samples) do
+            if s.frame then fmin, fmax = math.min(fmin or s.frame, s.frame), math.max(fmax or s.frame, s.frame) end
+            endf = s.end_frame or endf
+            if first then
+                local d, n = G.joint_diff(first.joints, s.joints)
+                if n > nvalid then nvalid = n end
+                if d > moved then moved = d end
+            end
+        end
+        local adv = (fmax and fmin) and (fmax - fmin) or 0
+        rec.test_result = { samples = #T.samples, frame_from = fmin, frame_to = fmax, end_frame = endf, joints_read = nvalid, joints_moved = moved }
+        if adv < 0.5 and not G.keep_enabled and rec.m then
+            -- (10.4) the Motion was switched off before the first clip: if that is why nothing advanced, it is kept on from now on and the layer is made again
+            G.keep_enabled = true
+            G.note(string.format("self-test: layer 0 did not advance (frame %s to %s, end %s) with the Motion switched off: it is kept switched on and the layer made again", tostring(fmin), tostring(fmax), tostring(endf)), true)
+            pcall(function() rec.m:call("set_Enabled", true) end)
+            rec.rebuild, rec.stage, rec.next, rec.test, G.cur = true, "layer", now + 0.2, {}, nil
+        elseif adv < 0.5 then
+            G.fail(string.format("self-test: layer 0 did not advance (frame %s to %s, end %s)", tostring(fmin), tostring(fmax), tostring(endf)))
+        elseif nvalid > 0 and moved < G.MIN_MOVE then
+            G.fail(string.format("self-test: the clip runs (frame %.1f to %.1f) but the body's joints did not move (%.3f rad over %d joints)", fmin, fmax, moved, nvalid))
+        else
+            rec.bound, rec.stage = nvalid > 0, "ready"
+            G.n.tests_passed = G.n.tests_passed + 1
+            G.note(string.format("SELF-TEST PASSED: frame %.1f to %.1f (end %s), joints moved %.3f rad over %d joints%s", fmin, fmax, tostring(endf), moved, nvalid,
+                nvalid == 0 and " (no joint could be read: the frame check only)" or ""), true)
+        end
+    end,
+    ready = function(G, rec, now)
+        pcall(CFG.jack.apply, rec, now) -- (10.14) the banks their game added (and the list of their scripted move) onto this body
+        G.drive(rec, now)
+        G.watch(rec, now)
+        G.act_drive(rec, now) -- (10.10) the small actions on a second layer (10.14: and a third)
+    end,
+    rig_bad = function(G, rec, now) rec.next = now + 5 end, -- (10.4) the recorded clips animate this body
+}
+
+function CFG.gmot.step(now)
+    local G, B = CFG.gmot, CFG.body
+    local rec = G.rec
+    if rec == nil then
+        if not G.capture(now) then
+            G.state, G.why = "waiting", "needs the bank asset and joint map of my own player's Motion: " .. tostring(G.src_why or "not read yet")
+            return
+        end
+        rec = { go = B.go, stage = "mesh", t0 = now, next = now, test = {}, frozen = 0, type = 0 }
+        G.rec = rec
+        G.note(string.format("starting on the body (source: %s's Motion)", tostring(G.src and G.src.who)), true)
+    end
+    if rec.m and G.src and rec.src ~= nil and rec.src ~= G.src then
+        G.note(string.format("a better source is there (%s's Motion): the body's Motion is set up again", tostring(G.src.who)), true)
+        G.hand_back("new source")
+        rec.stage, rec.next, rec.scan, rec.test = "configure", now, nil, {}
+        G.clips, G.names, G.missing, G.scan_for = {}, {}, {}, nil
+    end
+    if now < rec.next then return end
+    local fn = G.STAGES[rec.stage]
+    if rec.stage == "ready" then
+        G.state, G.why = G.cur and "playing" or "ready", G.cur and (G.cur.key .. " " .. tostring(G.cur.name or "")) or "no game clip for what they do now: the recorded clip plays"
+    else
+        G.state, G.why = "setting up: " .. rec.stage, "step " .. rec.stage
+        if rec.stage == "rig_bad" then G.state, G.why = "this body's rig does not fit", tostring(rec.rig_bad) .. " (the recorded clips animate it)" end
+    end
+    if fn then fn(G, rec, now) end
+end
+
+-- Called from the game phase (CFG.body.tick), just before the recorded clip would be played.
+function CFG.gmot.tick(now)
+    local G, B = CFG.gmot, CFG.body
+    G.ticks = G.ticks + 1
+    if not G.loaded then G.load() end
+    if tracer.gmot_suspect and G.on then
+        G.on, G.state, G.why = false, "off", "switched off: the last session ended inside it (tick the box in 'Other player's body' to try again)"
+    end
+    if not G.on then
+        if G.rec and (G.cur or G.testing) then G.hand_back("switched off") end
+        return
+    end
+    if G.state == "failed" then return end
+    if not (B.go and B.xf and B.mc) then
+        if G.rec then G.drop("no body is standing") end
+        G.state, G.why = "waiting", "the other player's body is not standing"
+        return
+    end
+    if G.rec and G.rec.go ~= B.go then G.drop("the body was made again") end
+    if now - G.tick_at < G.EVERY then return end
+    G.tick_at = now
+    local ok, err = pcall(G.step, now)
+    if not ok then
+        G.errors = G.errors + 1
+        G.last_error = tostring(err):sub(1, 140)
+        G.note("error: " .. G.last_error, G.errors <= 3)
+        if G.errors >= 3 then G.fail("errors: " .. G.last_error) end
+    end
+end
+
+function CFG.gmot.line()
+    local G = CFG.gmot
+    if not G.on then return "off (" .. tostring(G.why) .. ")" end
+    return string.format("%s - %s", tostring(G.state), tostring(G.why))
+end
+
+function CFG.gmot.report()
+    local G = CFG.gmot
+    local rec = G.rec
+    local src = G.src
+    local found = {}
+    for _, suffix in ipairs(G.STANDARD) do found[suffix] = G.clips[suffix] and (G.clips[suffix].bank .. "/" .. G.clips[suffix].id) or "none" end
+    return { on = G.on, state = G.state, why = G.why, fails = G.fails, errors = G.errors, last_error = G.last_error, by_state = G.by_state,
+        about = "10.2 / 10.4: the other player's body plays the game's own clips from the motion bank; the recorded clips play for anything it has no clip for, or when this fails. 10.4: the Motion is off until a clip plays, each bank id is listed once (and kept for the next body), the rig is checked, and a block or heal on the other player's overlay layer (the 'mol' event) plays too.",
+        source = src and { character = src.who, bank_asset = src.bank_path, bank_asset_type = src.bank_type, joint_map = src.jmap_path, joint_map_type = src.jmap_type } or G.src_why or "not read yet",
+        body = rec and { stage = rec.stage, motion = rec.m and G.counts(rec.m) or "no Motion yet", weapon_set = rec.type, self_test = rec.test_result, joints_bound = rec.bound,
+            rig = rec.rig, motion_kept_on = G.keep_enabled == true } or "no body of its own yet",
+        playing_now = G.cur and { pair = G.cur.key, name = G.cur.name, how = G.cur.how, label = G.cur.label, speed = G.cur.layer_speed, frame = G.cur.frame, end_frame = G.cur.end_frame } or nil,
+        counts = G.n, clips_found = found, clips_listed = #G.names, clip_names = G.names, their_pairs_not_in_my_banks = G.missing, lines = G.lines,
+        small_action = { about = "10.10: the 'act' event: a small action of their Ethan (touching a door, the codex ...) plays on a second layer with their joint mask and blend mode, over the walk",
+            on = CFG.mbank.act_on, theirs_now = CFG.mbank.act_remote, playing = rec and rec.act_key or nil, last = G.act_text, not_played = G.act_failed,
+            second = { theirs_now = CFG.mbank.act2_remote, playing = rec and rec.act2_key or nil, last = G.act2_text, not_played = G.act2_failed },
+            their_block_by_the_arms = { about = "10.14: their block plays on the small-action layer with their mask (the legs keep walking) when it can; the whole-body clip is the fallback", on = G.ARMS_GUARD, times = G.n.arms_guard or 0 } } }
 end
 
 ----------------------------------------------------------------------------------------------
@@ -16845,6 +23942,7 @@ function CFG.story.handle_local(e, now)
     end
     S.event("me", e.id, px, py, pz, e.ex, e.ey, e.ez)
     local who = state.remote_name or CFG.DEFAULT_NAME
+    pcall(S.mark_sender, e.id, now) -- (10.13) its markers: kept for the file, and told to the other player first
     if peer_present(now) then
         -- (9.33) a trailing "|w" says the cutscene is set to WATCH ONLY here (an older script reads the first six numbers and ignores the rest)
         net_send(S.MSG, string.format("%s|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f%s", e.id, px, py, pz, e.ex or px, e.ey or py, e.ez or pz, S.watch[e.id] and "|w" or ""))
@@ -16988,7 +24086,6 @@ function CFG.story.update(now)
         S.queue = {}
         for _, e in ipairs(q) do
             S.last_event_at = now -- (9.32: any event starting here, the game's own or one played for the other player)
-            if CFG.cs then pcall(CFG.cs.on_event, e, now) end
             local ok, err = pcall(S.handle_local, e, now)
             if not ok then say("story: error handling a cutscene start: " .. tostring(err)) end
         end
@@ -16998,6 +24095,7 @@ function CFG.story.update(now)
         pcall(S.force_after_settle, now)
     end
     pcall(S.force_tick, now)
+    if next(S.mark.waiting) ~= nil then pcall(S.mark_tick, now) end
 end
 
 net_on(CFG.story.MSG, function(payload) CFG.story.receive(payload, false) end)
@@ -17012,7 +24110,8 @@ function CFG.story.report()
         seen_in_game = S.seen, sent = S.sent, received = S.received, ignored_while_off = S.ignored, repeats = S.repeats,
         rate_limited = S.rate_limited, bad_id = S.bad_id, moved = S.moved, put_back = S.put_back,
         id_read_from_argument = S.static and 2 or 3, method_is_static = S.static, other_slot_used = S.slot_fallbacks, rejected_ids = S.rejected,
-        not_moved = S.skip_total, not_moved_because = S.skipped, last_settle = S.last_settle, recent_events = ev, force = S.force_report() }
+        not_moved = S.skip_total, not_moved_because = S.skipped, last_settle = S.last_settle, recent_events = ev, force = S.force_report(),
+        markers = S.mark_report and S.mark_report() or nil }
 end
 
 ----------------------------------------------------------------------------------------------
@@ -17134,13 +24233,15 @@ function CFG.story.call_request(id, xf)
     error(tostring(ret2))
 end
 
-function CFG.story.force_do(id, ex, ey, ez, who)
+function CFG.story.force_do(id, ex, ey, ez, who, gated)
     local S = CFG.story
     local now = os.clock()
     local why = S.force_blockers(now)
     if why then return S.force_skip(why, id) end
     local player = player_object()
     if not player then return S.force_skip("player object not found", id) end
+    -- (10.13) the markers the other game has for this cutscene must be here too (the area loads after a move): wait for them, a few seconds at most
+    if not gated and S.mark_gate(id, ex, ey, ez, who) == "wait" then return end
     local xf, how = S.anchor_at(ex, ey, ez)
     local anchor = "an object of mine at the event's place"
     if not xf then
@@ -17203,6 +24304,2978 @@ function CFG.story.force_tick(now)
     if S.standing and S.standing_at and now - S.standing_at >= S.FORCE_VERIFY_S then S.force_clear("ran fine for " .. S.FORCE_VERIFY_S .. " s") end
 end
 
+----------------------------------------------------------------------------------------------
+-- Cutscene MARKERS (10.13). A cutscene puts its actors where the scene's own markers are: "Pos_<cutscene>_<actor>" objects, for instance
+-- Pos_c01e00_30_em2000 for Mia in the basement (the free camera lists them with the trigger boxes). They are fixed parts of the area, so both games
+-- have them at the same place and there is nothing to send about WHERE they are: what can differ is whether the area (and so its markers) is
+-- loaded in this game when a cutscene is played here for the other player. So:
+--   * when a cutscene starts here, the markers with its name are looked up in the scene and their actors and places are told to the other player
+--     (kind 15, before the cutscene message itself);
+--   * before FORCE plays it in this game, the markers the other player named are looked for here; if some are missing the play waits for them to
+--     appear (the area loads after the move; WAIT_S at most), then plays anyway and says so in the file;
+--   * the debug file's `cutscenes.markers` lists, per cutscene, what each side found, what was missing or moved, and how the wait ended; and the
+--     button in the story panel lists EVERY "Pos_" object of the scene with its place (stand in the room first).
+-- The scan walks the scene's transforms (about 20 000 at most, 0.25 s at most); it runs once per cutscene (cached 20 s).
+----------------------------------------------------------------------------------------------
+CFG.story.mark = {
+    MSG = 15, on = true, MAX = 8, SEND_MAX = 5, NODES = 20000, BUDGET_S = 0.25, CACHE_S = 20, WAIT_S = 6, WAIT_EVERY = 1, TOL = 1.5, MAX_RECORDS = 12,
+    cache = {}, theirs = {}, records = {}, order = {}, waiting = {},
+    scans = 0, scan_s = 0, scan_slow = 0, sent = 0, received = 0, waits = 0, played_without = 0, errors = 0, last_error = nil,
+    all = nil,
+}
+
+-- Walks the scene's transforms and collects the GameObjects whose name `match(name)` accepts: { name, x, y, z } ..., and how the walk went.
+function CFG.story.mark_walk(match, max_items)
+    local M = CFG.story.mark
+    local scene = scene_object()
+    if not scene then return nil, { err = "no scene" } end
+    local list, nodes, partial, err = {}, 0, false, nil
+    local t0 = os.clock()
+    local function walk(xf, depth)
+        while xf do
+            nodes = nodes + 1
+            if nodes > M.NODES then partial = true return true end
+            if nodes % 256 == 0 and os.clock() - t0 > M.BUDGET_S then partial = true return true end
+            local okg, go = pcall(function() return xf:call("get_GameObject") end)
+            if okg and go then
+                local okn, name = pcall(function() return as_text(go:call("get_Name")) end)
+                if okn and type(name) == "string" and match(name) then
+                    local x, y, z
+                    pcall(function() local p = xf:call("get_Position"); x, y, z = p.x, p.y, p.z end)
+                    list[#list + 1] = { name = name, x = x, y = y, z = z }
+                    if #list >= max_items then return true end
+                end
+            end
+            if depth < 16 then
+                local child = xf:call("get_Child")
+                if child and walk(child, depth + 1) then return true end
+            end
+            xf = xf:call("get_Next")
+        end
+        return false
+    end
+    local ok, e = pcall(function() walk(scene:call("get_FirstTransform"), 0) end)
+    if not ok then err = tostring(e):sub(1, 80) end
+    local secs = os.clock() - t0
+    M.scans = M.scans + 1
+    M.scan_s = M.scan_s + secs
+    if secs > 0.1 then M.scan_slow = M.scan_slow + 1 end
+    if err then M.errors, M.last_error = M.errors + 1, err end
+    return list, { nodes = nodes, partial = partial, secs = secs, err = err }
+end
+
+-- The markers of cutscene `id` in this game: { list = { { suffix, x, y, z, name } }, info = walk info }, cached for CACHE_S seconds in the same scene.
+function CFG.story.mark_scan(id, fresh)
+    local S = CFG.story
+    local M = S.mark
+    local now = os.clock()
+    local okk, key = pcall(CFG.body.scene_key)
+    key = okk and key or nil
+    local c = M.cache[id]
+    if c and not fresh and c.scene == key and now - c.at < M.CACHE_S then return c end
+    local want = "pos_" .. tostring(id):lower()
+    local found, info = S.mark_walk(function(name)
+        local low = name:lower()
+        return low:sub(1, #want) == want and (#low == #want or low:sub(#want + 1, #want + 1) == "_")
+    end, M.MAX)
+    c = { at = now, scene = key, list = {}, info = info }
+    for _, f in ipairs(found or {}) do
+        c.list[#c.list + 1] = { suffix = f.name:sub(#want + 2), x = f.x, y = f.y, z = f.z, name = f.name }
+    end
+    M.cache[id] = c
+    return c
+end
+
+-- What is kept per cutscene for the debug file (the newest MAX_RECORDS).
+function CFG.story.mark_record(id)
+    local M = CFG.story.mark
+    local r = M.records[id]
+    if r then return r end
+    r = { id = id, at = os.time() }
+    M.records[id] = r
+    M.order[#M.order + 1] = id
+    while #M.order > M.MAX_RECORDS do
+        local old = table.remove(M.order, 1)
+        M.records[old] = nil
+    end
+    return r
+end
+
+function CFG.story.mark_short(list)
+    local out = {}
+    for i, m in ipairs(list or {}) do
+        if i > 8 then break end
+        out[#out + 1] = { actor = m.suffix ~= "" and m.suffix or "-", x = m.x and math.floor(m.x * 10 + 0.5) / 10, y = m.y and math.floor(m.y * 10 + 0.5) / 10,
+            z = m.z and math.floor(m.z * 10 + 0.5) / 10 }
+    end
+    return out
+end
+
+-- Which of `theirs` ({ suffix, x, y, z }) are not here at all, and which are here but more than TOL metres from where they are there.
+function CFG.story.mark_compare(theirs, mine)
+    local M = CFG.story.mark
+    local missing, moved = {}, {}
+    for _, t in ipairs(theirs or {}) do
+        local hit
+        for _, m in ipairs(mine or {}) do
+            if m.suffix:lower() == t.suffix:lower() then hit = m break end
+        end
+        if not hit then
+            missing[#missing + 1] = t.suffix ~= "" and t.suffix or "-"
+        elseif hit.x and t.x then
+            local d = math.sqrt((hit.x - t.x) ^ 2 + (hit.y - t.y) ^ 2 + (hit.z - t.z) ^ 2)
+            if d == d and d > M.TOL then moved[#moved + 1] = { actor = t.suffix ~= "" and t.suffix or "-", metres = math.floor(d * 10 + 0.5) / 10 } end
+        end
+    end
+    return missing, moved
+end
+
+-- A cutscene started HERE (called by handle_local before the cutscene message goes out): look for its markers, keep them for the file, tell the other player.
+function CFG.story.mark_sender(id, now)
+    local S = CFG.story
+    local M = S.mark
+    if not M.on then return end
+    local c = S.mark_scan(id)
+    local r = S.mark_record(id)
+    r.mine, r.mine_n, r.mine_scan = CFG.story.mark_short(c.list), #c.list, { nodes = c.info.nodes, secs = c.info.secs and math.floor(c.info.secs * 1000) / 1000, partial = c.info.partial, err = c.info.err }
+    if not peer_present(now) then return end
+    local parts = { id, tostring(#c.list) }
+    for i, m in ipairs(c.list) do
+        if i > M.SEND_MAX then break end
+        parts[#parts + 1] = string.format("%s@%.1f,%.1f,%.1f", m.suffix ~= "" and m.suffix or "-", m.x or 0, m.y or 0, m.z or 0)
+    end
+    net_send(M.MSG, table.concat(parts, "|"))
+    M.sent = M.sent + 1
+end
+
+-- The other player's markers for a cutscene.
+function CFG.story.mark_receive(payload)
+    local S = CFG.story
+    local M = S.mark
+    local id, n, rest = tostring(payload):match("^([%w_]+)|(%d+)|?(.*)$")
+    n = tonumber(n)
+    if not (id and #id <= 40 and n and n <= 99) then return end
+    local list = {}
+    for item in tostring(rest):gmatch("[^|]+") do
+        local sfx, a, b, c = item:match("^([^@|]*)@(-?[%d%.]+),(-?[%d%.]+),(-?[%d%.]+)$")
+        local x, y, z = tonumber(a), tonumber(b), tonumber(c)
+        if sfx and x and y and z and #list < 8 then list[#list + 1] = { suffix = sfx == "-" and "" or sfx, x = x, y = y, z = z } end
+    end
+    M.theirs[id] = { at = os.clock(), n = n, list = list }
+    M.received = M.received + 1
+    local r = S.mark_record(id)
+    r.theirs, r.theirs_n = CFG.story.mark_short(list), n
+end
+
+-- FORCE is about to play `id` here. "go" = play now; "wait" = some of the markers the other game has are not here yet: mark_tick plays it later.
+function CFG.story.mark_gate(id, ex, ey, ez, who)
+    local S = CFG.story
+    local M = S.mark
+    if not M.on then return "go" end
+    if M.waiting[id] then return "wait" end
+    local now = os.clock()
+    local r = S.mark_record(id)
+    local th = M.theirs[id]
+    if not th or now - th.at > 120 then
+        r.result = "no marker list came from the other player: played without a check"
+        return "go"
+    end
+    if #th.list == 0 then
+        r.result = th.n == 0 and "the other game found no markers for it: nothing to check" or "no marker places came: played without a check"
+        return "go"
+    end
+    local c = S.mark_scan(id, true)
+    local missing, moved = S.mark_compare(th.list, c.list)
+    r.here, r.here_n, r.missing, r.moved = CFG.story.mark_short(c.list), #c.list, missing, moved
+    if #missing == 0 then
+        r.result = string.format("all %d marker(s) are here%s", #th.list, #moved > 0 and (" (" .. #moved .. " not at the same place)") or "")
+        return "go"
+    end
+    M.waiting[id] = { since = now, next = now + M.WAIT_EVERY, ex = ex, ey = ey, ez = ez, who = who }
+    M.waits = M.waits + 1
+    r.result = "waiting for the area: " .. table.concat(missing, ", ") .. " not here yet"
+    S.note(string.format("%s: %d of %s's %d marker(s) are not in this game yet (%s): waiting up to %d s for the area before playing it", id, #missing, who, #th.list,
+        table.concat(missing, ", "), M.WAIT_S))
+    return "wait"
+end
+
+-- Once a second while a play waits for its markers.
+function CFG.story.mark_tick(now)
+    local S = CFG.story
+    local M = S.mark
+    for id, w in pairs(M.waiting) do
+        if now >= w.next then
+            w.next = now + M.WAIT_EVERY
+            local th = M.theirs[id]
+            local c = S.mark_scan(id, true)
+            local missing = S.mark_compare(th and th.list or {}, c.list)
+            local r = S.mark_record(id)
+            if #missing == 0 or now - w.since >= M.WAIT_S then
+                M.waiting[id] = nil
+                r.waited_s = math.floor((now - w.since) * 10 + 0.5) / 10
+                r.here, r.here_n, r.missing = CFG.story.mark_short(c.list), #c.list, missing
+                if #missing == 0 then
+                    r.result = string.format("the markers were here after waiting %.1f s", now - w.since)
+                else
+                    M.played_without = M.played_without + 1
+                    r.result = string.format("played anyway: %s still missing after %d s", table.concat(missing, ", "), M.WAIT_S)
+                end
+                S.note(string.format("%s: %s", id, r.result))
+                S.force_do(id, w.ex, w.ey, w.ez, w.who, true)
+            end
+        end
+    end
+end
+
+-- The panel's button: every "Pos_" object of the scene with its place, for the debug file (stand in the room whose markers you want to see).
+function CFG.story.mark_scan_all()
+    local S = CFG.story
+    local M = S.mark
+    local found, info = S.mark_walk(function(name) return name:sub(1, 4):lower() == "pos_" end, 80)
+    local px, py, pz
+    local player = player_object()
+    if player then px, py, pz = give.player_pose(player) end
+    if not found then
+        S.note("marker scan failed: " .. tostring(info and info.err))
+        return
+    end
+    local out = {}
+    for _, f in ipairs(found) do
+        out[#out + 1] = { name = f.name, x = f.x and math.floor(f.x * 10 + 0.5) / 10, y = f.y and math.floor(f.y * 10 + 0.5) / 10, z = f.z and math.floor(f.z * 10 + 0.5) / 10 }
+    end
+    local okk, key = pcall(CFG.body.scene_key)
+    M.all = { count = #out, list = out, scene = okk and key or nil, nodes = info.nodes, partial = info.partial, secs = info.secs and math.floor(info.secs * 1000) / 1000,
+        me = px and { x = math.floor(px * 10 + 0.5) / 10, y = math.floor(py * 10 + 0.5) / 10, z = math.floor(pz * 10 + 0.5) / 10 } or nil, at = os.time() }
+    S.note(string.format("found %d Pos_ marker(s) in the scene (%d objects looked at%s): they are in the debug file", #out, info.nodes or 0, info.partial and ", the walk stopped early" or ""))
+end
+
+function CFG.story.mark_report()
+    local M = CFG.story.mark
+    local recs, waiting = {}, {}
+    for _, id in ipairs(M.order) do recs[#recs + 1] = M.records[id] end
+    for id in pairs(M.waiting) do waiting[#waiting + 1] = id end
+    table.sort(waiting)
+    return { on = M.on, scans = M.scans, scan_seconds_total = math.floor(M.scan_s * 1000) / 1000, slow_scans = M.scan_slow, sent = M.sent, received = M.received,
+        waits = M.waits, played_without_markers = M.played_without, waiting_for = waiting, errors = M.errors, last_error = M.last_error,
+        per_cutscene = recs, all_pos_markers = M.all }
+end
+
+net_on(CFG.story.mark.MSG, function(payload) CFG.story.mark_receive(payload) end)
+
+----------------------------------------------------------------------------------------------
+-- (10.18) STORY POINTS. Your idea: the game numbers the parts of the story, so match the numbers and a gimmick can no longer wait for a step the other player never reached.
+-- What the notes of both mods say (NOTHING here has been seen in this script's own game session; the first files will tell):
+--   * app.GameFlowFsmManager (a singleton) holds Flows: the story parts, keyed by a uint32 (the murmur hash of "<part>_Main": c01_Main 46ba27ae, c03_1_Main 9fb77189,
+--     c03_2_Main 2c60d2ac). Each is an app.GameFlowActiveControl on an object such as "c03_2_MainFlow", whose states are numbered steps (0 100 200 400 500 600 700 ...)
+--     with a FlowEndNo (800 for c03_2).
+--   * getProgressiveNo(hash) is the step a part is at. setProgressiveNo / jumpProgressiveNo only WRITE the number (the other mod: 30 s of play after
+--     jumpProgressiveNo(9fb77189, 500) showed no new objective, event or world change). GameFlowActiveControl.sendNo(n) RUNS the step (sendNo(600) set the number, played
+--     c03e22_00 and ticked an objective off).
+--   * the triggers in the level carry a step in their name (300_Main_GoDownUnderFloor, 500_Event_JackDaveCrestEventStart, 700_c03_objective_2JackBattle_AreaOut ...). My
+--     reading, not confirmed: such a trigger only acts when its part is at that step, so a game that is behind never fires it.
+-- PART 1, the probe (CFG.flow; READS ONLY; on at every start, a box turns it off): every second (every 5 s alone) it reads every flow's number, writes down the game's own
+--   types for it once (re7mp/flow_probe.json: app.GameFlowFsmManager, app.GameFlowActiveControl, the type the number comes in), finds each active flow's steps (hasState),
+--   tells the other player the changes (message 18: "n|chapter|hash|number|before" when a number rose, "r|..." when it fell, "s|chapter|hash:number,..." as a summary every
+--   10 s) and shows both players' numbers side by side. The debug file's health.flow says what could and could not be read, and how.
+-- PART 2, matching (CFG.match; EXPERIMENTAL; off at every start, not remembered): a part of mine that is BEHIND the other player's is taken forward, never back, one step at a
+--   time through the game's own sendNo (the steps the other player went through, else the part's own steps, else the number itself), 1.5 s apart, only in a quiet moment
+--   (not loading, no cutscene or event, not down, no menu open, not just after FORCE played a cutscene), each step checked 1.2 s later. A game that did not take a step is
+--   asked once more; then the part is left alone ("stuck"), or, with the second box, only the number is written (setProgressiveNo: it skips what the step would do). A
+--   number that FELL here (a checkpoint reload, a restart) is not pulled forward again until the other player's number moves. "Catch up once" does one pass at any time.
+----------------------------------------------------------------------------------------------
+CFG.flow = {
+    MSG = 18,
+    on = true,                              -- the probe (reads only); not remembered
+    EVERY = 1.0, IDLE_EVERY = 5.0, SUMMARY_EVERY = 10, MAX_FLOWS = 40, MAX_SUMMARY = 12, MAX_SEQ = 24, SENDS_PER_MIN = 30,
+    STATE_MAX = 6000, STATE_STEP = 5, STATE_BUDGET = 40, SAVE_EVERY = 60,
+    flows = {},                             -- hash (number) -> { key, name, ctrl, num, prev, src, changed_at, end_no, states, scan }
+    peer = {},                              -- hash -> { num, ch, at }
+    seq = {},                               -- hash -> the numbers the other player went through, in order (ascending)
+    armed = {},                             -- hash -> false while a fall here is waiting for the other player's number to move
+    read_at = -100, summary_at = -100, save_at = -100, first_ok = false,
+    how_num = nil, how_var = nil, how_has = nil, var_type = nil, dumps = nil,
+    status = "not read yet", last_error = nil, mine_ch = nil,
+    sends = {}, lines = {}, want_states = {},
+    n = { reads = 0, read_ok = 0, read_failed = 0, no_manager = 0, no_flows = 0, number_unreadable = 0, changes = 0, rises = 0, falls = 0, sent_change = 0, sent_rewind = 0,
+        sent_summary = 0, rate_limited = 0, received = 0, bad_message = 0, state_calls = 0, states_found = 0, saves = 0, loading_skipped = 0 },
+}
+
+do
+local F = CFG.flow
+
+local function hex(k)
+    local i = math.tointeger(k) or math.tointeger(math.floor(tonumber(k) or 0)) or 0
+    return string.format("%08x", i & 0xFFFFFFFF)
+end
+F.hex = hex
+
+function F.note(text)
+    F.lines[#F.lines + 1] = string.format("%.1f %s", os.clock(), text)
+    while #F.lines > 30 do table.remove(F.lines, 1) end
+    if #F.lines <= 30 or F.n.changes <= 60 then say("story points: " .. text) end
+end
+
+function F.mgr()
+    local ok, m = pcall(sdk.get_managed_singleton, "app.GameFlowFsmManager")
+    if ok and m ~= nil then return m end
+    return nil
+end
+
+-- The (key, value) pairs of a managed Dictionary, through its _entries array (free entries have no value). nil plus the reason when it cannot be read.
+function F.entries(dict)
+    if dict == nil then return nil, "the manager has no Flows" end
+    local oka, arr = pcall(function() return dict:get_field("_entries") end)
+    if not oka or arr == nil then return nil, "Flows has no _entries (" .. tostring(oka and "nil" or arr):sub(1, 50) .. ")" end
+    local items = CFG.mold.items(arr)
+    if items == nil then return nil, "_entries has no readable elements" end
+    local okc, cnt = pcall(function() return dict:get_field("_count") end)
+    local out = {}
+    for i, ent in ipairs(items) do
+        if type(cnt) == "number" and i > cnt then break end
+        local okk, k = pcall(function() return ent:get_field("key") end)
+        local okv, v = pcall(function() return ent:get_field("value") end)
+        if okk and okv and type(k) == "number" and v ~= nil then out[#out + 1] = { key = k, value = v } end
+        if #out >= F.MAX_FLOWS then break end
+    end
+    return out
+end
+
+-- A number out of whatever the game answered (a plain number, or an object such as via.userdata.Variable). Returns the number and how it was read.
+function F.num_of(v)
+    if type(v) == "number" then return v, "plain number" end
+    if v == nil then return nil end
+    -- (10.27) The game answers getProgressiveNo with a via.userdata.Variable, and the 10.26 flow probe listed its methods: get_CastS32 / get_S32 / get_CastU32 / get_U32 / get_CastF32 / get_F32 /
+    -- get_OriginS32 (the "Cast" ones turn whatever kind the variable holds into that number type). None of the names tried before is on it, so in the 10.26 file all 7,871 readings of the five Chapter 3
+    -- flows were "unreadable" and the car module printed "story nil". A step number is a whole number from 0 up; anything else is not taken. The one that worked is tried first the next time.
+    local tried = {}
+    local function try(m)
+        if tried[m] then return nil end
+        tried[m] = true
+        local ok, r = pcall(function() return v:call(m) end)
+        if ok and type(r) == "number" and r == r and r >= 0 and r < 1e7 then return math.floor(r + 0.5), m end
+        return nil
+    end
+    if type(F.how_var) == "string" and F.how_var:find("^get_") then
+        local n, m = try(F.how_var)
+        if n then return n, m end
+    end
+    for _, m in ipairs({ "get_CastS32", "get_S32", "get_CastU32", "get_U32", "get_OriginS32", "get_CastF32", "get_F32" }) do
+        local n, via = try(m)
+        if n then return n, via end
+    end
+    for _, m in ipairs({ "get_Value", "get_Int", "get_Int32", "get_Integer", "get_Number" }) do
+        local ok, r = pcall(function() return v:call(m) end)
+        if ok and type(r) == "number" then return r, m end
+    end
+    for _, f in ipairs({ "_Value", "Value", "_Int", "Int", "mValue", "_value" }) do
+        local ok, r = pcall(function() return v:get_field(f) end)
+        if ok and type(r) == "number" then return r, "field " .. f end
+    end
+    return nil
+end
+
+-- What the number comes in, once (the next build needs it when none of the readers above fits).
+function F.note_var(v)
+    if F.var_type ~= nil then return end
+    local ok, name = pcall(function() return v:get_type_definition():get_full_name() end)
+    F.var_type = ok and tostring(name) or "unknown"
+    local okd, d = pcall(CFG.car.type_dump, F.var_type)
+    F.dumps = F.dumps or {}
+    F.dumps.number_type = okd and d or { type = F.var_type, error = tostring(d):sub(1, 80) }
+end
+
+-- The step a part is at: the manager's getProgressiveNo(hash); only when that cannot be read, the part's own state name (the other mod: it lags the number).
+function F.read_number(mgr, key, ctrl)
+    local sigs = {}
+    if F.how_num then sigs[1] = F.how_num end
+    for _, sig in ipairs({ "getProgressiveNo(System.UInt32)", "getProgressiveNo" }) do
+        if sig ~= F.how_num then sigs[#sigs + 1] = sig end
+    end
+    for _, sig in ipairs(sigs) do
+        local ok, v = pcall(function() return mgr:call(sig, key) end)
+        if ok and v ~= nil then
+            local n, via = F.num_of(v)
+            if n then
+                F.how_num, F.how_var = sig, via
+                return n, sig
+            end
+            pcall(F.note_var, v)
+        end
+    end
+    if ctrl ~= nil then
+        local ok, s = pcall(function() return ctrl:call("getCurrentState", 0) end)
+        local n = ok and tonumber(s) or nil
+        if n then return n, "state name (lags)" end
+    end
+    return nil
+end
+
+function F.name_of(ctrl)
+    local ok, n = pcall(function() return ctrl:call("get_GameObject"):call("get_Name") end)
+    if ok and type(n) == "string" then return n end
+    return nil
+end
+
+function F.end_no_of(ctrl)
+    local ok, v = pcall(function() return ctrl:get_field("FlowEndNo") end)
+    if ok and type(v) == "number" then return v end
+    local ok2, v2 = pcall(function() return ctrl:call("get_FlowEndNo") end)
+    if ok2 and type(v2) == "number" then return v2 end
+    return nil
+end
+
+local HAS = {
+    { "control hasState(number)", function(c, n) return c:call("hasState", n) end },
+    { "control hasState(text)", function(c, n) return c:call("hasState", tostring(n)) end },
+    { "Fsm hasState(number)", function(c, n) return c:get_field("Fsm"):call("hasState", n) end },
+    { "Fsm hasState(text)", function(c, n) return c:get_field("Fsm"):call("hasState", tostring(n)) end },
+}
+
+-- Does the part have a state called n? true / false, or nil when no way of asking works.
+function F.has_state(ctrl, n)
+    F.n.state_calls = F.n.state_calls + 1
+    if F.how_has == false then return nil end
+    if F.how_has then
+        local ok, v = pcall(HAS[F.how_has][2], ctrl, n)
+        if ok and type(v) == "boolean" then return v end
+        return nil
+    end
+    local crumbed = tracer.crumb_idle("flow", "asking a story part for a step (hasState), finding out how")
+    for i, h in ipairs(HAS) do
+        local ok, v = pcall(h[2], ctrl, n)
+        if ok and type(v) == "boolean" then
+            F.how_has = i
+            if crumbed then pcall(tracer.crumb, "clean", "hasState answered") end
+            return v
+        end
+    end
+    if crumbed then pcall(tracer.crumb, "clean", "hasState did not answer") end
+    F.how_has = false
+    F.note("no way of asking a part for its steps worked (hasState): the steps come from the other player's numbers only")
+    return nil
+end
+
+-- Looks for the steps of the flows that want them, at most STATE_BUDGET questions per call. The steps are the multiples of STATE_STEP up to STATE_MAX that the part has.
+function F.scan_states(now)
+    local budget = F.STATE_BUDGET
+    for _, key in ipairs(F.order()) do
+        local r = F.flows[key]
+        if budget <= 0 then return end
+        if r and r.ctrl ~= nil and not r.states_done and (F.want_states[key] or (r.num or 0) > 0) and F.how_has ~= false then
+            r.scan = r.scan or { at = 0, found = {} }
+            local sc = r.scan
+            while budget > 0 and sc.at <= F.STATE_MAX do
+                budget = budget - 1
+                local has = F.has_state(r.ctrl, sc.at)
+                if has == nil then break end
+                if has then sc.found[#sc.found + 1] = sc.at F.n.states_found = F.n.states_found + 1 end
+                sc.at = sc.at + F.STATE_STEP
+            end
+            if sc.at > F.STATE_MAX then
+                r.states, r.states_done = sc.found, true
+                F.note(string.format("%s (%s): %d steps found: %s", hex(key), tostring(r.name), #sc.found, table.concat(sc.found, " "):sub(1, 120)))
+            end
+        end
+    end
+end
+
+-- The hashes in order (a stable order for the panel, the summary and the scans)
+function F.order()
+    local out = {}
+    for k in pairs(F.flows) do out[#out + 1] = k end
+    table.sort(out)
+    return out
+end
+
+function F.chapter()
+    return CFG.door.chapter()
+end
+
+function F.can_send(now)
+    local keep = {}
+    for _, t in ipairs(F.sends) do if now - t < 60 then keep[#keep + 1] = t end end
+    F.sends = keep
+    if #keep >= F.SENDS_PER_MIN then
+        F.n.rate_limited = F.n.rate_limited + 1
+        return false
+    end
+    F.sends[#F.sends + 1] = now
+    return true
+end
+
+function F.send_change(r, now)
+    if not peer_present(now) then return end
+    if not F.can_send(now) then return end
+    if r.prev ~= nil and r.num < r.prev then
+        net_send(F.MSG, string.format("r|%d|%s|%d", F.chapter(), hex(r.key), r.num))
+        F.n.sent_rewind = F.n.sent_rewind + 1
+    else
+        net_send(F.MSG, string.format("n|%d|%s|%d|%d", F.chapter(), hex(r.key), r.num, r.prev or -1))
+        F.n.sent_change = F.n.sent_change + 1
+    end
+end
+
+-- "s|chapter|hash:number,hash:number": the parts that have moved (the most recently changed first), so the other player has the whole picture again after a break
+function F.send_summary(now)
+    local rows = {}
+    for _, key in ipairs(F.order()) do
+        local r = F.flows[key]
+        if r.num ~= nil then rows[#rows + 1] = r end
+    end
+    if #rows == 0 then return end
+    table.sort(rows, function(a, b)
+        if (a.changed_at or -1) ~= (b.changed_at or -1) then return (a.changed_at or -1) > (b.changed_at or -1) end
+        return a.key < b.key
+    end)
+    local parts = {}
+    for i = 1, math.min(#rows, F.MAX_SUMMARY) do parts[#parts + 1] = hex(rows[i].key) .. ":" .. math.floor(rows[i].num) end
+    local text = string.format("s|%d|%s", F.chapter(), table.concat(parts, ","))
+    while #text > 170 and #parts > 1 do
+        table.remove(parts)
+        text = string.format("s|%d|%s", F.chapter(), table.concat(parts, ","))
+    end
+    net_send(F.MSG, text)
+    F.n.sent_summary = F.n.sent_summary + 1
+end
+
+-- A number changed here (read by the probe)
+function F.changed(r, now)
+    F.n.changes = F.n.changes + 1
+    r.changed_at = now
+    if r.num < r.prev then
+        F.n.falls = F.n.falls + 1
+        F.armed[r.key] = false -- (a fall here is a checkpoint or a restart: matching does not pull me forward again until the other player's number moves)
+        F.note(string.format("%s (%s): %d -> %d (it FELL here: matching leaves it until the other player's number moves)", hex(r.key), tostring(r.name), r.prev, r.num))
+    else
+        F.n.rises = F.n.rises + 1
+        F.note(string.format("%s (%s): %d -> %d", hex(r.key), tostring(r.name), r.prev, r.num))
+    end
+    F.send_change(r, now)
+end
+
+-- One pass over every flow
+function F.read(now)
+    F.read_at = now
+    F.n.reads = F.n.reads + 1
+    local crumbed = false -- (the crash crumb is one file write and overwrites a marker another module keeps: only the first three good reads, while the calls are new)
+    local ok, err = pcall(function()
+        local mgr = F.mgr()
+        if mgr == nil then
+            F.n.no_manager = F.n.no_manager + 1
+            F.status = "no app.GameFlowFsmManager (title screen?)"
+            return
+        end
+        if F.n.read_ok < 3 then crumbed = tracer.crumb_idle("flow", "reading the story flows") end
+        local okf, dict = pcall(function() return mgr:get_field("Flows") end)
+        if not okf then dict = nil end
+        local list, why = F.entries(dict)
+        if list == nil then
+            F.n.no_flows = F.n.no_flows + 1
+            F.status = tostring(why)
+            return
+        end
+        local seen = {}
+        for _, ent in ipairs(list) do
+            local key = math.tointeger(ent.key) or math.tointeger(math.floor(ent.key))
+            if key then
+                seen[key] = true
+                local r = F.flows[key]
+                if r == nil then
+                    r = { key = key, ctrl = ent.value }
+                    F.flows[key] = r
+                    r.name = F.name_of(ent.value)
+                    r.end_no = F.end_no_of(ent.value)
+                else
+                    r.ctrl = ent.value -- (the object may have been made again; the name and the end number are read once)
+                    if r.name == nil then r.name = F.name_of(ent.value) end
+                    if r.end_no == nil then r.end_no = F.end_no_of(ent.value) end
+                end
+                local n, src = F.read_number(mgr, key, ent.value)
+                if n == nil then
+                    F.n.number_unreadable = F.n.number_unreadable + 1
+                    r.src = "unreadable"
+                else
+                    r.src = src
+                    if r.num ~= nil and n ~= r.num then
+                        r.prev = r.num
+                        r.num = n
+                        F.changed(r, now)
+                    else
+                        r.num = n
+                    end
+                end
+            end
+        end
+        for key in pairs(F.flows) do
+            if not seen[key] then F.flows[key] = nil end
+        end
+        F.n.read_ok = F.n.read_ok + 1
+        F.mine_ch = F.chapter()
+        local count = 0
+        for _ in pairs(F.flows) do count = count + 1 end
+        F.n.flows_seen = math.max(F.n.flows_seen or 0, count)
+        F.status = string.format("%d flows read (the number via %s)", count, tostring(F.how_num))
+        if not F.dumps or not F.dumps.manager then
+            F.dumps = F.dumps or {}
+            local okd1, d1 = pcall(CFG.car.type_dump, "app.GameFlowFsmManager")
+            local okd2, d2 = pcall(CFG.car.type_dump, "app.GameFlowActiveControl")
+            F.dumps.manager = okd1 and d1 or { type = "app.GameFlowFsmManager", error = tostring(d1):sub(1, 80) }
+            F.dumps.control = okd2 and d2 or { type = "app.GameFlowActiveControl", error = tostring(d2):sub(1, 80) }
+        end
+    end)
+    if crumbed then pcall(tracer.crumb, "clean", "story flows read") end
+    if not ok then
+        F.n.read_failed = F.n.read_failed + 1
+        F.last_error = tostring(err):sub(1, 120)
+        F.status = "the read failed: " .. F.last_error
+    end
+end
+
+function F.save(why)
+    local rows = {}
+    for _, key in ipairs(F.order()) do
+        local r = F.flows[key]
+        rows[#rows + 1] = { hash = hex(key), name = r.name, number = r.num, end_no = r.end_no, read_via = r.src, steps = r.states, steps_done = r.states_done or false }
+    end
+    local peer = {}
+    for key, p in pairs(F.peer) do peer[hex(key)] = { number = p.num, chapter = p.ch, heard_s_ago = math.floor((os.clock() - p.at) * 10) / 10 } end
+    local res = { about = "re7mp 10.18 story flow probe: reads only. Send this file with the debug file.", build = CFG.BUILD, why = why, written_at = os.time(),
+        number_read_via = F.how_num, number_object = F.var_type, number_read_by = F.how_var, steps_asked_via = F.how_has and HAS[F.how_has][1] or F.how_has,
+        types = F.dumps, flows = rows, other_player = peer }
+    local ok, where = CFG.save_json(FILES.MAP.flow_probe[1], FILES.MAP.flow_probe[2], res)
+    F.n.saves = F.n.saves + 1
+    F.save_at = os.clock()
+    if not ok then F.last_error = "could not write the probe file: " .. tostring(where):sub(1, 80) end
+end
+
+-- The other player's message
+function F.receive(payload)
+    local now = os.clock()
+    local kind, rest = tostring(payload):match("^(%a)|(.*)$")
+    if not kind then F.n.bad_message = F.n.bad_message + 1 return end
+    F.n.received = F.n.received + 1
+    if kind == "n" or kind == "r" then
+        local ch, hash, num = rest:match("^(%d+)|(%x+)|(%-?%d+)")
+        local key, number = tonumber(hash or "", 16), tonumber(num or "")
+        if not (ch and key and number) then F.n.bad_message = F.n.bad_message + 1 return end
+        local p = F.peer[key] or {}
+        F.peer[key] = p
+        p.num, p.ch, p.at = number, tonumber(ch), now
+        if kind == "r" then
+            F.seq[key] = {}
+            F.note(string.format("the other player's %s fell to %d", hex(key), number))
+        else
+            local s = F.seq[key] or {}
+            F.seq[key] = s
+            if s[#s] ~= number then s[#s + 1] = number end
+            while #s > F.MAX_SEQ do table.remove(s, 1) end
+            F.armed[key] = nil -- (their number moved: a part that fell here is pulled again)
+        end
+    elseif kind == "s" then
+        local ch, list = rest:match("^(%d+)|(.*)$")
+        if not (ch and list) then F.n.bad_message = F.n.bad_message + 1 return end
+        for hash, num in list:gmatch("(%x+):(%-?%d+)") do
+            local key, number = tonumber(hash, 16), tonumber(num)
+            if key and number then
+                local p = F.peer[key] or {}
+                F.peer[key] = p
+                p.num, p.ch, p.at = number, tonumber(ch), now
+            end
+        end
+    else
+        F.n.bad_message = F.n.bad_message + 1
+    end
+end
+
+-- The rows for the panel and the debug file: { hash, name, mine, theirs, same }
+function F.rows()
+    local out = {}
+    local seen = {}
+    for _, key in ipairs(F.order()) do
+        local r, p = F.flows[key], F.peer[key]
+        seen[key] = true
+        out[#out + 1] = { key = key, hash = hex(key), name = r.name, mine = r.num, theirs = p and p.num or nil, end_no = r.end_no, chapter_theirs = p and p.ch or nil }
+    end
+    local extra = {}
+    for key in pairs(F.peer) do if not seen[key] then extra[#extra + 1] = key end end
+    table.sort(extra)
+    for _, key in ipairs(extra) do out[#out + 1] = { key = key, hash = hex(key), mine = nil, theirs = F.peer[key].num, chapter_theirs = F.peer[key].ch } end
+    return out
+end
+
+function F.update(now)
+    if not F.on then
+        F.status = "off"
+        return
+    end
+    if tracer.flow_suspect then
+        F.on = false
+        F.status = "off: the last session ended inside a story-flow call (tick the box to try again)"
+        return
+    end
+    if CFG.busy and CFG.busy.busy then
+        F.n.loading_skipped = F.n.loading_skipped + 1
+        return
+    end
+    local every = peer_present(now) and F.EVERY or F.IDLE_EVERY
+    if now - F.read_at >= every then
+        F.read(now)
+        if F.n.read_ok > 0 and not F.first_ok then
+            F.first_ok = true
+            F.save("the first read")
+        end
+        pcall(F.scan_states, now)
+    end
+    if peer_present(now) and now - F.summary_at >= F.SUMMARY_EVERY then
+        F.summary_at = now
+        F.send_summary(now)
+    end
+    if F.first_ok and now - F.save_at >= F.SAVE_EVERY then F.save("every minute") end
+end
+
+function F.set_on(v)
+    F.on = v == true
+    if F.on then tracer.flow_suspect = nil end
+    F.status = F.on and "switched on" or "off"
+    if not F.on and CFG.match then CFG.match.on = false end
+end
+
+function F.report()
+    local rows = F.rows()
+    local out = {}
+    for i = 1, math.min(#rows, 30) do
+        local r = rows[i]
+        local fr = F.flows[r.key]
+        out[#out + 1] = { hash = r.hash, part = r.name, mine = r.mine, theirs = r.theirs, their_chapter = r.chapter_theirs, end_no = r.end_no,
+            read_via = fr and fr.src or nil, steps = fr and (fr.states_done and #fr.states or (fr.scan and ("scanning, at " .. fr.scan.at) or nil)) or nil,
+            changed_s_ago = fr and fr.changed_at and math.floor((os.clock() - fr.changed_at) * 10) / 10 or nil }
+    end
+    return { about = "10.18: the game's story flow (numbered steps per story part). Reads only; re7mp/flow_probe.json has the game's types and the steps found.",
+        on = F.on, status = F.status, crash_marker = tracer.flow_suspect or nil, my_chapter = F.mine_ch, number_read_via = F.how_num, number_read_by = F.how_var, number_object = F.var_type,
+        steps_asked_via = F.how_has and HAS[F.how_has][1] or F.how_has, counts = F.n, last_error = F.last_error, flows = out, lines = F.lines }
+end
+
+net_on(F.MSG, function(payload) F.receive(payload) end)
+end -- do
+
+----------------------------------------------------------------------------------------------
+-- PART 2, matching (see the block above). EXPERIMENTAL; off at every start; not remembered.
+----------------------------------------------------------------------------------------------
+CFG.match = {
+    on = false, once = false, write_fallback = false,
+    EVERY = 0.25, STEP_GAP = 1.5, VERIFY_S = 1.2, MAX_TRIES = 2, AFTER_LOAD_S = 8, FORCE_HOLD_S = 30,
+    last_step_at = -100, pending = nil, tries = {}, stuck = {}, loaded_at = -100, was_busy = false, tick_at = -100,
+    blocked = nil, status = "off", last = "nothing yet", lines = {}, history = {},
+    n = { steps = 0, verified = 0, not_taken = 0, written_instead = 0, stuck = 0, held = 0, passes = 0, errors = 0 },
+    held_why = {},
+}
+
+do
+local M, F = CFG.match, CFG.flow
+
+function M.note(text)
+    M.last = text
+    M.lines[#M.lines + 1] = string.format("%.1f %s", os.clock(), text)
+    while #M.lines > 30 do table.remove(M.lines, 1) end
+    say("story points: " .. text)
+end
+
+function M.set_on(v)
+    M.on = v == true
+    if M.on then
+        tracer.flow_suspect = nil
+        if not F.on then F.set_on(true) end
+    end
+    M.status = M.on and "on" or "off"
+    M.note("matching " .. (M.on and "switched on" or "switched off"))
+end
+
+function M.request_once()
+    M.once = true
+    M.stuck = {}
+    M.tries = {}
+    M.note("one catch-up pass asked for")
+end
+
+-- The steps from where this game is to where the other player's part is (ascending): the numbers they went through, else this part's own steps, else the number itself.
+function M.steps_for(r, p, key)
+    local mine, theirs = r.num, p.num
+    local seen = {}
+    local s = F.seq[key]
+    if s then
+        local has_target = false
+        for _, n in ipairs(s) do if n == theirs then has_target = true end end
+        if has_target then
+            for _, n in ipairs(s) do if n > mine and n <= theirs then seen[#seen + 1] = n end end
+        end
+    end
+    local own_known = r.states_done and r.states
+    -- (the numbers the other player went through are the best guide; when that is only the number they are at and this part's own steps are known, those are better)
+    if #seen > 1 or (#seen == 1 and not own_known) then return seen, "the numbers the other player went through" end
+    if own_known then
+        local out = {}
+        for _, n in ipairs(r.states) do
+            if n > mine and n <= theirs and (not r.end_no or n <= r.end_no) then out[#out + 1] = n end
+        end
+        if #out > 0 then return out, "this part's own steps" end
+    end
+    if #seen == 1 then return seen, "the numbers the other player went through" end
+    F.want_states[key] = true -- (find them: the next pass can use them)
+    return { theirs }, "the number itself (steps not known yet)"
+end
+
+-- The next step to take, or nil: { key, r, n, how }
+function M.next_step()
+    local my_ch = F.mine_ch
+    for _, key in ipairs(F.order()) do
+        local r, p = F.flows[key], F.peer[key]
+        if r and p and r.num ~= nil and p.num ~= nil and p.ch == my_ch and p.num > r.num and (F.armed[key] ~= false or M.once) and not M.stuck[key] then
+            if not (r.end_no and r.num >= r.end_no) then
+                local steps, how = M.steps_for(r, p, key)
+                local n = steps[1]
+                if n and n > r.num then return { key = key, r = r, n = n, how = how, target = p.num } end
+            end
+        end
+    end
+    return nil
+end
+
+-- Why now is not the moment (or nil). Not asked while there is nothing to do.
+function M.blockers(now)
+    if tracer.flow_suspect then return "the last session ended inside a story-flow call" end
+    if not F.on then return "the probe is off" end
+    if CFG.carsync and CFG.carsync.claim then return "the garage car fight is on (a story step now would start its scenes in this game)" end -- (10.19)
+    if not peer_present(now) then return "the other player is not here" end
+    if CFG.busy and CFG.busy.busy then return "loading" end
+    if now - M.loaded_at < M.AFTER_LOAD_S then return "a load just ended" end
+    local q = CFG.guard and CFG.guard.why(now)
+    if q then return q end
+    if pstat.downed then return "I am down" end
+    if CFG.menu and CFG.menu.open then return "a game menu is open" end
+    local S = CFG.story
+    if S and now - (S.last_force_at or -1e9) < M.FORCE_HOLD_S then return "FORCE played a cutscene a moment ago" end
+    return nil
+end
+
+-- sendNo(n) on the part's control. Returns true when the call did not throw.
+function M.send_no(r, n)
+    for _, sig in ipairs({ "sendNo(System.Int32)", "sendNo" }) do
+        local ok = pcall(function() return r.ctrl:call(sig, n) end)
+        if ok then return true, sig end
+    end
+    return false
+end
+
+function M.write_number(key, n)
+    local mgr = F.mgr()
+    if mgr == nil then return false end
+    for _, sig in ipairs({ "setProgressiveNo(System.UInt32, System.Int32)", "setProgressiveNo" }) do
+        local ok = pcall(function() return mgr:call(sig, key, n) end)
+        if ok then return true end
+    end
+    return false
+end
+
+function M.apply(step, now)
+    local r, n = step.r, step.n
+    pcall(tracer.crumb, "flow", string.format("sendNo %s %d (the part is at %s)", F.hex(step.key), n, tostring(r.num)))
+    local ok, via = M.send_no(r, n)
+    pcall(tracer.crumb, "clean", "story step sent")
+    M.last_step_at = now
+    if not ok then
+        M.n.errors = M.n.errors + 1
+        M.tries[step.key] = (M.tries[step.key] or 0) + 1
+        M.note(string.format("%s (%s): sendNo(%d) was refused by the game", F.hex(step.key), tostring(r.name), n))
+        return
+    end
+    M.n.steps = M.n.steps + 1
+    M.pending = { key = step.key, n = n, at = now, from = r.num, how = step.how, target = step.target }
+    M.history[#M.history + 1] = { hash = F.hex(step.key), part = r.name, from = r.num, step = n, target = step.target, steps_from = step.how, at_s = math.floor(now * 10) / 10 }
+    while #M.history > 20 do table.remove(M.history, 1) end
+    M.note(string.format("%s (%s): sendNo(%d) (it was at %s, the other player is at %d; steps: %s)", F.hex(step.key), tostring(r.name), n, tostring(r.num), step.target, step.how))
+end
+
+-- A step sent a moment ago: did the part take it?
+function M.verify(now)
+    local pd = M.pending
+    if not pd or now - pd.at < M.VERIFY_S then return end
+    M.pending = nil
+    F.read(now) -- (a fresh reading)
+    local r = F.flows[pd.key]
+    if r and r.num ~= nil and r.num >= pd.n then
+        M.n.verified = M.n.verified + 1
+        M.tries[pd.key] = 0
+        return
+    end
+    M.n.not_taken = M.n.not_taken + 1
+    M.tries[pd.key] = (M.tries[pd.key] or 0) + 1
+    if M.tries[pd.key] >= M.MAX_TRIES then
+        if M.write_fallback and r then
+            pcall(tracer.crumb, "flow", string.format("setProgressiveNo %s %d", F.hex(pd.key), pd.n))
+            local ok = M.write_number(pd.key, pd.n)
+            pcall(tracer.crumb, "clean", "story number written")
+            M.n.written_instead = M.n.written_instead + 1
+            M.tries[pd.key] = 0
+            M.note(string.format("%s: the game did not take step %d twice; only the number was written (%s)", F.hex(pd.key), pd.n, ok and "done" or "refused"))
+        else
+            M.stuck[pd.key] = pd.n
+            M.n.stuck = M.n.stuck + 1
+            M.note(string.format("%s: the game did not take step %d after %d tries; left alone (the box 'only write the number' would write it)", F.hex(pd.key), pd.n, M.MAX_TRIES))
+        end
+    else
+        M.note(string.format("%s: step %d was not taken (the part is at %s); trying once more", F.hex(pd.key), pd.n, tostring(r and r.num)))
+    end
+end
+
+function M.update(now)
+    -- a load: matching waits AFTER_LOAD_S after it
+    local busy = CFG.busy and CFG.busy.busy == true
+    if M.was_busy and not busy then M.loaded_at = now end
+    M.was_busy = busy
+    if not (M.on or M.once) then M.status = "off" return end
+    if now - M.tick_at < M.EVERY then return end
+    M.tick_at = now
+    if M.pending then M.verify(now) return end
+    if now - M.last_step_at < M.STEP_GAP then return end
+    local step = M.next_step()
+    if not step then
+        M.status = M.once and "in step (the catch-up pass is done)" or "in step with the other player"
+        if M.once then M.once = false M.n.passes = M.n.passes + 1 end
+        M.blocked = nil
+        return
+    end
+    local why = M.blockers(now)
+    if why then
+        M.blocked = why
+        M.status = "waiting: " .. why
+        M.held_why[why] = (M.held_why[why] or 0) + 1
+        M.n.held = M.n.held + 1
+        return
+    end
+    M.blocked = nil
+    M.status = string.format("stepping %s to %d", F.hex(step.key), step.n)
+    M.apply(step, now)
+end
+
+function M.report()
+    local stuck = {}
+    for key, n in pairs(M.stuck) do stuck[F.hex(key)] = n end
+    return { about = "10.18: matching the story steps (EXPERIMENTAL, off at every start): a part behind the other player's is taken forward one step at a time through the game's own sendNo; never back.",
+        on = M.on, status = M.status, catch_up_pass_asked = M.once, only_write_the_number_when_ignored = M.write_fallback, waiting_because = M.blocked, counts = M.n, held_because = M.held_why,
+        stuck = stuck, pending = M.pending and { part = F.hex(M.pending.key), step = M.pending.n } or nil, history = M.history, last = M.last, lines = M.lines }
+end
+end -- do
+
+
+----------------------------------------------------------------------------------------------
+-- (10.18) WHO IS THE ENEMY AFTER? Your idea: let the player an enemy goes for run that enemy in their own game, so the game's own logic does the rest (the AI really targets that
+-- player, the hits land in their game, the game's own grabs and downs happen there).
+-- The problem it answers (the other mod's notes, 2026-10-31): an enemy the HOST runs picks its target from its own sensors, and the joiner exists in the host's game only as a ghost
+-- with no status component and no vision beacon: the target was accepted, then cleared within a second, and Jack stood still. So the host's enemies only ever go for the host. The other
+-- mod's answer, which is built here: per-enemy OWNERSHIP, no fake targets.
+-- PART 3a, the targeting log (CFG.tgt; READS ONLY; on at every start, a box turns it off): once a second, for the nearest enemies of this game, who the enemy's AI is targeting
+--   (app.EnemyThinkBase get_Target: me / nobody / someone else), how far it is from me and from the other player, and how often the hand-over below WOULD have chosen the other
+--   player. health.enemy_targets. It shows the data the final rule should be made from.
+-- PART 3b, the hand-over (CFG.own; EXPERIMENTAL; off at every start, not remembered; BOTH players tick it; needs Enemy sync mode 3 on both):
+--   * the HOST decides, every 0.5 s, for each ordinary enemy (a scene object with a name of its own in both games; NOT a boss, NOT a Molded body: those stay with the host):
+--     when the joiner is clearly nearer (MARGIN m closer, within RANGE m) for HOLD_S seconds, and the host's own AI is not on the host at close range, the enemy is OFFERED to the
+--     joiner (message 20 "o|name|x|z"). At most MAX_OWNED at once, no more than one change per enemy in MIN_FLIP_S seconds, never while loading / in a cutscene / just after one /
+--     while either player is down.
+--   * the JOINER checks its own copy (same name, within 8 m of where the host's is, alive, awake), lets it go (its AI components back on; it is no longer put onto the host's enemy),
+--     answers "a|name|ok" (or "a|name|no|why"), and from then on sends that enemy's state to the host 12 times a second through the same file the host's snapshots use (same text,
+--     "T<clock>;name,x,y,z,...": re7mp.exe relays that file in both directions, so nothing in re7mp.exe changes).
+--   * the HOST stops sending that enemy, switches the AI of its own body off (the same components mode 3 "switch off their AI" switches off), puts the body where the joiner's is
+--     (smoothed), and its health follows the joiner's number (the owner's number is the pool). A hit the host lands on that body is sent on ("h|name|amount") and applied to the
+--     joiner's enemy. Known limit: the host's body does not play the joiner's animations (they play on the joiner's copy only).
+--   * back to the host: the host is clearly nearer again, no state for 3 s, the joiner says it lost it ("d|name|why"), the joiner went down or left, a load. The AI of the body is
+--     switched on again ("r|name" tells the joiner to put its copy onto the host's again). After a take-back that enemy stays with the host for 30 s.
+-- UNVERIFIED in the real game (the other mod's first real two-player hand-over failed because the friend's game never had the enemy awake: states went one way only).
+----------------------------------------------------------------------------------------------
+CFG.tgt = {
+    on = true, EVERY = 1.0, MAX_PER_PASS = 10, MAX_NAMES = 30,
+    recs = {}, comps = {}, last_at = -100, status = "not looked yet", last_error = nil,
+    n = { passes = 0, looked = 0, no_think = 0, unreadable = 0, no_player = 0, errors = 0 },
+}
+
+do
+local T = CFG.tgt
+
+function T.positions()
+    local lp = state.local_pos
+    local rp = state.render_pos or (state.remote and state.remote.pos)
+    return lp, rp
+end
+
+function T.dist2d(p, x, z)
+    if not p or type(p.x) ~= "number" or type(p.z) ~= "number" then return nil end
+    return math.sqrt((p.x - x) ^ 2 + (p.z - z) ^ 2)
+end
+
+-- The enemy's think component (app.EnemyThinkBase or an app.Em####Think), found once per object
+function T.think_of(root)
+    local key = root.addr
+    local c = key and T.comps[key]
+    if c ~= nil then return c or nil end
+    c = CFG.molded.find_comp(root.go, "app.EnemyThinkBase", "^app%.Em%d+Think$") or false
+    if key then T.comps[key] = c end
+    return c or nil
+end
+
+-- Who the enemy's AI is going for: "me" / "none" / "other: <name>", or nil plus the reason.
+function T.target_of(root, player)
+    local c = T.think_of(root)
+    if not c then
+        T.n.no_think = T.n.no_think + 1
+        return nil, "no think component"
+    end
+    local ok, tgt = pcall(function() return c:call("get_Target") end)
+    if not ok then ok, tgt = pcall(function() return c:get_field("_Target") end) end
+    if not ok then
+        T.n.unreadable = T.n.unreadable + 1
+        if root.addr then T.comps[root.addr] = nil end
+        return nil, "unreadable"
+    end
+    if tgt == nil then return "none" end
+    if player ~= nil then
+        local oka, ta = pcall(function() return tgt:get_address() end)
+        local okb, pa = pcall(function() return player:get_address() end)
+        if oka and okb and ta == pa then return "me" end
+    end
+    local okn, nm = pcall(function() return tgt:call("get_Name") end)
+    return "other: " .. (okn and tostring(nm):sub(1, 30) or "?")
+end
+
+-- The roots of this game that are live enemies
+function T.roots()
+    local out = {}
+    if state.role == "host" then
+        for _, r in ipairs(enemy.roots) do
+            if (r.last_flags or 1) < 2 then out[#out + 1] = r end
+        end
+    elseif state.role == "join" then
+        for _, r in ipairs(enemy.local_roots or {}) do
+            local e = enemy.remote[r.name]
+            if e and e.alive and not e.inactive then out[#out + 1] = r end
+        end
+    end
+    return out
+end
+
+function T.rec(name)
+    local r = T.recs[name]
+    if r == nil then
+        local n = 0
+        for _ in pairs(T.recs) do n = n + 1 end
+        if n >= T.MAX_NAMES then return nil end
+        r = { reads = 0, me = 0, none = 0, other = 0, unread = 0, nearer_me = 0, nearer_them = 0, near_me = 0, near_them = 0, would_give = 0 }
+        T.recs[name] = r
+    end
+    return r
+end
+
+function T.pass(now)
+    T.last_at = now
+    local lp, rp = T.positions()
+    if not lp or not rp then
+        T.n.no_player = T.n.no_player + 1
+        T.status = "no position of one of the players yet"
+        return
+    end
+    local roots = T.roots()
+    if #roots == 0 then
+        T.status = "no live enemy in this game"
+        return
+    end
+    T.n.passes = T.n.passes + 1
+    local player = player_object()
+    local list = {}
+    for _, r in ipairs(roots) do
+        local okp, p = pcall(function() return r.xf:call("get_Position") end)
+        if okp and p then
+            local dm, dt = T.dist2d(lp, p.x, p.z), T.dist2d(rp, p.x, p.z)
+            if dm and dt then list[#list + 1] = { root = r, dm = dm, dt = dt } end
+        end
+    end
+    table.sort(list, function(a, b) return math.min(a.dm, a.dt) < math.min(b.dm, b.dt) end)
+    -- (one file write each: only the first two passes, while the call is new, and never over a marker another module keeps)
+    local crumb = T.n.passes <= 2 and tracer.crumb_idle("tgt", "reading who the nearest enemies target")
+    local host = state.role == "host"
+    for i = 1, math.min(#list, T.MAX_PER_PASS) do
+        local it = list[i]
+        local rec = T.rec(it.root.name)
+        if rec then
+            T.n.looked = T.n.looked + 1
+            local ok, who, why = pcall(T.target_of, it.root, player)
+            if not ok then
+                T.n.errors = T.n.errors + 1
+                T.last_error = tostring(who):sub(1, 100)
+                who, why = nil, "error"
+            end
+            rec.reads = rec.reads + 1
+            if who == "me" then rec.me = rec.me + 1
+            elseif who == "none" then rec.none = rec.none + 1
+            elseif who then rec.other = rec.other + 1 rec.other_name = who
+            else rec.unread = rec.unread + 1 rec.unread_why = why end
+            if it.dm < it.dt then rec.nearer_me = rec.nearer_me + 1 else rec.nearer_them = rec.nearer_them + 1 end
+            if it.dm <= 8 then rec.near_me = rec.near_me + 1 end
+            if it.dt <= 8 then rec.near_them = rec.near_them + 1 end
+            -- (the hand-over rule, asked from the host's point of view: d_host first. As the joiner the other player is the host.)
+            if CFG.own and CFG.own.would_give(it.root, host and it.dm or it.dt, host and it.dt or it.dm, host and who or nil) then rec.would_give = rec.would_give + 1 end
+            rec.last = who or "?"
+            rec.last_d_me, rec.last_d_them = math.floor(it.dm * 10) / 10, math.floor(it.dt * 10) / 10
+        end
+    end
+    if crumb then pcall(tracer.crumb, "clean", "targets read") end
+    T.status = string.format("%d enemies read (nearest %s)", math.min(#list, T.MAX_PER_PASS), list[1] and list[1].root.name or "-")
+end
+
+function T.update(now)
+    if not T.on then T.status = "off" return end
+    if tracer.tgt_suspect then
+        T.on = false
+        T.status = "off: the last session ended inside a target read (tick the box to try again)"
+        return
+    end
+    if now - T.last_at < T.EVERY then return end
+    if CFG.busy and CFG.busy.busy then return end
+    if state.role ~= "host" and state.role ~= "join" then return end
+    if not peer_present(now) then T.last_at = now T.status = "the other player is not here" return end
+    local ok, err = pcall(T.pass, now)
+    if not ok then
+        T.n.errors = T.n.errors + 1
+        T.last_error = tostring(err):sub(1, 100)
+    end
+end
+
+function T.set_on(v)
+    T.on = v == true
+    if T.on then tracer.tgt_suspect = nil end
+    T.status = T.on and "switched on" or "off"
+end
+
+function T.report()
+    local rows = {}
+    for name, r in pairs(T.recs) do
+        rows[name] = { reads = r.reads, targeting_me = r.me, targeting_nobody = r.none, targeting_someone_else = r.other, other = r.other_name, unreadable = r.unread, why_unreadable = r.unread_why,
+            nearer_me = r.nearer_me, nearer_them = r.nearer_them, within_8m_of_me = r.near_me, within_8m_of_them = r.near_them, hand_over_would_choose_the_joiner = r.would_give,
+            last = r.last, last_m_from_me = r.last_d_me, last_m_from_them = r.last_d_them }
+    end
+    return { about = "10.18: who the enemies of THIS game are targeting (app.EnemyThinkBase get_Target) and how far each is from me and from the other player. Reads only. 'hand_over_would_choose_the_joiner' = passes in which the hand-over rule would have given the enemy to the joiner.",
+        on = T.on, status = T.status, crash_marker = tracer.tgt_suspect or nil, counts = T.n, last_error = T.last_error, enemies = rows }
+end
+end -- do
+
+CFG.own = {
+    MSG = 20,
+    on = false,                              -- the box; not remembered
+    EVERY = 0.5, MARGIN = 3.0, HOLD_S = 1.0, MIN_FLIP_S = 6, MAX_OWNED = 3, RANGE = 30, ENGAGED_NEAR = 6, ACK_S = 3, STALE_S = 3,
+    BAN_AFTER_BACK_S = 30, BAN_AFTER_NO_S = 10, PAUSE_S = 60, STATE_EVERY = 1 / 12, MATCH_M = 8, DEAD_KEEP_S = 7, DEAD_TAKE_S = 6, HIT_RATE = 8, SMOOTH = 12, SNAP_M = 8,
+    peer = {},                               -- HOST: name -> { since, seen_at, root, d = { disabled, moved_at, hx, hy, hz }, hp_last, hp_read_at, dead_at } enemies the joiner runs
+    asked = {},                              -- HOST: name -> when it was offered (waiting for the answer)
+    states = {},                             -- HOST: name -> the joiner's latest state of that enemy
+    mine = {},                               -- JOINER: name -> { since, root, dead_at } enemies I run for the host
+    near_since = {}, flip_at = {}, banned = {}, hit_times = {},
+    seq = 0, last_state_at = -100, decide_at = -100, read_at = -100, read_seq = nil, pause_until = 0, status = "off", last = "nothing yet", lines = {}, last_error = nil,
+    n = { offered = 0, accepted = 0, refused = 0, no_answer = 0, taken_back = 0, lost = 0, died = 0, states_sent = 0, states_read = 0, state_errors = 0, hits_forwarded = 0, hits_applied = 0,
+        hits_failed = 0, hit_rate_limited = 0, ai_off = 0, ai_on = 0, moved = 0, move_errors = 0, skipped_boss = 0, skipped_molded = 0, skipped_duplicate = 0, held_not_quiet = 0, errors = 0 },
+    why_back = {}, why_refused = {},
+}
+
+do
+local O = CFG.own
+
+function O.note(text)
+    O.last = text
+    O.lines[#O.lines + 1] = string.format("%.1f %s", os.clock(), text)
+    while #O.lines > 40 do table.remove(O.lines, 1) end
+    say("enemy hand-over: " .. text)
+end
+
+function O.crumb(text) pcall(tracer.crumb, "own", text) end
+function O.clean() pcall(tracer.crumb, "clean", "enemy hand-over call finished") end
+
+local function count(t)
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
+local function key_of(text) return (tostring(text):gsub("[%d%.]+", "#")) end
+
+-- eligible() without the counters (for the log): an ordinary scene enemy with a name of its own in both games
+function O.eligible_quiet(root)
+    if root.spawn or root.family ~= nil then return false end
+    if CFG.pool and CFG.pool.is_boss(root.name, root.last_max) then return false end
+    return true
+end
+
+-- Is this root an enemy the hand-over may move? Returns true, or false and the reason.
+function O.eligible(root)
+    if root.spawn then O.n.skipped_molded = O.n.skipped_molded + 1 return false, "a Molded body (they stay with the host in this build)" end
+    if root.family ~= nil then O.n.skipped_duplicate = O.n.skipped_duplicate + 1 return false, "its name is shared with another enemy (no id that is the same in both games)" end
+    if CFG.pool and CFG.pool.is_boss(root.name, root.last_max) then O.n.skipped_boss = O.n.skipped_boss + 1 return false, "a boss stays with the host" end
+    return true
+end
+
+-- The rule, written once: should the joiner have this enemy? d_host / d_join: metres from the host's / the joiner's player. `target` is what the host's own AI is going for.
+-- Used by the hand-over and by the targeting log (which counts how often it would say yes).
+function O.would_give(root, d_host, d_join, target)
+    if not d_host or not d_join then return false end
+    if root and not O.eligible_quiet(root) then return false end
+    if d_join > O.RANGE then return false end
+    if d_join + O.MARGIN >= d_host then return false end
+    if target == "me" and d_host <= O.ENGAGED_NEAR then return false end -- (the host's own AI is on the host at close range: it keeps it)
+    return true
+end
+
+-- Why the hand-over cannot decide anything now (nil = it can)
+function O.blockers(now)
+    if tracer.own_suspect then return "the last session ended inside a hand-over" end
+    if state.transport ~= "tcp" then return "needs TCP" end
+    if enemy.mode < 3 then return "needs Enemy sync mode 3" end
+    if not peer_present(now) then return "the other player is not here" end
+    if CFG.busy and CFG.busy.busy then return "loading" end
+    local q = CFG.guard and CFG.guard.why(now)
+    if q then O.n.held_not_quiet = O.n.held_not_quiet + 1 return q end
+    if pstat.downed then return "I am down" end
+    return nil
+end
+
+-- Is this name held back from the host's snapshots? (the joiner runs it)
+function O.holds(name) return O.peer[name] ~= nil end
+
+function O.host_root(name)
+    for _, r in ipairs(enemy.roots) do
+        if r.name == name then return r end
+    end
+    return nil
+end
+
+function O.local_root(name)
+    for _, r in ipairs(enemy.local_roots or {}) do
+        if r.name == name then return r end
+    end
+    return nil
+end
+
+-- metres from me / from the other player to the root (2D), or nil
+function O.dist_of(root)
+    local lp, rp = CFG.tgt.positions()
+    local ok, p = pcall(function() return root.xf:call("get_Position") end)
+    if not ok or not p then return nil end
+    return CFG.tgt.dist2d(lp, p.x, p.z), CFG.tgt.dist2d(rp, p.x, p.z)
+end
+
+----- HOST ---------------------------------------------------------------------------------
+
+function O.give(name, root, now)
+    local okp, p = pcall(function() return root.xf:call("get_Position") end)
+    if not okp or not p then return end
+    local dh, dj = O.dist_of(root)
+    O.asked[name] = now
+    O.flip_at[name] = now
+    O.near_since[name] = nil
+    O.n.offered = O.n.offered + 1
+    net_send(O.MSG, string.format("o|%s|%.2f|%.2f", name, p.x, p.z))
+    O.note(string.format("%s offered to the other player (%.1f m from me, %.1f m from them)", name, dh or -1, dj or -1))
+end
+
+-- The host takes an enemy back (or never gave it): its AI on, its snapshots again, the joiner told. dead: it died, nothing is switched on.
+function O.take_back(name, why, now, silent, dead)
+    local pr = O.peer[name]
+    O.peer[name] = nil
+    O.asked[name] = nil
+    O.states[name] = nil
+    O.near_since[name] = nil
+    O.flip_at[name] = now
+    O.banned[name] = now + O.BAN_AFTER_BACK_S
+    if pr and pr.d and not dead then
+        O.crumb("AI back on: " .. name)
+        for _, comp in ipairs(pr.d.disabled or {}) do
+            if pcall(function() comp:call("set_Enabled", true) end) then O.n.ai_on = O.n.ai_on + 1 end
+        end
+        O.clean()
+    end
+    O.n.taken_back = O.n.taken_back + 1
+    local k = key_of(why)
+    O.why_back[k] = (O.why_back[k] or 0) + 1
+    if not silent then net_send(O.MSG, "r|" .. name) end
+    O.note(string.format("%s is back with me (%s)", name, why))
+end
+
+-- The joiner's answer
+function O.on_answer(rest, now)
+    if state.role ~= "host" then return end
+    local name, what, why = rest:match("^([%w_]+)|(%a+)|?(.*)$")
+    if not name or not O.asked[name] then return end
+    O.asked[name] = nil
+    if what == "ok" then
+        local root = O.host_root(name)
+        if not root then
+            net_send(O.MSG, "r|" .. name)
+            return O.note(name .. ": the joiner took it but it is gone here")
+        end
+        local skip = nil
+        local okf, f = pcall(json.load_file, FILES.STATE_IN_FILE)
+        if okf and type(f) == "table" then skip = f.seq end -- (what is in the file now is old: only a newer one counts)
+        O.crumb("AI off: " .. name)
+        local disabled = enemy.drive_off(root)
+        O.clean()
+        O.n.ai_off = O.n.ai_off + #disabled
+        O.peer[name] = { since = now, seen_at = now, root = root, skip_seq = skip, d = { disabled = disabled } }
+        O.n.accepted = O.n.accepted + 1
+        O.note(string.format("%s: the joiner runs it now (%d AI components off here; my body follows theirs)", name, #disabled))
+    else
+        O.n.refused = O.n.refused + 1
+        O.banned[name] = now + O.BAN_AFTER_NO_S
+        local k = key_of(why)
+        O.why_refused[k] = (O.why_refused[k] or 0) + 1
+        if tostring(why):find("my box is off", 1, true) or tostring(why):find("not mode 3", 1, true) then O.pause_until = now + O.PAUSE_S end -- (no point asking again soon)
+        O.note(string.format("%s: the joiner would not take it (%s)", name, tostring(why)))
+    end
+end
+
+-- The joiner lost it, or it died
+function O.on_lost(rest, now)
+    if state.role ~= "host" then return end
+    local name, why = rest:match("^([%w_]+)|?(.*)$")
+    if not name or not O.peer[name] then return end
+    O.n.lost = O.n.lost + 1
+    local died = tostring(why):find("died", 1, true) ~= nil
+    O.take_back(name, "the joiner says: " .. (tostring(why) ~= "" and tostring(why) or "lost it"), now, true, died)
+end
+
+-- HOST, every EVERY seconds: offer ordinary enemies to the joiner when it is clearly nearer, take them back when it is not
+function O.decide(now)
+    O.decide_at = now
+    for name, at in pairs(O.asked) do -- (offers nobody answered)
+        if now - at > O.ACK_S then
+            O.asked[name] = nil
+            O.banned[name] = now + O.BAN_AFTER_NO_S
+            O.n.no_answer = O.n.no_answer + 1
+            net_send(O.MSG, "r|" .. name) -- (in case it was taken after all)
+            O.note(name .. ": the offer was not answered in " .. O.ACK_S .. " s")
+        end
+    end
+    local why = O.blockers(now)
+    local joiner_down = pstat.remote and pstat.remote.downed
+    if why or joiner_down then
+        O.status = why and ("waiting: " .. why) or "waiting: the other player is down"
+        -- what the joiner runs is taken back only when it cannot run it any more; a cutscene or a quiet-check hold only pauses new offers
+        local hard = joiner_down or why == "the other player is not here" or why == "needs TCP" or why == "needs Enemy sync mode 3" or why == "loading"
+            or why == "the last session ended inside a hand-over"
+        if hard then
+            for name in pairs(O.peer) do O.take_back(name, joiner_down and "the other player is down" or why, now) end
+        end
+        return
+    end
+    local lp, rp = CFG.tgt.positions()
+    if not lp or not rp then O.status = "no positions yet" return end
+    local owned = count(O.peer) + count(O.asked)
+    local seen = {}
+    for _, root in ipairs(enemy.roots) do
+        local name = root.name
+        seen[name] = true
+        local dh, dj = O.dist_of(root)
+        if dh and dj and (O.peer[name] or (root.last_flags or 1) < 2) then
+            if O.peer[name] then
+                if dh + O.MARGIN < dj then
+                    O.near_since[name] = O.near_since[name] or now
+                    if now - O.near_since[name] >= O.HOLD_S then O.take_back(name, string.format("it is nearer me now (%.1f m, the joiner %.1f m)", dh, dj), now) end
+                else
+                    O.near_since[name] = nil
+                end
+            elseif not O.asked[name] and O.eligible(root) then
+                local tr = CFG.tgt.recs[name]
+                if O.would_give(root, dh, dj, tr and tr.last or nil) then
+                    O.near_since[name] = O.near_since[name] or now
+                    if now - O.near_since[name] >= O.HOLD_S and now - (O.flip_at[name] or -100) >= O.MIN_FLIP_S and now >= (O.banned[name] or 0) and now >= O.pause_until
+                        and owned < O.MAX_OWNED then
+                        O.give(name, root, now)
+                        owned = owned + 1
+                    end
+                else
+                    O.near_since[name] = nil
+                end
+            end
+        end
+    end
+    for name in pairs(O.peer) do -- (gone from my scene: a change of scene, removed after its death)
+        if not seen[name] then O.take_back(name, "it is gone from my scene", now) end
+    end
+    O.status = string.format("deciding: %d run by the joiner, %d offered", count(O.peer), count(O.asked))
+end
+
+-- HOST: read the joiner's states (the same text the host sends; only enemies it runs count)
+function O.read(now)
+    O.read_at = now
+    local d = json.load_file(FILES.STATE_IN_FILE)
+    if type(d) ~= "table" or d.seq == nil or type(d.p) ~= "string" then return end
+    if d.seq == O.read_seq then return end
+    O.read_seq = d.seq
+    for entry in d.p:gmatch("[^;]+") do
+        local f = {}
+        for field in entry:gmatch("[^,]+") do f[#f + 1] = field end
+        local name = f[1]
+        local pr = name and O.peer[name]
+        if pr and #f >= 13 and d.seq ~= pr.skip_seq then
+            local v = {}
+            for i = 2, 14 do v[i] = tonumber(f[i]) end
+            if finite(v[2]) and finite(v[3]) and finite(v[4]) then
+                local s = O.states[name]
+                if not s then
+                    s = { rx = v[2], ry = v[3], rz = v[4] }
+                    O.states[name] = s
+                end
+                s.x, s.y, s.z = v[2], v[3], v[4]
+                s.qx, s.qy, s.qz, s.qw = v[5] or 0, v[6] or 0, v[7] or 0, v[8] or 1
+                local fl = math.floor(v[10] or 1)
+                s.hp, s.alive, s.inactive = v[9] or -1, fl % 2 == 1, fl >= 2
+                s.max = (finite(v[14]) and v[14] > 0) and v[14] or nil
+                s.at = now
+                pr.seen_at = now
+                O.n.states_read = O.n.states_read + 1
+            end
+        end
+    end
+end
+
+-- HOST: the body goes where the joiner's enemy is (smoothed; a jump of more than SNAP_M metres is taken at once)
+function O.move_puppet(pr, s, now, dt)
+    local root = pr.root
+    local a = 1 - math.exp(-O.SMOOTH * dt)
+    local dx, dz = s.x - s.rx, s.z - s.rz
+    if dx * dx + dz * dz > O.SNAP_M ^ 2 then
+        s.rx, s.ry, s.rz = s.x, s.y, s.z
+    else
+        s.rx, s.ry, s.rz = s.rx + dx * a, s.ry + (s.y - s.ry) * a, s.rz + dz * a
+    end
+    local ok, err = pcall(function()
+        root.xf:call("set_Position", Vector3f.new(s.rx, s.ry, s.rz))
+        local f = rotate({ x = s.qx, y = s.qy, z = s.qz, w = s.qw }, { 0, 0, 1 })
+        root.xf:call("set_EulerAngle", Vector3f.new(0, math.atan(f[1], f[3]), 0))
+    end)
+    if ok then
+        O.n.moved = O.n.moved + 1
+        pr.d.moved_at, pr.d.hx, pr.d.hy, pr.d.hz = now, s.rx, s.ry, s.rz
+    else
+        O.n.move_errors = O.n.move_errors + 1
+        O.last_error = "could not move the body: " .. tostring(err):sub(1, 80)
+    end
+    return ok
+end
+
+-- HOST: a drop in the body's health that the pool did not write is a hit the host landed on it: the joiner's enemy takes it too
+function O.watch_hits(name, pr, root, now)
+    local hp = read_health(root)
+    if type(hp) ~= "number" or hp < 0 then return end
+    if pr.hp_last == nil then pr.hp_last, pr.hp_read_at = hp, now return end
+    local drop = pr.hp_last - hp
+    local rec = CFG.pool and CFG.pool.recs[name]
+    local ours = rec and rec.set_at and rec.set_at >= pr.hp_read_at - 0.01
+    local tol = math.max(2, (root.max_val or 1000) * 0.004)
+    if drop >= tol and not ours then
+        for i = #O.hit_times, 1, -1 do if now - O.hit_times[i] > 1 then table.remove(O.hit_times, i) end end
+        if #O.hit_times >= O.HIT_RATE then
+            O.n.hit_rate_limited = O.n.hit_rate_limited + 1
+        else
+            O.hit_times[#O.hit_times + 1] = now
+            net_send(O.MSG, string.format("h|%s|%d", name, math.floor(drop + 0.5)))
+            O.n.hits_forwarded = O.n.hits_forwarded + 1
+        end
+    end
+    pr.hp_last, pr.hp_read_at = hp, now
+end
+
+-- HOST, every frame while the joiner runs any
+function O.host_update(now, dt)
+    if next(O.peer) == nil or state.role ~= "host" then return end
+    if CFG.busy and CFG.busy.busy then return end
+    if now - O.read_at >= 0.05 then O.read(now) end
+    for name, pr in pairs(O.peer) do
+        if now - pr.seen_at > O.STALE_S then
+            O.take_back(name, "no state from the joiner for " .. O.STALE_S .. " s", now)
+        else
+            local root = O.host_root(name)
+            if not root then
+                O.take_back(name, "it is gone from my scene", now)
+            else
+                pr.root = root
+                local s = O.states[name]
+                if s and s.at then
+                    if s.inactive then
+                        O.take_back(name, "the joiner's copy is parked or inactive", now)
+                    elseif s.alive then
+                        pr.dead_at = nil
+                        if O.move_puppet(pr, s, now, dt) then
+                            pcall(CFG.pool.follow, root, s, now) -- (the owner's health is the pool: mine follows it)
+                            O.watch_hits(name, pr, root, now)
+                        end
+                    else
+                        pr.dead_at = pr.dead_at or now
+                        pcall(CFG.pool.finish, root, s, now) -- (their enemy is dead: so is the body here)
+                        if enemy_is_dead(root) then
+                            O.take_back(name, "it died", now, true, true)
+                        elseif now - pr.dead_at > O.DEAD_TAKE_S then
+                            O.take_back(name, "dead on the joiner's side; mine would not die", now, true, true)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+----- JOINER -------------------------------------------------------------------------------
+
+function O.refuse(name, why)
+    O.n.refused = O.n.refused + 1
+    local k = key_of(why)
+    O.why_refused[k] = (O.why_refused[k] or 0) + 1
+    net_send(O.MSG, string.format("a|%s|no|%s", name, why:sub(1, 60)))
+    O.note(string.format("%s: the host offered it; I said no (%s)", name, why))
+end
+
+-- JOINER: the host offers an enemy
+function O.on_give(rest, now)
+    if state.role ~= "join" then return end
+    local name, x, z = rest:match("^([%w_]+)|([%-%d%.]+)|([%-%d%.]+)$")
+    x, z = tonumber(x), tonumber(z)
+    if not (name and x and z) then return end
+    if not O.on then return O.refuse(name, "my box is off") end
+    if tracer.own_suspect then return O.refuse(name, "the last session ended inside a hand-over") end
+    if enemy.mode < 3 then return O.refuse(name, "my enemy sync is not mode 3") end
+    if count(O.mine) >= O.MAX_OWNED then return O.refuse(name, "I run enough already") end
+    if pstat.downed then return O.refuse(name, "I am down") end
+    local q = CFG.guard and CFG.guard.why(now)
+    if q then return O.refuse(name, "not now: " .. q) end
+    local root = O.local_root(name)
+    if not root then return O.refuse(name, "no enemy called " .. name .. " here") end
+    local ok, why = O.eligible(root)
+    if not ok then return O.refuse(name, why) end
+    local okp, p = pcall(function() return root.xf:call("get_Position") end)
+    local d = (okp and p) and CFG.tgt.dist2d(p, x, z) or nil
+    -- (my copy is put onto the host's enemy every frame, so it is where theirs is, give or take the delay)
+    if not d or d > O.MATCH_M then return O.refuse(name, string.format("mine is %s m from where theirs is", d and string.format("%.0f", d) or "?")) end
+    local oks, text = pcall(snapshot_one, root)
+    local f = {}
+    if oks then for field in tostring(text):gmatch("[^,]+") do f[#f + 1] = field end end
+    local flags = tonumber(f[10])
+    if not flags then return O.refuse(name, "mine cannot be read") end
+    if flags >= 2 then return O.refuse(name, "mine is parked or inactive") end
+    if flags % 2 == 0 then return O.refuse(name, "mine is dead") end
+    O.crumb("accepting " .. name)
+    -- let go of my copy: components that were switched off come back, its clips stop, it is no longer put onto the host's enemy
+    local dr = enemy.driven[name]
+    if dr then
+        for _, comp in ipairs(dr.disabled or {}) do pcall(function() comp:call("set_Enabled", true) end) end
+        enemy.driven[name] = nil
+    end
+    if CFG.eanim then pcall(CFG.eanim.release, name, "handed to me") end
+    enemy.remote[name] = nil
+    O.clean()
+    O.mine[name] = { since = now, root = root }
+    O.n.accepted = O.n.accepted + 1
+    net_send(O.MSG, "a|" .. name .. "|ok")
+    O.note(string.format("%s: the host gave it to me; its AI runs here now (it was %.1f m from the host's)", name, d))
+end
+
+-- JOINER: the host took an enemy back
+function O.on_back(rest, now)
+    if state.role ~= "join" then return end
+    local name = rest:match("^([%w_]+)")
+    if not name or not O.mine[name] then return end
+    O.mine[name] = nil
+    O.n.taken_back = O.n.taken_back + 1
+    O.note(name .. ": the host runs it again (mine goes back onto theirs)")
+end
+
+-- JOINER: the host's hit on its body
+function O.on_hit(rest, now)
+    if state.role ~= "join" then return end
+    local name, amount = rest:match("^([%w_]+)|(%d+)$")
+    amount = tonumber(amount)
+    local m = name and O.mine[name]
+    if not (m and amount) then return end
+    amount = math.max(1, math.min(amount, enemy.hit.MAX))
+    O.crumb(string.format("hit %s %d", name, amount))
+    local ok, okc = pcall(enemy.hit.apply, m.root, amount)
+    O.clean()
+    if ok and okc then O.n.hits_applied = O.n.hits_applied + 1 else O.n.hits_failed = O.n.hits_failed + 1 end
+end
+
+-- JOINER, every frame while it runs any: send their states to the host
+function O.joiner_update(now)
+    if next(O.mine) == nil or state.role ~= "join" then return end
+    if CFG.busy and CFG.busy.busy then return end
+    if now - O.last_state_at < O.STATE_EVERY then return end
+    O.last_state_at = now
+    local parts = {}
+    for name, m in pairs(O.mine) do
+        m.root = O.local_root(name) or m.root -- (the records are rebuilt every scan)
+        local ok, text = pcall(snapshot_one, m.root)
+        if not ok then
+            O.mine[name] = nil
+            O.n.lost = O.n.lost + 1
+            net_send(O.MSG, "d|" .. name .. "|gone from my scene")
+            O.note(name .. ": my enemy is gone (" .. tostring(text):sub(1, 50) .. "); the host takes it back")
+        else
+            parts[#parts + 1] = text
+            if enemy_is_dead(m.root) then
+                m.dead_at = m.dead_at or now
+                if now - m.dead_at > O.DEAD_KEEP_S then
+                    O.mine[name] = nil
+                    O.n.died = O.n.died + 1
+                    net_send(O.MSG, "d|" .. name .. "|it died here")
+                    O.note(name .. ": it died here")
+                end
+            end
+        end
+    end
+    if CFG.carsync then -- (10.19) the garage car's line (and Jack) when this joiner runs the car
+        local okx, ex = pcall(CFG.carsync.extra_parts, now)
+        if okx and ex then for i = #ex, 1, -1 do table.insert(parts, 1, ex[i]) end end
+    end
+    if #parts == 0 then return end
+    O.seq = O.seq + 1
+    O.n.states_sent = O.n.states_sent + 1
+    local okw = pcall(json.dump_file, FILES.STATE_OUT_FILE, { seq = O.seq, p = string.format("T%.3f;", now) .. table.concat(parts, ";") })
+    if not okw then O.n.state_errors = O.n.state_errors + 1 end
+end
+
+-- Everything back where it was: the host runs all of them, the joiner's copies are put onto the host's again
+function O.release_all(why)
+    local now = os.clock()
+    for name in pairs(O.peer) do O.take_back(name, why, now) end
+    for name in pairs(O.asked) do
+        O.asked[name] = nil
+        net_send(O.MSG, "r|" .. name)
+    end
+    for name in pairs(O.mine) do
+        O.mine[name] = nil
+        net_send(O.MSG, "d|" .. name .. "|" .. why)
+        O.note(name .. ": let go (" .. why .. ")")
+    end
+end
+
+function O.update(now, dt)
+    if tracer.own_suspect and O.on then
+        O.on = false
+        O.status = "off: the last session ended inside a hand-over (tick the box to try again)"
+    end
+    local role = state.role
+    -- what is held while the box is off, the role changed or the link is gone goes back at once
+    if next(O.peer) or next(O.asked) then
+        if not O.on or role ~= "host" or state.transport ~= "tcp" then O.release_all(not O.on and "the box was switched off" or "no longer the host") end
+    end
+    if next(O.mine) then
+        if not O.on or role ~= "join" then
+            O.release_all(not O.on and "the box was switched off" or "no longer the joiner")
+        elseif pstat.downed then
+            O.release_all("I am down")
+        elseif enemy.mode < 3 or now - enemy.remote_at > O.STALE_S or not peer_present(now) then
+            O.release_all("no enemy data from the host")
+        end
+    end
+    if not O.on then O.status = "off" return end
+    if role == "host" then
+        if now - O.decide_at >= O.EVERY then
+            local ok, err = pcall(O.decide, now)
+            if not ok then O.n.errors = O.n.errors + 1 O.last_error = tostring(err):sub(1, 100) O.status = "error: " .. tostring(err):sub(1, 80) end
+        end
+        local ok, err = pcall(O.host_update, now, dt)
+        if not ok then O.n.errors = O.n.errors + 1 O.last_error = tostring(err):sub(1, 100) end
+    elseif role == "join" then
+        local ok, err = pcall(O.joiner_update, now)
+        if not ok then O.n.errors = O.n.errors + 1 O.last_error = tostring(err):sub(1, 100) end
+        O.status = string.format("I run %d enemies for the host", count(O.mine))
+    else
+        O.status = "not hosting or joining"
+    end
+end
+
+function O.set_on(v)
+    O.on = v == true
+    if O.on then tracer.own_suspect = nil end
+    O.note("the hand-over was " .. (O.on and "switched on" or "switched off"))
+end
+
+function O.receive(payload)
+    local now = os.clock()
+    local kind, rest = tostring(payload):match("^(%a)|(.*)$")
+    if not kind then return end
+    local ok, err = pcall(function()
+        if kind == "o" then O.on_give(rest, now)
+        elseif kind == "a" then O.on_answer(rest, now)
+        elseif kind == "r" then O.on_back(rest, now)
+        elseif kind == "d" then O.on_lost(rest, now)
+        elseif kind == "h" then O.on_hit(rest, now) end
+    end)
+    if not ok then O.n.errors = O.n.errors + 1 O.last_error = tostring(err):sub(1, 100) end
+end
+
+function O.report()
+    local peer, mine = {}, {}
+    local now = os.clock()
+    for name, p in pairs(O.peer) do peer[name] = { since_s_ago = math.floor((now - p.since) * 10) / 10, ai_components_off = #(p.d and p.d.disabled or {}), dead = p.dead_at ~= nil } end
+    for name, m in pairs(O.mine) do mine[name] = { since_s_ago = math.floor((now - m.since) * 10) / 10, dead = m.dead_at ~= nil } end
+    return { about = "10.18: enemy hand-over (EXPERIMENTAL, off at every start, both players tick it): the host gives an ordinary enemy to the joiner when the joiner is clearly nearer, so the joiner's own game runs its AI. Bosses and Molded stay with the host.",
+        on = O.on, status = O.status, crash_marker = tracer.own_suspect or nil, run_by_the_joiner = peer, run_by_me_for_the_host = mine, waiting_for_answer = count(O.asked),
+        counts = O.n, why_taken_back = O.why_back, why_refused = O.why_refused, last_error = O.last_error, last = O.last, lines = O.lines,
+        rule = { margin_m = O.MARGIN, hold_s = O.HOLD_S, range_m = O.RANGE, max_owned = O.MAX_OWNED, min_s_between_changes = O.MIN_FLIP_S, host_keeps_it_within_m_when_it_targets_the_host = O.ENGAGED_NEAR } }
+end
+
+net_on(O.MSG, function(payload) O.receive(payload) end)
+end -- do
+
+
+----------------------------------------------------------------------------------------------
+-- (10.19) re7mp.exe's box "Sync enemies and the Molded" (re7mp_enemysync.json {enemy_sync, seq}), applied the way the story box is: when "seq" is a number
+-- not seen yet, so a later change in the panel is not undone every 2 s. Ticked (the exe's default): enemy sync mode 3, the copies' own AI switched off and
+-- the copies of the host's Molded on. Unticked: mode 2, AI on, no Molded copies. The Molded's crash switch stays: when the last session ended inside it, it
+-- stays off and the panel says so. The garage car sync needs mode 3.
+----------------------------------------------------------------------------------------------
+CFG.esync = { READ_EVERY = 2, read_at = -100, seq_seen = nil, state = nil, applied = 0, last = "re7mp.exe's box has not been read yet", molded_note = nil }
+do
+local E = CFG.esync
+
+function E.apply(v)
+    if v then
+        enemy.mode, enemy.drive_ai = 3, true
+        if tracer.molded_suspect then
+            CFG.molded.on = false
+            E.molded_note = "the Molded copies stay off: the last session ended inside one (tick their box to try again)"
+        else
+            CFG.molded.on = true
+            E.molded_note = nil
+        end
+    else
+        if enemy.mode >= 3 then enemy.mode = 2 end
+        enemy.drive_ai = false
+        pcall(enemy_release_all)
+        CFG.molded.on = false
+        pcall(CFG.molded.release_all, "re7mp.exe's box was unticked")
+        E.molded_note = nil
+    end
+end
+
+function E.update(now)
+    if now - E.read_at < E.READ_EVERY then return end
+    E.read_at = now
+    local ok, d = pcall(json.load_file, FILES.ENEMYSYNC_FILE)
+    if not ok or type(d) ~= "table" or type(d.enemy_sync) ~= "boolean" then return end
+    local seq = tonumber(d.seq) or 0
+    if E.seq_seen == seq then return end
+    E.seq_seen, E.state = seq, d.enemy_sync
+    E.applied = E.applied + 1
+    E.apply(d.enemy_sync)
+    E.last = "re7mp.exe's 'Sync enemies and the Molded' box says " .. (d.enemy_sync and "ON" or "off")
+    say("enemies: " .. E.last)
+end
+
+function E.report()
+    return { about = "10.19: re7mp.exe's box 'Sync enemies and the Molded' (re7mp_enemysync.json). Ticked: enemy mode 3, AI off on the copies, Molded copies on.",
+        exe_box = E.state, applied_times = E.applied, last = E.last, molded_note = E.molded_note, enemy_mode_now = enemy.mode, drive_ai_now = enemy.drive_ai, molded_on_now = CFG.molded.on }
+end
+end -- do
+
+----------------------------------------------------------------------------------------------
+-- (10.24) THE CHANNEL: which kind of build this is. re7mp.exe has a button "Join the alpha..." (the public test branch: new work as it is written, so more
+-- broken or fixed sooner than the normal release; it is in every build, and everybody starts on the normal releases). What the exe chose is written to
+-- re7mp_channel.json { channel = "stable" | "alpha", exe_build = "10.24", seq = n } in the data folder, and this block reads it (every 10 s: it changes only
+-- when the button is used or the exe is updated). It changes NOTHING in the game. It is only said in the panel (a line for the alpha) and in the debug file
+-- (channel, exe_build), so a report from a tester says which build and which channel it came from. A file that is missing, damaged or says something else
+-- counts as "not known" (a script that runs without the exe). The script's own build is CFG.BUILD; the exe has its own (it carries a copy of this script):
+-- when they differ the debug file says so (build_matches_exe).
+----------------------------------------------------------------------------------------------
+CFG.chan = { READ_EVERY = 10, read_at = -100, value = nil, exe_build = nil, seq = nil, changes = 0, last = "re7mp.exe has not said which channel this is yet" }
+do
+local C = CFG.chan
+
+function C.update(now)
+    if now - C.read_at < C.READ_EVERY then return end
+    C.read_at = now
+    local ok, d = pcall(json.load_file, FILES.CHANNEL_FILE)
+    if not ok or type(d) ~= "table" then return end
+    if d.channel ~= "alpha" and d.channel ~= "stable" then return end
+    local eb = type(d.exe_build) == "string" and #d.exe_build <= 24 and d.exe_build:match("^[%w%.%-]+$") and d.exe_build or nil
+    if C.value == d.channel and C.exe_build == eb then return end
+    C.value, C.exe_build, C.seq = d.channel, eb, tonumber(d.seq)
+    C.changes = C.changes + 1
+    C.last = string.format("re7mp.exe says: channel %s%s", d.channel, eb and (", re7mp.exe build " .. eb) or "")
+    say("channel: " .. C.last)
+end
+
+function C.report()
+    local match
+    if C.exe_build then match = (C.exe_build == CFG.BUILD) end
+    return { about = "10.24: the channel re7mp.exe is on (re7mp_channel.json): 'stable' = the normal releases, 'alpha' = the public test branch. Only said, never acted on.",
+        channel = C.value, exe_build = C.exe_build, script_build = CFG.BUILD, build_matches_exe = match, seq = C.seq, changes = C.changes, last = C.last }
+end
+end -- do
+
+----------------------------------------------------------------------------------------------
+-- (10.19) JACK'S CAR IN THE GARAGE (c03_1_Main 900 to 999). The car (sm9104_EthanCar_Garage) is not an enemy: it has a brain (app.CarInGarage), a state machine
+-- (via.fsm.Fsm: WaitPlayerGetInto > PlayerGetInto > WaitEnemyGetPlayerOut, or EnemyGetInto; ExecEnemyCrashEvent > AfterExplosion) and three interact children
+-- (Interact_GetInto / Ignition / GetOut). Each game used to play the whole fight alone: one player in the driver's seat, the other game's Jack in its own car.
+-- The other developer's findings (Molded Together v0.57, bots only) and the plan (re7-garage-car-plan.md) give this:
+--   * whoever gets in first CLAIMS the car and drives (the host wins a tie): kind 19 "c|state|seq", repeated every 4 s;
+--   * the other game's player GETS IN TOO (its own Interact_GetInto is fired), so the two state machines start together and the other Jack cannot take the car;
+--     that player is the rider; every ghost is drawn at the passenger seat (a first-person view cannot show two bodies in one seat);
+--   * then the rider's car is a PUPPET: brain off, state machine paused, the three interacts off, and its position and turn are put on the runner's car every
+--     frame just before rendering (0.2 s behind, blended); the rider is carried along if the game does not do it;
+--   * Jack is the runner's: the host's Jack is the mode-3 copy source as always; when the JOINER runs the car the host's Jack is put onto the joiner's Jack;
+--   * one stream line "#car,x,y,z,qx,qy,qz,qw,speed,windows,frontCrashes,rearCrashes,flags,state" goes first in the enemy state text (a name that fails the
+--     enemy reader's pattern, so older readers skip it); windows / body / door / tyres are mirrored from it once each; run-overs are applied once per pass;
+--   * the end: the rider's car is set to AfterExplosion and breakAll() when the runner's car blew up, and the rider gets out.
+-- Everything is switched on by default (the owner will not release before it is tried) and every step is traced (stage "car": a session that ended inside one
+-- switches the sync off at the next start). Nothing here has been tried in the real game: the journal (re7mp/car_sync.json) is the point of the first test.
+----------------------------------------------------------------------------------------------
+CFG.carsync = {
+    MSG = 19,
+    on = true,                                            -- the box (remembered as car_sync)
+    opt = { ride = true, damage = true, runover = true, carry = true, seat = true, brain_off = true, seat_x = 0.7, run_damage = 250 }, -- the other boxes and numbers (remembered)
+    HASH = 0x9fb77189, LO = 700, HI = 1100,
+    COOL_S = 30, cool_until = -100,
+    LOOK_EVERY = 2, READ_EVERY = 0.25, CLAIM_EVERY = 4, CLAIM_STALE = 12, DELAY = 0.2, SEND_ALONE_EVERY = 1 / 15, FILE_EVERY = 1 / 15,
+    RIDE_NEAR = 8, RIDE_WAIT_S = 15, RIDE_TRIES = 2, SEATED_WAIT_S = 3, SEAT_NEAR = 3.0, CARRY_DRIFT = 0.15, CARRY_MAX = 6,
+    RUN_COOL = 1.5, RUN_SPEED = 2.0, RUN_F = 3.0, RUN_B = 2.8, RUN_W = 1.5, QUIET_RETRY_S = 6, MIRROR_EVERY = 0.15, END_RETRY_S = 8, SAVE_EVERY = 15, TAIL_S = 3, LEFT_S = 10,
+    -- (10.27) HitWall: the one state the real game showed besides the other mod's list (the actor probe read it on the car at the wall, 19 state changes into the fight). The full list is
+    -- still unknown: the car journal's transitions (and the actor probe's fsm_trail) will give it.
+    FIGHT = { PlayerGetInto = true, WaitEnemyGetPlayerOut = true, EnemyGetInto = true, ExecEnemyCrashEvent = true, HitWall = true },
+    car = nil, look_at = -100, read_at = -100, local_r = nil, last_state = nil,
+    claim = nil, seq = 0, rs = nil, puppet = nil, applied = nil, remote = nil, tle = {}, jack_tle = {}, jack_follow = nil, jack_name = "Em3000", jack_disabled = nil,
+    ending = nil, runover_at = -100, run_in = false, mirror_at = -100, pend_since = nil, save_at = -100, file_at = -100, file_seq = nil, alone_at = -100,
+    story_n = nil, status = "off", last = "nothing yet", lines = {}, trans = {}, last_error = nil, registered = false, render_registered = false, left_since = nil,
+    n = { looks = 0, found = 0, claims = 0, claims_heard = 0, ties_won = 0, ties_lost = 0, ride_fired = 0, ride_ok = 0, ride_failed = 0, bystander = 0, puppets = 0, placed = 0,
+        place_errors = 0, carried = 0, lines_sent = 0, lines_read = 0, windows = 0, bodies = 0, tyres = 0, mirror_dropped = 0, runovers = 0, runover_held = 0, ends = 0, released = 0,
+        jack_follow = 0, jack_moved = 0, errors = 0, get_outs = 0, seat_shifted = 0, rot_fallback = 0,
+        state_reads = 0, state_empty = 0, state_via_field = 0, state_via_component = 0, window_calls = 0 }, -- (10.27: how the state name was read; see S.fsm_state)
+    fsm_why = {}, -- (10.27) what each route answered the last time it gave no name: field / component
+}
+
+do
+local S = CFG.carsync
+
+function S.note(text)
+    S.last = text
+    S.lines[#S.lines + 1] = string.format("%.1f %s", os.clock(), text)
+    while #S.lines > 150 do table.remove(S.lines, 1) end
+    say("garage car: " .. text)
+end
+function S.crumb(text) pcall(tracer.crumb, "car", text) end
+function S.clean() pcall(tracer.crumb, "clean", "garage car call finished") end
+function S.fail(text)
+    S.n.errors = S.n.errors + 1
+    S.last_error = tostring(text):sub(1, 120)
+end
+
+-- quaternion helpers on tables {x, y, z, w}
+function S.qrot(q, v)
+    local qx, qy, qz, qw = q.x, q.y, q.z, q.w
+    local tx, ty, tz = 2 * (qy * v.z - qz * v.y), 2 * (qz * v.x - qx * v.z), 2 * (qx * v.y - qy * v.x)
+    return { x = v.x + qw * tx + (qy * tz - qz * ty), y = v.y + qw * ty + (qz * tx - qx * tz), z = v.z + qw * tz + (qx * ty - qy * tx) }
+end
+function S.qinv(q) return { x = -q.x, y = -q.y, z = -q.z, w = q.w } end
+function S.quat_of(r) return { x = r.qx, y = r.qy, z = r.qz, w = r.qw } end -- (a reading or placement keeps its turn as qx, qy, qz, qw)
+
+function S.dist3(ax, ay, az, bx, by, bz) return math.sqrt((ax - bx) ^ 2 + (ay - by) ^ 2 + (az - bz) ^ 2) end
+
+-- the story number of c03_1_Main, or nil (the flow probe has not read it)
+function S.story_number()
+    local F = CFG.flow
+    for h, r in pairs(F and F.flows or {}) do
+        local hi = math.tointeger(h) or math.tointeger(math.floor(tonumber(h) or 0))
+        if hi and (hi & 0xFFFFFFFF) == S.HASH then return r.num end
+    end
+    return nil
+end
+
+-- Switched off by a crash marker at the start
+function S.alive()
+    if tracer.car_suspect and S.on then S.on, S.status = false, "off: the last session ended inside a garage car call (tick the box to try again)" end
+    return S.on == true
+end
+
+-- Why the sync cannot do anything now (nil = it can look at the car). The second value is true for a reason that ends a claim at once.
+function S.gate_why(now)
+    if not S.on then return "off", true end
+    if tracer.car_suspect then return "the last session ended inside a garage car call", true end
+    if state.role ~= "host" and state.role ~= "join" then return "not hosting or joining", true end
+    if state.transport ~= "tcp" then return "needs TCP", true end
+    if enemy.mode < 3 then return "needs enemy sync mode 3 (re7mp.exe's 'Sync enemies and the Molded' box)", true end
+    if not peer_present(now) then return "the other player is not here", true end
+    if CFG.busy and CFG.busy.busy then return "loading", true end
+    local n = S.story_number()
+    S.story_n = n
+    if n ~= nil and (n < S.LO or n >= S.HI) and not S.claim then return string.format("the story is at %d (the car fight is %d to %d)", n, S.LO, S.HI - 1), false end
+    return nil, false
+end
+
+----- finding the car and reading it ---------------------------------------------------------
+
+function S.find_kids(xf)
+    local kids, want = {}, { Interact_GetInto = "GetInto", Interact_Ignition = "Ignition", Interact_GetOut = "GetOut" }
+    local function walk(x, depth)
+        local n = 0
+        while x and n < 80 do
+            n = n + 1
+            local okg, go = pcall(function() return x:call("get_GameObject") end)
+            if okg and go then
+                local okn, nm = pcall(function() return go:call("get_Name") end)
+                local k = want[okn and as_text(nm) or ""]
+                if k and not kids[k] then
+                    local okc, comp = pcall(function() return go:call("getComponent(System.Type)", sdk.typeof("app.InteractSendFsm")) end)
+                    if okc and comp ~= nil then kids[k] = comp end
+                end
+                if depth < 3 then
+                    local okh, ch = pcall(function() return x:call("get_Child") end)
+                    if okh and ch ~= nil then walk(ch, depth + 1) end
+                end
+            end
+            local okx, nx = pcall(function() return x:call("get_Next") end)
+            x = okx and nx or nil
+        end
+    end
+    local okc, ch = pcall(function() return xf:call("get_Child") end)
+    if okc and ch ~= nil then walk(ch, 1) end
+    return kids
+end
+
+-- The tyre flags, found by their names (Is<Which>BlownOut), with the call that blows each out (blowOut<Which>)
+function S.tyre_fields(comp)
+    local out = {}
+    local okt, td = pcall(function() return comp:get_type_definition() end)
+    if not okt or td == nil then return out end
+    local okf, fl = pcall(function() return td:get_fields() end)
+    for _, f in ipairs(okf and fl or {}) do
+        local okn, fname = pcall(function() return f:get_name() end)
+        local which = okn and tostring(fname):match("^Is(%w+)BlownOut$")
+        if which and #out < 4 then out[#out + 1] = { field = fname, method = "blowOut" .. which } end
+    end
+    table.sort(out, function(a, b) return a.field < b.field end)
+    return out
+end
+
+function S.find(now)
+    S.n.looks = S.n.looks + 1
+    local list, err = CFG.car.instances("app.CarInGarage")
+    if list == nil then
+        if err ~= nil then S.fail("the scene would not say: " .. tostring(err)) end -- (no scene yet is not an error)
+        return nil
+    end
+    local comp = list[1]
+    if comp == nil then return nil end
+    local okg, go = pcall(function() return comp:call("get_GameObject") end)
+    if not okg or go == nil then return nil end
+    local okx, xf = pcall(function() return go:call("get_Transform") end)
+    if not okx or xf == nil then return nil end
+    local car = { comp = comp, go = go, xf = xf, found_at = now }
+    local okn, nm = pcall(function() return go:call("get_Name") end)
+    car.name = okn and as_text(nm) or "?"
+    local okf, fsm = pcall(function() return comp:get_field("Fsm") end)
+    if not okf or fsm == nil then
+        local okc, f2 = pcall(function() return go:call("getComponent(System.Type)", sdk.typeof("via.fsm.Fsm")) end)
+        fsm = okc and f2 or nil
+    end
+    car.fsm = fsm
+    car.kids = S.find_kids(xf)
+    car.tyres = S.tyre_fields(comp)
+    local oke, en = pcall(function() return comp:get_field("Enemy") end)
+    if oke and en ~= nil then
+        local okj, jn = pcall(function() return en:call("get_GameObject"):call("get_Name") end)
+        if okj and jn ~= nil then
+            local t = as_text(jn)
+            if type(t) == "string" and t:match("^[%w_]+$") then S.jack_name = t end
+        end
+    end
+    S.n.found = S.n.found + 1
+    local kn = 0
+    for _ in pairs(car.kids) do kn = kn + 1 end
+    S.note(string.format("the car is here: %s (state machine %s, %d interact children, %d tyre flags, Jack is %s)", car.name, fsm and "found" or "NOT found", kn, #car.tyres, S.jack_name))
+    return car
+end
+
+-- (10.27) The state machine's current state name. In the 10.26 file this read gave "" for the whole session (`my_state` "", no transition after the first line) although the state machine
+-- was "found": the module asked the object it takes from the car's own "Fsm" field, and the actor probe, asking the same call of the Fsm it takes with getComponent, read 19 changes of
+-- the same car and ended on "HitWall". So both routes are tried (the one that answered last time first), the one that answers is remembered (car.fsm_via) and said in the debug file with
+-- what the other one answered (fsm.field_answer / fsm.component_answer), and a name only counts when it has letters in it.
+function S.fsm_component(car)
+    if car.fsm2 ~= nil then return car.fsm2 end
+    local now = os.clock()
+    if now - (car.fsm2_at or -100) < 1 then return nil end -- (looked for at most once a second)
+    car.fsm2_at = now
+    local ok, f = pcall(function() return car.go:call("getComponent(System.Type)", sdk.typeof("via.fsm.Fsm")) end)
+    if ok and f ~= nil then car.fsm2 = f end
+    return car.fsm2
+end
+function S.fsm_state(car)
+    S.n.state_reads = S.n.state_reads + 1
+    local function ask(fsm)
+        if fsm == nil then return nil, "no object" end
+        local ok, v = pcall(function() return fsm:call("getCurrentState(System.UInt32)", 0) end)
+        if not ok then return nil, "error: " .. tostring(v):sub(1, 70) end
+        if v == nil then return nil, "answered nothing" end
+        local t = (tostring(as_text(v) or ""):gsub("[^%w_]", ""))
+        if t == "" or not t:find("%a") then return nil, "answered no name (" .. type(v) .. ")" end
+        return t
+    end
+    local order = (car.fsm_via == "component") and { "component", "field" } or { "field", "component" }
+    for _, which in ipairs(order) do
+        local fsm = (which == "field") and car.fsm or S.fsm_component(car)
+        local t, why = ask(fsm)
+        if t then
+            car.fsm_via = which
+            S.fsm_why[which] = nil
+            if which == "field" then S.n.state_via_field = S.n.state_via_field + 1 else S.n.state_via_component = S.n.state_via_component + 1 end
+            return t
+        end
+        S.fsm_why[which] = why
+    end
+    S.n.state_empty = S.n.state_empty + 1
+    return ""
+end
+
+-- (10.27) The car is at rest: nobody drives and its state is the one before the fight (or could not be read). Any other state counts as the fight going on, listed in S.FIGHT or not: the real car
+-- has more states than the other mod's list (the first real file showed "HitWall"), and a state nobody has seen yet must not end a fight early after 10 s. Starting a claim stays strict
+-- (only S.FIGHT and the driving flags start one): an unknown state at the start of the chapter must not drag the other player into the car.
+function S.at_rest(r)
+    if S.FIGHT[r.state] or r.player or r.enemy or r.hijack then return false end
+    return r.state == "" or r.state == "WaitPlayerGetInto"
+end
+
+-- One reading of the car: pose, state name and the brain's flags. nil + reason when the car cannot be read (gone).
+function S.read_local(car)
+    local okp, p = pcall(function() return car.xf:call("get_Position") end)
+    local okq, q = pcall(function() return car.xf:call("get_Rotation") end)
+    if not okp or not okq or p == nil or q == nil or type(p.x) ~= "number" then return nil, "the car's position cannot be read" end
+    local r = { x = p.x, y = p.y, z = p.z, qx = q.x, qy = q.y, qz = q.z, qw = q.w, at = os.clock() }
+    r.state = S.fsm_state(car)
+    local function f(name)
+        local ok, v = pcall(function() return car.comp:get_field(name) end)
+        if ok then return v end
+        return nil
+    end
+    r.speed = tonumber(f("DriveSpeed")) or 0
+    -- (10.27) the windows: the field the other mod's notes name if the car has it, else the game's own question isWindowBroken(n) for the six windows (the 10.26 dump of the car's fields stops at
+    -- 220 of them, so nobody has seen whether FlagWindowBroken exists; the car has isWindowBroken, breakWindow and getWindowParts for sure)
+    local fw = f("FlagWindowBroken")
+    if type(fw) == "number" then r.win = math.floor(fw) else r.win = S.windows_by_call(car) end
+    r.fc = math.floor(tonumber(f("CrashCountForFrontBody")) or 0)
+    r.rc = math.floor(tonumber(f("CrashCountForRearBody")) or 0)
+    r.door = f("IsDoorBroken") == true
+    r.tyres = {}
+    for i, t in ipairs(car.tyres) do r.tyres[i] = f(t.field) == true end
+    r.enemy, r.player, r.crashed, r.hijack = f("IsEnemyDriving") == true, f("IsPlayerDriving") == true, f("IsCrashed") == true, f("IsEnemyHijack") == true
+    -- (10.27) fields the 10.26 probe SAW on the real car (IsEnemyDriving / IsPlayerDriving were not among the 220 it listed): read and written into the journal, not yet used to decide anything
+    r.engine, r.wait_driver, r.hit_player, r.hit_enemy = f("IsPlayerStartEngine") == true, f("IsWaitDriverChange") == true, f("IsHitPlayer") == true, f("IsHitEnemy") == true
+    r.hits = math.floor(tonumber(f("EnemyHitCount")) or 0)
+    r.action = S.action_text(car, r.at)
+    return r
+end
+
+-- (10.27) isWindowBroken(n) for the six windows (1 front, 2 front left, 3 rear left, 4 rear, 5 rear right, 6 front right, as the plan has them): bit n of the answer. A car that will not answer
+-- is not asked again.
+function S.windows_by_call(car)
+    if car.win_call_failed then return 0 end
+    local mask = 0
+    for i = 1, 6 do
+        S.n.window_calls = S.n.window_calls + 1
+        local ok, b = pcall(function() return car.comp:call("isWindowBroken", i) end)
+        if not ok or type(b) ~= "boolean" then car.win_call_failed = true return 0 end
+        if b then mask = mask | (1 << i) end
+    end
+    return mask
+end
+
+-- (10.27) CurrentAction is not a number: the probe said "set" and NextAction "unset", and the car has a process<Something>(x) method for every mode (processPlayerDrive, processEnemyHijack,
+-- processCrashOnHijack ...), so it is probably the delegate that runs the current one. A delegate may say which method it holds (get_Method().get_Name()); else its text. Once a second, reads only.
+function S.action_text(car, now)
+    if now - (car.act_at or -100) < 1 then return car.act_text end
+    car.act_at = now
+    local text
+    local ok, v = pcall(function() return car.comp:get_field("CurrentAction") end)
+    if ok and v ~= nil then
+        if type(v) == "number" or type(v) == "string" then
+            text = tostring(v)
+        else
+            local okm, mi = pcall(function() return v:call("get_Method") end)
+            if okm and mi ~= nil then
+                local okn, nm = pcall(function() return mi:call("get_Name") end)
+                if okn and nm ~= nil then text = tostring(as_text(nm) or nm) end
+            end
+            if text == nil then
+                local okt, tt = pcall(function() return v:call("ToString()") end)
+                if okt and tt ~= nil then text = tostring(as_text(tt) or tt) end
+            end
+        end
+    end
+    car.act_text = text and text:sub(1, 60) or nil
+    return car.act_text
+end
+
+function S.flags_of(r)
+    local fl = (r.door and 1 or 0)
+    for i = 1, 4 do if r.tyres and r.tyres[i] then fl = fl + (1 << i) end end
+    if r.enemy then fl = fl + 32 end
+    if r.player then fl = fl + 64 end
+    if r.crashed then fl = fl + 128 end
+    if r.hijack then fl = fl + 256 end
+    return fl
+end
+
+----- the wire -------------------------------------------------------------------------------
+
+function S.state_text(st) return (tostring(st or ""):gsub("[^%w_]", "")) end
+
+-- The line the state file carries (the runner's own game writes it): nil when I do not run the car. The pose is read now (the rest is up to 0.25 s old).
+function S.line(now)
+    if not (S.claim and S.claim.by == "me" and S.local_r and S.car) then return nil end
+    local r = S.local_r
+    local x, y, z, qx, qy, qz, qw = r.x, r.y, r.z, r.qx, r.qy, r.qz, r.qw
+    local okp, p = pcall(function() return S.car.xf:call("get_Position") end)
+    local okq, q = pcall(function() return S.car.xf:call("get_Rotation") end)
+    if okp and okq and p and q and type(p.x) == "number" and type(q.x) == "number" then x, y, z, qx, qy, qz, qw = p.x, p.y, p.z, q.x, q.y, q.z, q.w end
+    S.n.lines_sent = S.n.lines_sent + 1
+    return string.format("#car,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.3f,%.1f,%d,%d,%d,%d,%s", x, y, z, qx, qy, qz, qw, r.speed or 0, r.win or 0, r.fc or 0, r.rc or 0,
+        S.flags_of(r), S.state_text(r.state))
+end
+
+-- Jack's snapshot, written by the joiner that runs the car (the host puts its own Jack onto it)
+function S.jack_line()
+    if not (S.claim and S.claim.by == "me" and state.role == "join") then return nil end
+    local root = CFG.own and CFG.own.local_root(S.jack_name)
+    if not root then return nil end
+    local ok, text = pcall(snapshot_one, root)
+    if ok and type(text) == "string" then return text end
+    return nil
+end
+
+-- Both state-file writers call this: the extra entries, first in the text
+function S.extra_parts(now)
+    local out = {}
+    local l = S.line(now)
+    if l then out[#out + 1] = l end
+    local j = S.jack_line()
+    if j then out[#out + 1] = j end
+    return out
+end
+
+-- The joiner that runs the car and has no enemy of the hand-over to send writes the file itself
+function S.write_alone(now)
+    if not (S.claim and S.claim.by == "me" and state.role == "join") then return end
+    if CFG.own and next(CFG.own.mine) ~= nil then return end -- (the hand-over's writer puts the entries in)
+    if now - S.alone_at < S.SEND_ALONE_EVERY then return end
+    S.alone_at = now
+    local parts = S.extra_parts(now)
+    if #parts == 0 then return end
+    pcall(json.dump_file, FILES.STATE_OUT_FILE, { seq = math.floor(now * 1000), p = string.format("T%.3f;", now) .. table.concat(parts, ";") })
+end
+
+function S.parse_line(body)
+    local f = {}
+    for field in body:gmatch("[^,]+") do f[#f + 1] = field end
+    if #f < 13 then return nil end
+    local v = {}
+    for i = 1, 12 do
+        v[i] = tonumber(f[i])
+        if v[i] == nil or v[i] ~= v[i] or v[i] > 1e7 or v[i] < -1e7 then return nil end
+    end
+    return { x = v[1], y = v[2], z = v[3], qx = v[4], qy = v[5], qz = v[6], qw = v[7], speed = v[8], win = math.floor(v[9]), fc = math.floor(v[10]), rc = math.floor(v[11]),
+        flags = math.floor(v[12]), state = (f[13]:gsub("[^%w_]", "")) }
+end
+
+-- A state text arrived (the joiner: from enemy_read, with the host's clock mapped to mine; the host: from read_file)
+function S.on_payload(p, st, now)
+    if type(p) ~= "string" or not (S.claim and S.claim.by == "peer") then return end
+    local body = (";" .. p):match(";#car,([^;]*)")
+    if body then
+        local r = S.parse_line(body)
+        if r then
+            S.n.lines_read = S.n.lines_read + 1
+            local old = S.remote
+            S.remote = r
+            r.at = now
+            pcall(enemy.tl.push, S.tle, st or now, r.x, r.y, r.z, r.qx, r.qy, r.qz, r.qw)
+            if not old or old.state ~= r.state then S.note(string.format("the runner's car: %s -> %s", old and old.state or "?", r.state)) end
+        end
+    end
+    if S.jack_follow then
+        local jb = (";" .. p):match(";" .. S.jack_name .. ",([^;]*)")
+        if jb then
+            local f = {}
+            for field in jb:gmatch("[^,]+") do f[#f + 1] = tonumber(field) end
+            if f[1] and f[2] and f[3] and f[7] then
+                pcall(enemy.tl.push, S.jack_tle, st or now, f[1], f[2], f[3], f[4] or 0, f[5] or 0, f[6] or 0, f[7] or 1)
+            end
+        end
+    end
+end
+
+-- The host reads the joiner's state file itself while the joiner runs the car (nothing else reads it then)
+function S.read_file(now)
+    if not (S.claim and S.claim.by == "peer" and state.role == "host") then return end
+    if now - S.file_at < S.FILE_EVERY then return end
+    S.file_at = now
+    local ok, d = pcall(json.load_file, FILES.STATE_IN_FILE)
+    if not ok or type(d) ~= "table" or d.seq == nil or type(d.p) ~= "string" or d.seq == S.file_seq then return end
+    S.file_seq = d.seq
+    S.on_payload(d.p, now, now)
+end
+
+function S.send(kind, text) net_send(S.MSG, kind .. "|" .. tostring(text or "")) end
+
+----- claims ---------------------------------------------------------------------------------
+
+function S.claim_me(now, st)
+    S.seq = S.seq + 1
+    S.claim = { by = "me", state = st, since = now, sent_at = now, seq = S.seq, heard = now }
+    S.n.claims = S.n.claims + 1
+    S.send("c", S.state_text(st) .. "|" .. S.seq)
+    S.note(string.format("I got in first (my car: %s): I run the car and Jack; the other game gets in too and follows", st))
+    if state.role == "join" then S.take_jack_as_runner() end
+end
+
+-- The joiner runs the car: its own Jack is its own (the host's snapshots of him are ignored, and a copy that was being moved is let go)
+function S.take_jack_as_runner()
+    local name = S.jack_name
+    local dr = enemy.driven[name]
+    if dr then
+        for _, comp in ipairs(dr.disabled or {}) do pcall(function() comp:call("set_Enabled", true) end) end
+        enemy.driven[name] = nil
+    end
+    if CFG.eanim then pcall(CFG.eanim.release, name, "the car fight: mine") end
+    enemy.remote[name] = nil
+    S.n.jack_follow = S.n.jack_follow + 1
+end
+
+function S.start_rider(now)
+    S.applied, S.remote = nil, nil
+    S.tle, S.jack_tle = {}, {}
+    S.rs = { phase = "wait", since = now, tries = 0 }
+    if state.role == "host" then -- the joiner runs the car: my Jack goes onto theirs
+        S.jack_follow = true
+        S.n.jack_follow = S.n.jack_follow + 1
+    end
+end
+
+function S.on_claim(rest, now)
+    local st, seq = rest:match("^([%w_]*)|(%d+)$")
+    if not st then return end
+    if now < S.cool_until and not S.claim then return end -- (a fight that just ended must not start again from a repeated claim)
+    S.n.claims_heard = S.n.claims_heard + 1
+    local C = S.claim
+    if C and C.by == "peer" then C.heard, C.state = now, st return end
+    if C and C.by == "me" then
+        if state.role == "host" then -- the same moment: the host keeps it
+            S.n.ties_won = S.n.ties_won + 1
+            C.sent_at = -100
+            S.note("both of us got in at the same moment: the host (me) keeps the car")
+            return
+        end
+        S.n.ties_lost = S.n.ties_lost + 1
+        S.note("both of us got in at the same moment: the host keeps the car; mine follows theirs")
+        S.claim = nil
+    end
+    S.claim = { by = "peer", state = st, since = now, heard = now, seq = tonumber(seq) }
+    S.note(string.format("the other player got in first (their car: %s): their game runs the car and Jack", st))
+    S.start_rider(now)
+end
+
+function S.on_end(rest, now)
+    local outcome = rest:match("^([%w_]*)") or ""
+    if not (S.claim and S.claim.by == "peer") then return end
+    S.n.ends = S.n.ends + 1
+    S.note("the other game says the fight is over (" .. outcome .. ")")
+    S.finish_rider(outcome, now)
+end
+
+function S.receive(payload)
+    local now = os.clock()
+    local kind, rest = tostring(payload):match("^(%a)|(.*)$")
+    if not kind then return end
+    local ok, err = pcall(function()
+        if kind == "c" then S.on_claim(rest, now)
+        elseif kind == "x" then S.on_end(rest, now)
+        elseif kind == "k" then
+            if S.claim and S.claim.by == "peer" then S.release("the other player let go (" .. tostring(rest) .. ")", true) end
+        elseif kind == "g" then S.note("the other game: " .. tostring(rest):sub(1, 100)) end
+    end)
+    if not ok then S.fail(err) end
+end
+
+----- the rider ------------------------------------------------------------------------------
+
+function S.player_pos()
+    local player = player_object()
+    if not player then return nil end
+    local fx, fy, fz = give.player_pose(player)
+    if not fx then return nil end
+    return fx, fy, fz, player
+end
+
+function S.ride_blockers(now)
+    if not S.opt.ride then return "the ride box is off" end
+    if pstat.downed then return "I am down" end
+    if CFG.menu and CFG.menu.open then return "a game menu is open" end
+    local q = CFG.guard and CFG.guard.why(now)
+    if q then return q end
+    local car = S.car
+    if not (car and car.kids and car.kids.GetInto) then return "the car has no Interact_GetInto" end
+    local r = S.local_r
+    if r and r.state ~= "WaitPlayerGetInto" and r.state ~= "" then return "my car is already in " .. r.state end
+    local fx, fy, fz = S.player_pos()
+    if not fx then return "I cannot read my own position" end
+    local d = S.dist3(fx, fy, fz, r and r.x or fx, r and r.y or fy, r and r.z or fz)
+    if d > S.RIDE_NEAR then return string.format("I am %.0f m from the car", d) end
+    local rs = S.remote and S.remote.state
+    if rs and rs ~= "" and rs ~= "PlayerGetInto" and rs ~= "WaitEnemyGetPlayerOut" and rs ~= "WaitPlayerGetInto" then return "their fight is already at " .. rs end
+    return nil
+end
+
+-- The switches of the puppet: brain off, state machine paused, the three interacts off. Each undone by release.
+function S.make_puppet(now)
+    local car = S.car
+    if not car or S.puppet then return end
+    local P = { at = now, kids = {} }
+    S.crumb("making the car a puppet")
+    if S.opt.brain_off then P.brain = pcall(function() car.comp:call("set_Enabled", false) end) end
+    if car.fsm ~= nil then P.paused = pcall(function() car.fsm:call("set_Paused", true) end) end
+    for _, comp in pairs(car.kids) do
+        if pcall(function() comp:call("set_Enabled", false) end) then P.kids[#P.kids + 1] = comp end
+    end
+    S.clean()
+    S.puppet = P
+    S.n.puppets = S.n.puppets + 1
+    local r = S.local_r
+    S.applied = { win = r and r.win or 0, fc = r and r.fc or 0, rc = r and r.rc or 0, door = r and r.door or false, tyres = {} }
+    for i = 1, #car.tyres do S.applied.tyres[i] = (r and r.tyres and r.tyres[i]) or false end
+    S.note(string.format("my car is a puppet now (brain off %s, state machine paused %s, %d interacts off)", tostring(P.brain), tostring(P.paused), #P.kids))
+    S.send("g", "my car follows yours now")
+end
+
+function S.undo_puppet()
+    local P, car = S.puppet, S.car
+    S.puppet = nil
+    if not P or not car then return end
+    S.crumb("giving the car back")
+    if P.paused and car.fsm ~= nil then pcall(function() car.fsm:call("set_Paused", false) end) end
+    if P.brain then pcall(function() car.comp:call("set_Enabled", true) end) end
+    for _, comp in ipairs(P.kids or {}) do pcall(function() comp:call("set_Enabled", true) end) end
+    S.clean()
+end
+
+-- Where the seat is, in the car's own frame, when the rider has just got in (the carrying keeps it there)
+function S.capture_seat()
+    local R, r = S.rs, S.local_r
+    if not (R and r) then return end
+    local fx, fy, fz = S.player_pos()
+    if not fx then return end
+    local rel = S.qrot(S.qinv(S.quat_of(r)), { x = fx - r.x, y = fy - r.y, z = fz - r.z })
+    local d = math.sqrt(rel.x ^ 2 + rel.y ^ 2 + rel.z ^ 2)
+    if d < S.SEAT_NEAR then
+        R.seat_rel = rel
+        S.note(string.format("my seat is %.2f / %.2f / %.2f m from the car's middle (right / up / forward)", rel.x, rel.y, rel.z))
+    else
+        S.note(string.format("I am %.1f m from the car's middle: I am not carried", d))
+    end
+end
+
+function S.fire_get_in(now)
+    local car, R = S.car, S.rs
+    S.crumb("firing Interact_GetInto for my player")
+    local ok, err = pcall(function() return car.kids.GetInto:call("successInteract") end)
+    S.clean()
+    R.fired_at, R.tries = now, R.tries + 1
+    S.n.ride_fired = S.n.ride_fired + 1
+    if ok then
+        R.phase = "getting_in"
+        S.note("my player is getting into the car (Interact_GetInto fired)")
+        S.send("g", "my player is getting in")
+    else
+        S.n.ride_failed = S.n.ride_failed + 1
+        S.fail(err)
+        R.phase = "bystander"
+        S.note("the get-in call failed (" .. tostring(err):sub(1, 60) .. "): I watch from outside")
+    end
+end
+
+function S.rider_tick(now)
+    local R, r, car = S.rs, S.local_r, S.car
+    if not (R and car and r) then return end
+    local st = r.state or ""
+    if R.phase == "wait" then
+        if st ~= "WaitPlayerGetInto" and st ~= "" then
+            R.phase, R.seated_at = "seated", now
+            S.note("my player is in the car already (" .. st .. ")")
+        else
+            local why = S.ride_blockers(now)
+            if not why then
+                S.fire_get_in(now)
+            elseif now - R.since > S.RIDE_WAIT_S then
+                R.phase = "bystander"
+                S.n.bystander = S.n.bystander + 1
+                S.note("I watch from outside (" .. why .. ")")
+                S.send("g", "I watch from outside: " .. why)
+            end
+        end
+    elseif R.phase == "getting_in" then
+        if st ~= "WaitPlayerGetInto" and st ~= "" and now - R.fired_at > 1 then
+            R.phase, R.seated_at = "seated", now
+            S.n.ride_ok = S.n.ride_ok + 1
+            S.note("my player is in the car (" .. st .. ")")
+        elseif now - R.fired_at > S.RIDE_WAIT_S then
+            if R.tries < S.RIDE_TRIES then
+                R.phase = "wait"
+                R.since = now
+                S.note("the get-in did not show in my car's state: trying again")
+            else
+                R.phase = "bystander"
+                S.n.ride_failed = S.n.ride_failed + 1
+                S.note("the get-in never showed in my car's state: I watch from outside")
+            end
+        end
+    elseif R.phase == "seated" then
+        -- the runner's car has gone past the get-in (Jack is on his way), or mine says the same, or the wait is over: from here my car only follows
+        local rs = S.remote and S.remote.state or ""
+        local later = rs ~= "" and rs ~= "PlayerGetInto" and rs ~= "WaitPlayerGetInto"
+        if st == "WaitEnemyGetPlayerOut" or later or now - R.seated_at > S.SEATED_WAIT_S then
+            S.capture_seat()
+            S.make_puppet(now)
+            R.phase = "puppet"
+        end
+    elseif R.phase == "bystander" then
+        if not S.puppet then S.make_puppet(now) end
+    end
+end
+
+----- placing the puppet (every frame, just before rendering) ---------------------------------
+
+function S.place(now)
+    local P, car = S.puppet, S.car
+    if not (P and car and S.claim and S.claim.by == "peer") then return end
+    local x, y, z, qx, qy, qz, qw = enemy.tl.sample(S.tle, now - S.DELAY)
+    if not x then return end
+    local last = P.placed
+    if last and math.abs(last.x - x) < 0.0005 and math.abs(last.y - y) < 0.0005 and math.abs(last.z - z) < 0.0005 and math.abs(last.qx - qx) < 0.0005
+        and math.abs(last.qy - qy) < 0.0005 and math.abs(last.qz - qz) < 0.0005 then return end
+    if not P.crumbed then P.crumbed = true S.crumb("putting the puppet car on the runner's car") end
+    local ok, err = pcall(function() car.xf:call("set_Position", Vector3f.new(x, y, z)) end)
+    if not ok then
+        S.n.place_errors = S.n.place_errors + 1
+        S.fail(err)
+        return
+    end
+    -- the turn: the whole quaternion; when the transform will not take it, only the way the car faces (as the enemies are turned)
+    if not P.rot_failed then
+        local okr = pcall(function() car.xf:call("set_Rotation", Quaternion.new(qw, qx, qy, qz)) end)
+        if not okr then
+            local okf = pcall(function()
+                local f = S.qrot({ x = qx, y = qy, z = qz, w = qw }, { x = 0, y = 0, z = 1 })
+                car.xf:call("set_EulerAngle", Vector3f.new(0, math.atan(f.x, f.z), 0))
+            end)
+            P.rot_failed = true
+            S.n.rot_fallback = S.n.rot_fallback + 1
+            S.note("the car's transform would not take a whole turn (set_Rotation): " .. (okf and "only the way it faces is set from now on" or "no turn is set at all"))
+        end
+    else
+        pcall(function()
+            local f = S.qrot({ x = qx, y = qy, z = qz, w = qw }, { x = 0, y = 0, z = 1 })
+            car.xf:call("set_EulerAngle", Vector3f.new(0, math.atan(f.x, f.z), 0))
+        end)
+    end
+    P.placed = { x = x, y = y, z = z, qx = qx, qy = qy, qz = qz, qw = qw }
+    S.n.placed = S.n.placed + 1
+    if S.opt.carry and S.rs and S.rs.seat_rel and S.rs.phase == "puppet" then S.carry_rider(x, y, z, { x = qx, y = qy, z = qz, w = qw }) end
+end
+
+-- the rider stays in the seat when the car moves, if the game does not carry the body (checked against where the body is, so a game that does it is left alone)
+function S.carry_rider(x, y, z, q)
+    local want = S.qrot(q, S.rs.seat_rel)
+    local wx, wy, wz = x + want.x, y + want.y, z + want.z
+    local fx, fy, fz, player = S.player_pos()
+    if not fx then return end
+    local d = S.dist3(fx, fy, fz, wx, wy, wz)
+    if d < S.CARRY_DRIFT or d > S.CARRY_MAX then return end
+    local ok = pcall(function() player:call("get_Transform"):call("set_Position", Vector3f.new(wx, wy, wz)) end)
+    if ok then S.n.carried = S.n.carried + 1 else S.n.errors = S.n.errors + 1 end
+end
+
+-- The host's Jack goes onto the joiner's Jack (the joiner runs the car)
+function S.jack_move(now)
+    if not (S.jack_follow and S.claim and S.claim.by == "peer") then return end
+    local root = CFG.own and CFG.own.host_root(S.jack_name)
+    if not root then return end
+    if not S.jack_disabled then
+        S.crumb("switching off the AI of my Jack: " .. S.jack_name)
+        S.jack_disabled = enemy.drive_off(root)
+        S.clean()
+        S.note(string.format("my %s follows the other game's now (%d AI components off)", S.jack_name, #S.jack_disabled))
+    end
+    local x, y, z, qx, qy, qz, qw = enemy.tl.sample(S.jack_tle, now - S.DELAY)
+    if not x then return end
+    local ok = pcall(function()
+        local f = S.qrot({ x = qx, y = qy, z = qz, w = qw }, { x = 0, y = 0, z = 1 })
+        root.xf:call("set_Position", Vector3f.new(x, y, z))
+        root.xf:call("set_EulerAngle", Vector3f.new(0, math.atan(f.x, f.z), 0))
+    end)
+    if ok then S.n.jack_moved = S.n.jack_moved + 1 else S.fail("could not move " .. S.jack_name) end
+end
+
+function S.jack_release()
+    local list = S.jack_disabled
+    S.jack_follow, S.jack_disabled = nil, nil
+    for _, comp in ipairs(list or {}) do pcall(function() comp:call("set_Enabled", true) end) end
+end
+
+-- true when this name is run by the other side during the car fight: it is not sent, and snapshots of it are not read
+function S.jack_held(name)
+    local C = S.claim
+    if not C or name ~= S.jack_name then return false end
+    return (C.by == "me" and state.role == "join") or (C.by == "peer" and state.role == "host")
+end
+
+-- called from re.on_pre_application_entry("LockScene" and "PrepareRendering"), and from the frame when neither has fired for 0.3 s
+function S.tick_render()
+    local now = os.clock()
+    S.render_at = now
+    if S.puppet then
+        local ok, err = pcall(S.place, now)
+        if not ok then S.fail(err) end
+    end
+    if S.jack_follow then pcall(S.jack_move, now) end
+end
+
+----- damage, run-overs, the end --------------------------------------------------------------
+
+function S.mirror(now)
+    local R, A, car = S.remote, S.applied, S.car
+    if not (S.opt.damage and R and A and car and S.puppet) then return end
+    local pending = nil
+    for n = 1, 6 do
+        if not pending and (R.win & (1 << n)) ~= 0 and (A.win & (1 << n)) == 0 then pending = { "win", n } end
+    end
+    if not pending and (R.fc or 0) > A.fc then pending = { "front" } end
+    if not pending and (R.rc or 0) > A.rc then pending = { "rear" } end
+    if not pending and (R.flags & 1) ~= 0 and not A.door then pending = { "door" } end
+    if not pending then
+        for i = 1, #car.tyres do
+            if (R.flags & (1 << i)) ~= 0 and not A.tyres[i] then pending = { "tyre", i } break end
+        end
+    end
+    if not pending then S.pend_since = nil return end
+    S.pend_since = S.pend_since or now
+    if now - S.mirror_at < S.MIRROR_EVERY then return end
+    local q = CFG.guard and CFG.guard.why(now)
+    if q then
+        if now - S.pend_since > S.QUIET_RETRY_S then
+            S.n.mirror_dropped = S.n.mirror_dropped + 1
+            S.note("damage not mirrored (" .. q .. " for " .. S.QUIET_RETRY_S .. " s): dropped")
+            A.win, A.fc, A.rc, A.door = R.win, R.fc, R.rc, (R.flags & 1) ~= 0
+            for i = 1, #car.tyres do A.tyres[i] = (R.flags & (1 << i)) ~= 0 end
+            S.pend_since = nil
+        end
+        return
+    end
+    S.mirror_at = now
+    local what, call, arg = pending[1], nil, nil
+    if what == "win" then call, arg = "breakWindow", pending[2] A.win = A.win | (1 << pending[2]) S.n.windows = S.n.windows + 1
+    elseif what == "front" then call = "breakFrontBody" A.fc = A.fc + 1 S.n.bodies = S.n.bodies + 1
+    elseif what == "rear" then call = "breakRearBody" A.rc = A.rc + 1 S.n.bodies = S.n.bodies + 1
+    elseif what == "door" then call = "breakOriginalLeftDoor" A.door = true S.n.bodies = S.n.bodies + 1
+    elseif what == "tyre" then call = car.tyres[pending[2]].method A.tyres[pending[2]] = true S.n.tyres = S.n.tyres + 1 end
+    S.crumb("mirroring " .. tostring(call))
+    local ok, err
+    if arg ~= nil then ok, err = pcall(function() return car.comp:call(call, arg) end) else ok, err = pcall(function() return car.comp:call(call) end) end
+    S.clean()
+    if not ok then S.fail(err) end
+    S.note(string.format("mirrored %s%s%s", call, arg and (" " .. arg) or "", ok and "" or (" (failed: " .. tostring(err):sub(1, 50) .. ")")))
+end
+
+-- A run-over: the runner's car is driven by Jack and moves; my own player is tested against its footprint (not while I sit in it)
+function S.runover_tick(now)
+    local R, car = S.remote, S.car
+    if not (S.opt.runover and R and car and S.puppet and S.rs and S.rs.phase == "bystander") then return end
+    if (R.flags & 32) == 0 or (R.speed or 0) < S.RUN_SPEED then S.run_in = false return end
+    local P = S.puppet.placed
+    if not P then return end
+    local fx, fy, fz, player = S.player_pos()
+    if not fx then return end
+    local rel = S.qrot(S.qinv(S.quat_of(P)), { x = fx - P.x, y = fy - P.y, z = fz - P.z })
+    local inside = math.abs(rel.x) < S.RUN_W and rel.z > -S.RUN_B and rel.z < S.RUN_F and math.abs(rel.y) < 2.0
+    S.run_last = { right = math.floor(rel.x * 10) / 10, up = math.floor(rel.y * 10) / 10, forward = math.floor(rel.z * 10) / 10, inside = inside, speed = R.speed } -- (shown in the journal)
+    if not inside then S.run_in = false return end
+    if S.run_in or now - S.runover_at < S.RUN_COOL then return end
+    local q = CFG.guard and CFG.guard.why(now)
+    if q or pstat.downed then S.n.runover_held = S.n.runover_held + 1 return end
+    S.run_in, S.runover_at = true, now
+    local amount = S.opt.run_damage
+    if type(pstat.hp) == "number" and pstat.hp > 1 then amount = math.min(amount, pstat.hp - 1) end -- (never lethal in one pass)
+    S.crumb(string.format("run-over hit %d on my player", amount))
+    local ok, err = pcall(function()
+        local dc = player:call("getComponent(System.Type)", sdk.typeof("app.PlayerDamageController"))
+        local info = dc:call("newFakeDamageInfo", amount + 0.0, car.go, player)
+        dc:call("addManualDamage", info)
+    end)
+    S.clean()
+    if ok then
+        S.n.runovers = S.n.runovers + 1
+        S.note(string.format("the runner's car ran me over (%d)", amount))
+    else
+        S.fail(err)
+        S.note("the run-over hit failed: " .. tostring(err):sub(1, 60))
+    end
+end
+
+-- The runner's side of the end: tell the other game
+function S.end_fight(now, outcome)
+    S.send("x", outcome)
+    S.n.ends = S.n.ends + 1
+    S.note("the fight is over for me (" .. outcome .. "): the other game is told")
+    S.claim.ended_at = now
+end
+
+-- The rider's side of the end: the car goes to AfterExplosion and breakAll(), the body gets out
+function S.finish_rider(outcome, now)
+    if S.ending then return end
+    S.ending = { outcome = outcome, at = now, step = 1, next_at = now }
+end
+
+function S.set_state(fsm, name)
+    for _, sig in ipairs({ "setCurrentState(System.String)", "setCurrentState(System.String, System.UInt32)", "setCurrentState" }) do
+        local ok
+        if sig:find("UInt32", 1, true) then ok = pcall(function() return fsm:call(sig, name, 0) end) else ok = pcall(function() return fsm:call(sig, name) end) end
+        if ok then return true, sig end
+    end
+    return false
+end
+
+-- Get my player out of the car (the button, and the end of the fight)
+function S.get_out(why)
+    local car = S.car
+    if not (car and car.kids and car.kids.GetOut) then S.note("get out: the car has no Interact_GetOut (" .. tostring(why) .. ")") return false end
+    S.crumb("firing Interact_GetOut for my player")
+    local ok, err = pcall(function() return car.kids.GetOut:call("successInteract") end)
+    S.clean()
+    S.n.get_outs = S.n.get_outs + 1
+    S.note("get out (" .. tostring(why) .. "): " .. (ok and "Interact_GetOut fired" or ("failed: " .. tostring(err):sub(1, 50))))
+    return ok
+end
+
+function S.ending_tick(now)
+    local E, car = S.ending, S.car
+    if not E or now < E.next_at then return end
+    if not car then S.release("the car is gone", false) return end
+    local q = CFG.guard and CFG.guard.why(now)
+    if q and now - E.at < S.END_RETRY_S then E.next_at = now + 0.3 return end
+    E.next_at = now + 0.4
+    local wreck = E.outcome == "exploded" or E.outcome == "crashed"
+    if E.step == 1 then -- back to a live car first, or the state would not take
+        S.undo_puppet()
+        E.step = 2
+    elseif E.step == 2 then
+        if wreck and car.fsm ~= nil then
+            S.crumb("setting my car to AfterExplosion")
+            local ok, sig = S.set_state(car.fsm, "AfterExplosion")
+            S.clean()
+            S.note("my car goes to AfterExplosion: " .. (ok and ("done (" .. sig .. ")") or "the game would not take it"))
+        end
+        E.step = 3
+    elseif E.step == 3 then
+        if wreck then
+            S.crumb("breakAll on my car")
+            local ok, err = pcall(function() return car.comp:call("breakAll") end)
+            S.clean()
+            S.note("breakAll: " .. (ok and "done" or ("failed: " .. tostring(err):sub(1, 50))))
+        end
+        E.step = 4
+    elseif E.step == 4 then
+        local rr = S.rs
+        if rr and (rr.phase == "puppet" or rr.phase == "seated") then S.get_out("the fight is over") end
+        S.release("the fight is over", false)
+    end
+end
+
+-- Everything back where it was
+function S.release(why, quiet)
+    local had = S.claim ~= nil or S.puppet ~= nil or S.jack_follow ~= nil
+    S.undo_puppet()
+    S.jack_release()
+    if tostring(why):find("fight is over", 1, true) then S.cool_until = os.clock() + S.COOL_S end
+    if S.claim and S.claim.by == "me" and not quiet then S.send("k", tostring(why):sub(1, 60)) end
+    S.claim, S.rs, S.remote, S.applied, S.ending, S.pend_since, S.left_since = nil, nil, nil, nil, nil, nil, nil
+    S.tle, S.jack_tle, S.run_in = {}, {}, false
+    if had then
+        S.n.released = S.n.released + 1
+        S.note("everything is back as the game has it (" .. tostring(why) .. ")")
+        S.save("released: " .. tostring(why))
+    end
+end
+
+----- the frame ------------------------------------------------------------------------------
+
+function S.save(why)
+    local data = { about = "re7mp 10.19 garage car sync journal. Send this file after a garage fight.", build = CFG.BUILD, why = why, written_at = os.time(), report = S.report() }
+    CFG.save_json(FILES.MAP.car_sync[1], FILES.MAP.car_sync[2], data)
+end
+
+-- The frame calls this: an error inside is written in the journal and the log (once per kind) instead of vanishing in the frame loop's pcall
+function S.frame(now, dt)
+    local ok, err = pcall(S.update, now, dt)
+    if ok then return end
+    S.n.errors = S.n.errors + 1
+    S.last_error = tostring(err):sub(1, 200)
+    if S.last_error ~= S.err_noted then
+        S.err_noted = S.last_error
+        S.note("script error: " .. S.last_error)
+    end
+end
+
+function S.update(now, dt)
+    if not S.alive() then
+        if S.claim or S.puppet or S.jack_follow then S.release("the box is off", false) end
+        S.status = "off"
+        return
+    end
+    local why, hard = S.gate_why(now)
+    if why then
+        S.status = "waiting: " .. why
+        if hard and (S.claim or S.puppet or S.jack_follow) then S.release(why, false) end
+        S.car = nil -- (looked for again when it opens: a car from before a load must not be touched)
+        return
+    end
+    local C = S.claim
+    if C and C.by == "peer" and now - C.heard > S.CLAIM_STALE then S.release("the other player's claim went quiet", true) return end
+    if not S.car then
+        if now - S.look_at >= S.LOOK_EVERY then
+            S.look_at = now
+            S.car = S.find(now)
+        end
+        if not S.car then S.status = "waiting for the garage's car" return end
+    end
+    if now - S.read_at >= S.READ_EVERY then
+        S.read_at = now
+        local r = S.read_local(S.car)
+        if not r then
+            if S.claim or S.puppet then S.release("the car is gone from my scene", false) end
+            S.car = nil
+            return
+        end
+        if S.last_state ~= r.state then
+            S.trans[#S.trans + 1] = { at = math.floor(now * 10) / 10, from = S.last_state, to = r.state, story = S.story_n, claim = S.claim and S.claim.by or nil,
+                -- (10.27) what else the car said at that moment (the journal of how Jack drives and when the player is in)
+                action = r.action, speed = math.floor((r.speed or 0) * 10) / 10, engine = r.engine or nil, wait_driver = r.wait_driver or nil, hijack = r.hijack or nil,
+                hit_player = r.hit_player or nil, hit_enemy = r.hit_enemy or nil, hits = r.hits ~= 0 and r.hits or nil, crashed = r.crashed or nil, door = r.door or nil, windows = r.win ~= 0 and r.win or nil }
+            while #S.trans > 80 do table.remove(S.trans, 1) end
+            S.note(string.format("my car: %s -> %s (story %s%s)", tostring(S.last_state), tostring(r.state), tostring(S.story_n), r.action and (", action " .. r.action) or ""))
+            S.last_state = r.state
+        end
+        S.local_r = r
+    end
+    local r = S.local_r
+    if not r then return end
+    C = S.claim
+    if not C then
+        local st = r.state
+        if (S.FIGHT[st] or r.player or r.enemy or r.hijack) and st ~= "AfterExplosion" and now >= S.cool_until then S.claim_me(now, st) end
+    elseif C.by == "me" then
+        if now - C.sent_at >= S.CLAIM_EVERY then
+            C.sent_at = now
+            S.send("c", S.state_text(r.state) .. "|" .. C.seq)
+        end
+        if not C.ended_at then
+            if r.state == "AfterExplosion" then
+                S.end_fight(now, "exploded")
+            elseif S.story_n and S.story_n >= S.HI then
+                S.end_fight(now, "left")
+            elseif S.at_rest(r) then
+                S.left_since = S.left_since or now
+                if now - S.left_since > S.LEFT_S then S.end_fight(now, "left") end
+            else
+                S.left_since = nil
+            end
+        elseif now - C.ended_at > S.TAIL_S then
+            S.release("the fight is over", true)
+            return
+        end
+        S.write_alone(now)
+    else
+        S.read_file(now)
+        local rr = S.remote
+        if rr then C.heard = math.max(C.heard, rr.at or 0) end
+        if rr and rr.state == "AfterExplosion" and not S.ending and now - (C.since or now) > 5 then S.finish_rider("exploded", now) end
+        S.rider_tick(now)
+        S.mirror(now)
+        S.runover_tick(now)
+        S.ending_tick(now)
+        if now - (S.render_at or -100) > 0.3 then S.tick_render() end -- (no game phase has fired lately: the frame does it)
+    end
+    if S.claim and now - S.save_at >= S.SAVE_EVERY then S.save_at = now S.save("while it runs") end
+    S.status = S.claim and (S.claim.by == "me" and "I run the car" or ("the other player runs the car; I: " .. tostring(S.rs and S.rs.phase or "?"))) or "waiting for someone to get in"
+end
+
+-- The friend's ghost is drawn at the other seat (called where the friend's position is read): every ghost sits on the passenger side of the car
+function S.ride_offset(target, now)
+    if not (S.opt.seat and S.claim and S.car) then return end
+    local ok, p = pcall(function() return S.car.xf:call("get_Position") end)
+    local okq, q = pcall(function() return S.car.xf:call("get_Rotation") end)
+    if not ok or not okq or not p or not q then return end
+    local dx, dy, dz = target.x - p.x, target.y - p.y, target.z - p.z
+    if dx * dx + dz * dz > S.SEAT_NEAR ^ 2 or math.abs(dy) > 2.5 then return end
+    local o = S.qrot({ x = q.x, y = q.y, z = q.z, w = q.w }, { x = S.opt.seat_x, y = 0, z = 0 })
+    local ox, oz = target.x, target.z
+    target.x, target.y, target.z = target.x + o.x, target.y + o.y, target.z + o.z
+    S.n.seat_shifted = S.n.seat_shifted + 1
+    S.seat_last = { moved_m = math.floor(math.sqrt((target.x - ox) ^ 2 + (target.z - oz) ^ 2) * 100) / 100 } -- (how far the drawn ghost was moved: shown in the journal)
+end
+
+function S.register()
+    if S.registered then return end
+    S.registered = true
+    if not re.on_pre_application_entry then return end
+    -- "LockScene" is a phase this script already uses (the body code); "PrepareRendering" is the one the plan names. A name the game does not know may be accepted and never
+    -- fire, so the frame loop calls tick_render itself when neither has fired for 0.3 s (S.render_at).
+    for _, nm in ipairs({ "LockScene", "PrepareRendering" }) do
+        local ok = pcall(re.on_pre_application_entry, nm, function() CFG.carsync.tick_render() end)
+        if ok then S.render_phases = (S.render_phases or "") .. nm .. " " end
+    end
+    S.render_registered = S.render_phases ~= nil
+end
+
+function S.set_on(v)
+    S.on = v == true
+    if S.on then tracer.car_suspect = nil end
+    S.note("the garage car sync was " .. (S.on and "switched on" or "switched off"))
+    if not S.on then S.release("switched off in the panel", false) end
+end
+
+function S.report()
+    local car = S.car
+    local kids = {}
+    for k in pairs(car and car.kids or {}) do kids[#kids + 1] = k end
+    table.sort(kids)
+    return { about = "10.19: the garage car sync (Jack's car, c03_1_Main 900 to 999): who runs the car, the other player's forced get-in, the puppet, Jack, damage, run-overs. Journal in re7mp/car_sync.json.",
+        on = S.on, status = S.status, crash_marker = tracer.car_suspect or nil, story_number = S.story_n, car_found = car ~= nil, car_name = car and car.name or nil, interact_children = kids,
+        tyre_flags = car and #car.tyres or nil, jack = S.jack_name, my_state = S.local_r and S.local_r.state or nil,
+        -- 10.27: how the state name is read (the 10.26 file had it empty all session): which route answers, and what the other one said when neither did
+        fsm = { via = car and car.fsm_via or nil, field_answer = S.fsm_why.field, component_answer = S.fsm_why.component, empty_reads = S.n.state_empty, reads = S.n.state_reads },
+        my_action = S.local_r and S.local_r.action or nil, my_extra = S.local_r and { engine = S.local_r.engine, wait_driver = S.local_r.wait_driver, hit_player = S.local_r.hit_player, hit_enemy = S.local_r.hit_enemy,
+            hits = S.local_r.hits, crashed = S.local_r.crashed, door = S.local_r.door, windows = S.local_r.win, speed = S.local_r.speed } or nil,
+        claim = S.claim and { by = S.claim.by, state = S.claim.state } or nil,
+        ride_phase = S.rs and S.rs.phase or nil, puppet = S.puppet ~= nil, jack_follow = S.jack_follow == true, runner_state = S.remote and S.remote.state or nil, runner = S.remote and { flags = S.remote.flags, speed = S.remote.speed, windows = S.remote.win, front = S.remote.fc, rear = S.remote.rc } or nil, options = S.opt,
+        run_over_last_check = S.run_last, ghost_seat_last = S.seat_last, render_phases = S.render_phases, cool_s_left = math.max(0, math.floor(S.cool_until - os.clock())),
+        counts = S.n, last_error = S.last_error, last = S.last, transitions = S.trans, lines = S.lines }
+end
+
+net_on(S.MSG, function(payload) S.receive(payload) end)
+S.register()
+end -- do
+
+----------------------------------------------------------------------------------------------
+-- (10.19) The actor probe (reads only; off at every start): objects that run a script of their own like the garage's car, which is not an enemy (no Em#### name, no
+-- app.EnemySave) but has a state machine, a motion and a movement or character controller. Every 5 s the scene's app.MovementController and
+-- via.physics.CharacterController objects are listed, the enemies and the players left out: name, the first components, position, whether it moved, and the state
+-- name of its state machine. Written to re7mp/actor_probe.json (the first sight of each with the story number). Walk a chapter with it on and send the file:
+-- it says which other things are driven like the car.
+----------------------------------------------------------------------------------------------
+CFG.actors = { on = false, EVERY = 5, MAX = 80, MAX_PER_TYPE = 80, TRAIL_MAX = 80, SAVE_EVERY = 10, TYPES = { "app.MovementController", "via.physics.CharacterController" }, seen = {}, order = {}, scan_at = -100, save_at = -100,
+    dirty = false, status = "off", last_error = nil, n = { scans = 0, listed = 0, errors = 0, saves = 0 } }
+do
+local A = CFG.actors
+
+function A.skip_name(nm)
+    return nm:find("^Em%d") ~= nil or nm:find("^Pl%d") ~= nil or nm:find("^Pl0000") ~= nil or nm:find("VrDummy", 1, true) ~= nil or nm:find("^coop") ~= nil
+end
+
+function A.scan(now)
+    A.n.scans = A.n.scans + 1
+    local sn = CFG.story and CFG.carsync and CFG.carsync.story_number() or nil
+    for _, tn in ipairs(A.TYPES) do
+        -- (10.27) the list was cut at the car probe's MAX_INSTANCES (3 objects of a type, the players and enemies counted): a busy scene hid the rest. A scene has a few dozen at most.
+        local list = CFG.car.instances(tn, A.MAX_PER_TYPE)
+        for _, comp in ipairs(list or {}) do
+            local okg, go = pcall(function() return comp:call("get_GameObject") end)
+            if okg and go ~= nil then
+                local okn, nm = pcall(function() return go:call("get_Name") end)
+                nm = okn and as_text(nm) or "?"
+                if type(nm) == "string" and not A.skip_name(nm) then
+                    local rec = A.seen[nm]
+                    local okp, p = pcall(function() return go:call("get_Transform"):call("get_Position") end)
+                    if not rec then
+                        if #A.order >= A.MAX then goto continue end
+                        rec = { name = nm, first_story = sn, first_seen_s = math.floor(now), types = {}, moved = false }
+                        local okc, comps = pcall(function() return go:call("get_Components") end)
+                        for _, c in ipairs(okc and CFG.mold.items(comps) or {}) do
+                            if #rec.types < 14 then
+                                local okt, td = pcall(function() return c:get_type_definition():get_full_name() end)
+                                rec.types[#rec.types + 1] = okt and td or "?"
+                            end
+                        end
+                        A.seen[nm] = rec
+                        A.order[#A.order + 1] = nm
+                        A.n.listed = A.n.listed + 1
+                        A.dirty = true
+                    end
+                    if okp and p and type(p.x) == "number" then
+                        if rec.pos and (math.abs(rec.pos.x - p.x) + math.abs(rec.pos.z - p.z)) > 0.05 then rec.moved = true A.dirty = true end
+                        rec.pos = { x = p.x, y = p.y, z = p.z }
+                    end
+                    local okf, fsm = pcall(function() return go:call("getComponent(System.Type)", sdk.typeof("via.fsm.Fsm")) end)
+                    if okf and fsm ~= nil then
+                        local oks, st = pcall(function() return fsm:call("getCurrentState(System.UInt32)", 0) end)
+                        local text = oks and st ~= nil and tostring(as_text(st) or "") or nil
+                        if text and text ~= rec.fsm_state then
+                            rec.fsm_state = text
+                            rec.fsm_changes = (rec.fsm_changes or 0) + 1
+                            -- (10.27) the states in the order they came, with the second of the session (the last 80): the 10.26 file only had the last one ("HitWall") and a count of 19
+                            rec.fsm_trail = rec.fsm_trail or {}
+                            rec.fsm_trail[#rec.fsm_trail + 1] = { at_s = math.floor(now), state = text, story = sn }
+                            while #rec.fsm_trail > A.TRAIL_MAX do table.remove(rec.fsm_trail, 1) end
+                            A.dirty = true
+                        end
+                    end
+                end
+            end
+            ::continue::
+        end
+    end
+end
+
+function A.save(why)
+    A.save_at = os.clock()
+    local list = {}
+    for _, nm in ipairs(A.order) do list[#list + 1] = A.seen[nm] end
+    local ok = CFG.save_json(FILES.MAP.actor_probe[1], FILES.MAP.actor_probe[2], { about = "re7mp 10.19 actor probe (reads only): objects with a movement or character controller that are not enemies or players. Send this file.",
+        build = CFG.BUILD, why = why, written_at = os.time(), actors = list })
+    A.n.saves = A.n.saves + 1
+    A.dirty = false
+    if not ok then A.n.errors = A.n.errors + 1 end
+end
+
+function A.set_on(v)
+    A.on = v == true
+    A.status = A.on and "on: waiting for the next look" or "off"
+    if A.on then A.scan_at = -100 end
+end
+
+function A.update(now)
+    if not A.on then return end
+    if now - A.scan_at >= A.EVERY then
+        A.scan_at = now
+        local ok, err = pcall(A.scan, now)
+        if not ok then A.n.errors = A.n.errors + 1 A.last_error = tostring(err):sub(1, 100) end
+        A.status = string.format("%d objects listed", #A.order)
+    end
+    if A.dirty and now - A.save_at >= A.SAVE_EVERY then A.save("while it runs") end
+end
+
+function A.report()
+    return { about = "10.19: the actor probe (reads only; off at every start): scene objects that run their own script like the garage car. Result in re7mp/actor_probe.json.",
+        on = A.on, status = A.status, listed = #A.order, counts = A.n, last_error = A.last_error }
+end
+end -- do
+
+
 -- At the start: a cutscene that was being played for the other player when the last session ended is not played again this session.
 function CFG.story.after_previous()
     local S = CFG.story
@@ -17253,320 +27326,6 @@ function CFG.story.force_report()
             echo_guard_s = S.ECHO_S } }
 end
 
-
-----------------------------------------------------------------------------------------------
--- Cutscene probe (9.28, EXPERIMENTAL; off at the start). When the game starts a cutscene (the same requestEvent hook the story sync
--- uses; it is READ only) this writes down WHICH ANIMATIONS PLAY: every object with a Motion component near me, with its motion bank /
--- id / frame, at +0.4 s, +3 s, +9 s and +18 s (re7mp/cutscenes/<id>.json), and records Ethan's own joints with the clip recorder
--- (re7mp/clips/cs_<id>.json) in case the cutscene drives his object. Nothing is changed in the game.
-----------------------------------------------------------------------------------------------
-CFG.cs = {
-    on = false, secs = 25, SECS_MIN = 5, SECS_MAX = 40, SCAN_AT = { 0.4, 3, 9, 18 }, MAX_FILES = 60, MAX_ITEMS = 25, RADIUS = 40, MAX_SCENE = 2500,
-    seen = 0, started = 0, saved = 0, repeats = 0, bad_id = 0, errors = 0, recent = {}, skipped = {}, files = {}, active = nil,
-    lines = 0, last = "No cutscene seen yet.",
-    -- (9.32) stop when the PLAYER's own base animation (layer 0) is gameplay again. Bank 0, id 0 = idle, 1 = walk / run, 4 and 5 = stopping /
-    -- starting (also crouching, guarding): the ids of the clips the owner recorded in normal play. A cutscene puts something else there
-    -- (0/10, 0/11 ... in the 9.30 recordings), or the player stays idle when the "cutscene" is only an event trigger. The first
-    -- `loco_grace` seconds never stop it (the cutscene can take a moment to take hold of the player: 0/11 began 2.5 s in at c03e02_10);
-    -- after that it stops once the player has been in gameplay for LOCO_HOLD seconds, and the gameplay part is cut off the clip.
-    stop_loco = true, loco_grace = 4, GRACE_MIN = 1, GRACE_MAX = 10, LOCO_HOLD = 1.0, LOCO_EVERY = 0.1, TRIM_MARGIN = 0.25,
-    LOCO = { ["0/0"] = "idle", ["0/1"] = "walk / run", ["0/4"] = "stopping / starting", ["0/5"] = "stopping / starting" },
-    stopped_loco = 0, stopped_f10 = 0, trigger_only = 0,
-    -- (9.38) UNLINKED from cutscenes by default. The 9.37 test: Mia froze in a cutscene with story sync on; the owner's guess was that the recording
-    -- STOPPED and the cutscene stopped moving with it. (The probe was off in that session, so it was not the cause; but a recorder that starts and stops
-    -- with every cutscene is exactly the kind of thing to take out of the picture.) Linked = a recording starts and ends by itself with each cutscene
-    -- (the old behaviour); unlinked = a cutscene start only counts, and a recording is made by hand ("Record now", F10 stops it).
-    link = false, unlinked = 0, manual = 0,
-}
-
-function CFG.cs.note(msg)
-    local K = CFG.cs
-    K.last = msg
-    K.lines = K.lines + 1
-    if K.lines <= 80 then say("cutscene: " .. msg) end
-end
-
-function CFG.cs.set_on(v)
-    local K = CFG.cs
-    K.on = v == true
-    say("cutscene probe switched " .. (K.on and "ON (experimental)" or "off"))
-    if K.on then pcall(CFG.story.install) end -- (the same read-only hook the story sync uses)
-end
-
--- A cutscene started in this game (called with the id the hook read, from the frame).
-function CFG.cs.on_event(e, now, manual)
-    local K = CFG.cs
-    if not K.on then return end
-    local id = e.id
-    if type(id) ~= "string" or not id:match("^[%w_]+$") or #id > 40 then
-        K.bad_id = K.bad_id + 1
-        if K.bad_id <= 5 then K.note("a cutscene name with odd characters was ignored: " .. tostring(id):sub(1, 30)) end
-        return
-    end
-    K.seen = K.seen + 1
-    if not K.link and not manual then K.unlinked = K.unlinked + 1 return end -- (9.38) not linked to cutscenes: they are only counted
-    if K.recent[id] and now - K.recent[id] < 60 then
-        K.repeats = K.repeats + 1 -- (the same cutscene asked for again while walking about: one recording is enough)
-        return
-    end
-    K.recent[id] = now
-    if K.active then
-        if #K.skipped < 20 then K.skipped[#K.skipped + 1] = { id = id, while_recording = K.active.id } end
-        K.note(string.format("%s started while %s is being recorded: not recorded (play it again later)", id, K.active.id))
-        return
-    end
-    if #K.files >= K.MAX_FILES and not manual then -- (9.38: a recording made by hand is the tester's own choice: no cap)
-        K.note(string.format("%s started, but %d cutscenes were recorded this session already: not recorded", id, K.MAX_FILES))
-        return
-    end
-    local player = player_object()
-    local px, py, pz
-    if player then px, py, pz = give.player_pose(player) end
-    K.started = K.started + 1
-    K.active = { id = id, t0 = now, scans = {}, next_scan = 1, ethan = "waiting for the game phase", px = px, py = py, pz = pz, manual = manual or nil,
-        ex = e.ex, ey = e.ey, ez = e.ez, scene = CFG.body.scene_key(),
-        loco = { last_read = -1, since = nil, seen_non = false, reads = 0, unreadable = 0, counts = {}, timeline = {}, last_key = nil, now_key = nil } }
-    K.note(string.format("%s %s: recording %d s (animations playing near you, and Ethan's joints)", id, manual and "recorded by hand" or "started", K.secs))
-    CFG.body.later("Cutscene " .. id, function() CFG.cs.begin(id) end)
-end
-
--- (9.38) A recording by hand: the same recording as a cutscene's, started by the button; it does not stop when the player idles (F10 or the time ends it).
-function CFG.cs.record_now()
-    local K = CFG.cs
-    if not K.on then K.note("switch the cutscene probe on first") return false end
-    if K.active then K.note("a recording is running already (F10 stops it)") return false end
-    K.manual = K.manual + 1
-    CFG.cs.on_event({ id = "manual_" .. K.manual }, os.clock(), true)
-    return K.active ~= nil
-end
-
--- In the chosen game phase (the clip recorder samples there too): start the joint recording.
-function CFG.cs.begin(id)
-    local K, C = CFG.cs, CFG.clip
-    local a = K.active
-    if not a or a.id ~= id then return end
-    if C.rec then
-        a.ethan = "the clip recorder was busy with another recording"
-        return
-    end
-    C.lib["cs_" .. id] = nil
-    C.ended = nil -- (9.32: how the last recording ended is for the one that starts now to fill in)
-    local ok = C.start({ label = "cs_" .. id, secs = K.secs, ignore_scene = true, note = "cutscene " .. id })
-    a.ethan = ok and "recording" or "no Ethan object or none of his joints could be read here"
-end
-
--- Every object with a Motion component, nearest first: { path, dist, ids }.
-function CFG.cs.scan_motions()
-    local K, C = CFG.cs, CFG.clip
-    local scene = scene_object()
-    if not scene then return nil, "no scene" end
-    local ok, arr = pcall(function() return scene:call("findComponents(System.Type)", sdk.typeof("via.motion.Motion")) end)
-    if not ok or not arr then return nil, "findComponents failed" end
-    local oke, elems = pcall(function() return arr:get_elements() end)
-    if not oke or not elems then return nil, "findComponents gave no list" end
-    local player = player_object()
-    local px, py, pz
-    if player then px, py, pz = give.player_pose(player) end
-    local list = {}
-    for i, m in ipairs(elems) do
-        if i > K.MAX_SCENE then break end
-        local okg, go = pcall(function() return m:call("get_GameObject") end)
-        if okg and go then
-            local d, gx, gy, gz = 0, nil, nil, nil
-            pcall(function()
-                local p = go:call("get_Transform"):call("get_Position")
-                gx, gy, gz = p.x, p.y, p.z
-            end)
-            if px and gx then d = math.sqrt((gx - px) ^ 2 + (gy - py) ^ 2 + (gz - pz) ^ 2) end
-            if d == d and d <= K.RADIUS then list[#list + 1] = { go = go, d = d, x = gx, y = gy, z = gz } end
-        end
-    end
-    table.sort(list, function(a, b) return a.d < b.d end)
-    local items = {}
-    for i = 1, math.min(#list, K.MAX_ITEMS) do
-        local it = list[i]
-        items[#items + 1] = { path = CFG.lm.go_path(it.go), dist = math.floor(it.d * 10 + 0.5) / 10, ids = C.ids(it.go) }
-    end
-    return items, #elems
-end
-
--- One look at the animated objects near the player (the scheduled ones, and the last one when a recording is stopped early).
-function CFG.cs.take_scan(a, el, final)
-    local K = CFG.cs
-    local okp, items, total = pcall(CFG.cs.scan_motions)
-    local at = math.floor(el * 100 + 0.5) / 100
-    if okp and items then
-        a.scans[#a.scans + 1] = { at = at, final = final or nil, objects_with_motion_in_scene = total, items = items }
-    else
-        K.errors = K.errors + 1
-        a.scans[#a.scans + 1] = { at = at, final = final or nil, error = tostring(okp and total or items):sub(1, 80), items = {} }
-    end
-end
-
--- (9.32) The player's own base animation, about ten times a second while a cutscene is recorded: bank / id of layer 0 of the object whose joints are
--- recorded (Ethan's), else of the player object. Returns the reason to stop (and the second the gameplay part began), or nil.
-function CFG.cs.watch_player(a, el)
-    local K, C = CFG.cs, CFG.clip
-    local w = a.loco
-    if w == nil or el - w.last_read < K.LOCO_EVERY then return nil end
-    w.last_read = el
-    local go = C.rec and C.rec.file_label == "cs_" .. a.id and C.rec.go and C.rec.go.body or nil
-    local bank, id, fr
-    if go then bank, id, fr = C.motion0(go) end
-    if bank == nil then
-        local okp, pgo = pcall(player_object)
-        if okp and pgo then bank, id, fr = C.motion0(pgo) end
-    end
-    if bank == nil then
-        w.unreadable = w.unreadable + 1
-        w.since, w.now_key = nil, nil -- (what he is doing can't be told: that is not "gameplay")
-        return nil
-    end
-    local key = string.format("%d/%d", bank, id)
-    w.reads = w.reads + 1
-    w.now_key = key
-    w.counts[key] = (w.counts[key] or 0) + 1
-    if key ~= w.last_key then
-        w.last_key = key
-        if #w.timeline < 80 then
-            w.timeline[#w.timeline + 1] = { t = math.floor(el * 100 + 0.5) / 100, id = key, name = K.LOCO[key], frame = fr and math.floor(fr * 10 + 0.5) / 10 or nil }
-        end
-    end
-    if K.LOCO[key] then
-        if w.since == nil then w.since = el end
-    else
-        w.since = nil
-        w.seen_non = true
-    end
-    if K.stop_loco and w.since ~= nil and el >= K.loco_grace and el - w.since >= K.LOCO_HOLD then
-        return string.format("gameplay again (the player has been %s for %.1f s)", K.LOCO[key] or key, el - w.since), w.since
-    end
-    return nil
-end
-
--- (9.32) Ends the recording of this cutscene now, for `why`. The gameplay part (from `since` on) is cut off the joint clip; when the player never
--- did anything but idle / walk / run, the joint clip is not kept at all (it would only be noise: the event was a trigger, not a cutscene).
-function CFG.cs.request_stop(a, el, why, since)
-    local K, C = CFG.cs, CFG.clip
-    a.stopping = { el = el, why = why }
-    local w = a.loco
-    local trigger = w.reads >= 3 and not w.seen_non
-    local rec = C.rec
-    if rec and rec.file_label == "cs_" .. a.id then
-        rec.stop = true
-        rec.stop_why = why
-        if since then rec.trim_to = math.max((a.t0 + since) - rec.t0 + K.TRIM_MARGIN, 0.5) end
-        if trigger then
-            rec.discard = true
-            rec.discard_why = "only idle / walking / running was seen (an event trigger, not a cutscene)"
-            a.discarded = true
-        end
-    end
-    if trigger then K.trigger_only = K.trigger_only + 1 end
-    K.stopped_loco = K.stopped_loco + 1
-    CFG.cs.take_scan(a, el, true) -- what is around at the end
-    K.note(string.format("%s: stopped at %.1f s: %s%s", a.id, el, why, trigger and " - an event trigger, not a cutscene" or ""))
-end
-
-function CFG.cs.finish(a, why)
-    local K, C = CFG.cs, CFG.clip
-    K.active = nil
-    -- what is new since the first look: the cutscene's own actors
-    local first = {}
-    for _, it in ipairs(a.scans[1] and a.scans[1].items or {}) do first[it.path] = true end
-    local most = 0
-    for i, sc in ipairs(a.scans) do
-        sc.new_since_first = {}
-        if i > 1 then
-            for _, it in ipairs(sc.items) do
-                if not first[it.path] and #sc.new_since_first < 12 then sc.new_since_first[#sc.new_since_first + 1] = it.path end
-            end
-        end
-        most = math.max(most, #sc.items)
-    end
-    local clip = C.lib["cs_" .. a.id]
-    -- (9.32) what the player's own animation says about it
-    local w = a.loco or { reads = 0, unreadable = 0, counts = {}, timeline = {} }
-    local kind, kind_why
-    if w.reads >= 3 and not w.seen_non then
-        kind = "event_trigger"
-        kind_why = "the player's own animation was only idle / walk / run the whole time: this looks like an event trigger, not a cutscene (if it was a real cutscene whose actors are other objects, raise 'wait at the start' or untick the stop box)"
-    elseif w.seen_non then
-        kind = "cutscene"
-        kind_why = "the player's own animation was something other than idle / walk / run at some point (see player_motion.timeline)"
-    else
-        kind = "unknown"
-        kind_why = "the player's own animation could not be read, or fewer than 3 readings were made"
-    end
-    if a.discarded and not clip and a.ethan == "recording" then a.ethan = "recorded, but not kept (only idle / walking / running: an event trigger)" end
-    local d = { format = 1, build = CFG.BUILD, id = a.id, why_it_ended = why, seconds = K.secs, seconds_recorded = math.floor((os.clock() - a.t0) * 10 + 0.5) / 10,
-        kind = kind, kind_why = kind_why,
-        player_motion = { readings = w.reads, unreadable = w.unreadable, ids_seen = w.counts, timeline = w.timeline, gameplay_ids = K.LOCO,
-            stop_box = K.stop_loco, wait_at_start_s = K.loco_grace },
-        player = a.px and { x = a.px, y = a.py, z = a.pz } or nil, event_transform = a.ex and { x = a.ex, y = a.ey, z = a.ez } or nil,
-        ethan = a.ethan, ethan_clip_file = clip and (C.src["cs_" .. a.id] or ("re7mp/clips/cs_" .. a.id .. ".json")) or nil,
-        ethan_joints_that_moved = clip and clip.moving_count or nil, ethan_most_moving = clip and clip.moving or nil,
-        scans = a.scans }
-    local ok, file = CFG.save_json("re7mp/cutscenes/" .. a.id .. ".json", "re7mp_cutscene_" .. a.id .. ".json", d)
-    local err = file
-    if not ok then file = "re7mp/cutscenes/" .. a.id .. ".json" end
-    if ok then K.saved = K.saved + 1 else K.errors = K.errors + 1 end
-    K.files[#K.files + 1] = { id = a.id, file = file, written = ok, scans = #a.scans, most_objects = most, ethan = a.ethan, kind = kind, why = why,
-        ethan_joints_moved = clip and clip.moving_count or nil }
-    K.note(string.format("%s done%s: %d looks at the animations (up to %d objects each), Ethan: %s%s - %s", a.id, ok and "" or (" (NOT written: " .. tostring(err):sub(1, 50) .. ")"),
-        #a.scans, most, tostring(a.ethan), clip and string.format(", %d of his joints moved", clip.moving_count or 0) or "", kind == "event_trigger" and "an event trigger" or kind))
-end
-
-function CFG.cs.update(now)
-    local K, C = CFG.cs, CFG.clip
-    if K.on and not CFG.story.hook_tried and now > 5 then pcall(CFG.story.install) end -- (a remembered switch: hook it once the game has started)
-    local a = K.active
-    if not a then return end
-    local el = now - a.t0
-    if not K.on then
-        return CFG.cs.finish(a, "switched off")
-    end
-    while a.next_scan <= #K.SCAN_AT and el >= K.SCAN_AT[a.next_scan] do
-        local at = K.SCAN_AT[a.next_scan]
-        a.next_scan = a.next_scan + 1
-        if at <= K.secs and not a.stopping then CFG.cs.take_scan(a, el, false) end
-    end
-    if not a.stopping and not a.manual then
-        local okw, why, since = pcall(CFG.cs.watch_player, a, el)
-        if okw and why then CFG.cs.request_stop(a, el, why, since) end
-    end
-    local running = C.rec and C.rec.file_label == "cs_" .. a.id
-    if a.stopping then
-        if running and el - a.stopping.el < 2 then return end -- (the joint recording ends in the game phase: it gets two seconds to do that)
-        return CFG.cs.finish(a, a.stopping.why)
-    end
-    if a.ethan == "recording" and not running then
-        -- (9.32) the joint recording is over before the time was up: F10 stopped it, or reading a joint failed and it was dropped
-        local ended = C.ended
-        if ended and ended.label == "cs_" .. a.id and ended.why ~= "time" then
-            K.stopped_f10 = K.stopped_f10 + 1
-            CFG.cs.take_scan(a, el, true)
-            return CFG.cs.finish(a, ended.why)
-        elseif not ended then
-            a.ethan = "the joint recording failed and was dropped"
-            CFG.cs.take_scan(a, el, true)
-            return CFG.cs.finish(a, "the joint recording stopped early")
-        end
-    end
-    if running and el < K.secs + 5 then return end -- (the joint recording is still running)
-    if el >= K.secs + 0.5 then CFG.cs.finish(a, "finished") end
-end
-
-function CFG.cs.report()
-    local K = CFG.cs
-    local files = {}
-    for i = math.max(1, #K.files - 20), #K.files do files[#files + 1] = K.files[i] end
-    return { on = K.on, seconds = K.secs, seen = K.seen, started = K.started, saved = K.saved, repeats = K.repeats, bad_id = K.bad_id, errors = K.errors,
-        stop_when_gameplay = K.stop_loco, wait_at_start_s = K.loco_grace, stopped_when_gameplay = K.stopped_loco, stopped_by_f10 = K.stopped_f10,
-        event_triggers_seen = K.trigger_only, f10_presses_that_stopped = CFG.clip.f10_stops or 0,
-        recording = K.active and K.active.id or nil, skipped = K.skipped, files = files, last = K.last,
-        linked_to_cutscenes = K.link, cutscenes_not_recorded_because_unlinked = K.unlinked, recorded_by_hand = K.manual }
-end
 
 ----------------------------------------------------------------------------------------------
 -- 9.40: THE LOADING GATE (CFG.busy), shared by the world modules.
@@ -17650,8 +27409,11 @@ end
 --   open|<id>|<ch>   close|<id>|<ch>   unlock|<id>|<ch>   angle|<id>|<degrees>|<side 0 front, 1 back>|<ch>
 ----------------------------------------------------------------------------------------------
 CFG.door = {
-    MSG = 13, on = true, -- (on: remembered as door_sync)
-    POLL_S = 0.25, ANGLE_S = 0.2, ANGLE_MIN = 3, OURS_S = 3, AGAIN_S = 2, RETRY_S = 0.7, OWN_S = 90, NEAR_M = 1.5, HOLD_M = 1.8, GLIDE_DPS = 360, LOG_MAX = 150,
+    MSG = 13, on = true, -- (10.22: always on. It was a box in the panel, remembered as door_sync; both are gone. The checks of D.on below stay as they were)
+    -- (10.12) your 15 Nov note "doors are not opening fully, report door positions more often and glide smoother": the angle goes every 0.1 s (was 0.35 s) when it moved
+    -- 2 degrees (was 5), a door that stopped short of the last angle sent tells its final one, and the door glides with a short time constant (GLIDE_TAU) instead of a
+    -- straight line paced to the old 0.35 s gap. 10.9 had slowed the angles down for the frame dips; the dips were not the doors (debug file: the doors part of the frame profile is 0.0 ms)
+    POLL_S = 0.2, ANGLE_S = 0.1, ANGLE_MIN = 2, SETTLE_S = 0.25, SETTLE_MIN = 0.5, GLIDE_TAU = 0.06, OURS_S = 3, AGAIN_S = 2, RETRY_S = 0.7, OWN_S = 90, NEAR_M = 1.5, HOLD_M = 1.8, GLIDE_DPS = 360, LOG_MAX = 150,
     doors = {}, by_addr = {}, ours = {}, touch = {}, sent_at = {}, retry = {}, unlock_check = {}, pending_unlock = {}, pending_close = {},
     poll_at = -100, angle_at = 0, glide_at = 0, was_busy = false, hooked = false, hook_why = nil,
     n = { sent_open = 0, sent_close = 0, sent_unlock = 0, sent_angle = 0, got_open = 0, got_close = 0, got_unlock = 0, got_angle = 0, applied = 0,
@@ -17821,7 +27583,7 @@ end
 function CFG.door.send(verb, id, a, b)
     local D = CFG.door
     local text
-    if verb == "angle" then text = string.format("angle|%s|%.0f|%d|%d", id, a, b, D.chapter())
+    if verb == "angle" then text = string.format("angle|%s|%.1f|%d|%d", id, a, b, D.chapter())
     else text = string.format("%s|%s|%d", verb, id, D.chapter()) end
     net_send(D.MSG, text)
     D.n["sent_" .. verb] = D.n["sent_" .. verb] + 1
@@ -17943,6 +27705,17 @@ end
 -- shutting by itself.
 function CFG.door.on_interact(args)
     local D = CFG.door
+    local t0 = os.clock()
+    D.n.hook_calls = (D.n.hook_calls or 0) + 1
+    -- (10.9) alone, nobody needs to know what was touched: the hook returns at once (it runs inside the game's own call, so it is kept as cheap as it can be)
+    if not D.on or not peer_present(t0) then D.n.hook_skipped = (D.n.hook_skipped or 0) + 1 return end
+    local ok_h, err_h = pcall(D.on_interact_body, args)
+    D.hook_s = (D.hook_s or 0) + (os.clock() - t0)
+    if not ok_h then D.fail("setInteract hook", err_h) end
+end
+
+function CFG.door.on_interact_body(args)
+    local D = CFG.door
     local door = sdk.to_managed_object(args[2])
     local user = sdk.to_managed_object(args[3])
     -- my player: the object manager's PlayerObj (as the other developer's mod reads it), or the Pl0000 object this script found
@@ -18029,7 +27802,8 @@ function CFG.door.poll(now)
     end
 end
 
--- A door pushed by a body or cracked open by its handle (states 2 and 3): its angle goes ANGLE_S apart, only when it moved ANGLE_MIN degrees.
+-- A door pushed by a body or cracked open by its handle (states 2 and 3): its angle goes ANGLE_S apart, only when it moved ANGLE_MIN degrees; a door that has stopped
+-- (the same angle for SETTLE_S) short of the last angle sent sends the final one, so the other game's door does not stay up to ANGLE_MIN degrees short of it.
 function CFG.door.stream(now)
     local D = CFG.door
     if now - D.angle_at < D.ANGLE_S then return end
@@ -18038,13 +27812,26 @@ function CFG.door.stream(now)
         if s.live_t and now - s.live_t < 0.5 and (s.state == 2 or s.state == 3) then
             local ours = D.ours[id] ~= nil and now - D.ours[id] < 1
             local a = tonumber(D.get(s.d, "get_currentAngle"))
-            if a and not ours and math.abs(a - (s.ang_sent or -100)) >= D.ANGLE_MIN then
-                s.ang_sent, s.mine = a, true
+            if a and not ours then
+                local moved = math.abs(a - (s.ang_sent or -100))
                 local side = D.field(s.d, "IsOpenFront") == true and 0 or 1
-                D.send("angle", id, a, side)
+                if moved >= D.ANGLE_MIN then
+                    s.ang_sent, s.mine, s.ang_still = a, true, nil
+                    D.send("angle", id, a, side)
+                elseif s.ang_sent and moved >= D.SETTLE_MIN and math.abs(a - (s.ang_prev or a)) < 0.2 then
+                    s.ang_still = s.ang_still or now
+                    if now - s.ang_still >= D.SETTLE_S then
+                        s.ang_sent, s.mine, s.ang_still = a, true, nil
+                        D.n.sent_settle = (D.n.sent_settle or 0) + 1
+                        D.send("angle", id, a, side)
+                    end
+                else
+                    s.ang_still = nil
+                end
             end
+            s.ang_prev = a
         elseif s.state == 0 then
-            s.ang_sent = nil
+            s.ang_sent, s.ang_still, s.ang_prev = nil, nil, nil
         end
     end
 end
@@ -18060,9 +27847,13 @@ function CFG.door.glide(now)
                 s.ang_target = nil
             else
                 local gap = s.ang_target - s.ang_cur
-                local step = math.min(math.max(math.abs(gap) * dt / 0.2, 20 * dt), D.GLIDE_DPS * dt)
-                if math.abs(gap) <= step then s.ang_cur = s.ang_target else s.ang_cur = s.ang_cur + (gap > 0 and step or -step) end
-                if s.ang_cur ~= s.ang_set then
+                -- (10.12) an exponential follow with a short time constant (GLIDE_TAU): it covers most of the gap to the newest angle before the next one arrives (they come every
+                -- 0.1 s) and never stops dead between two; 20 degrees a second at least so a small gap still closes, and never faster than GLIDE_DPS
+                local step = math.abs(gap) * (1 - math.exp(-dt / D.GLIDE_TAU))
+                step = math.min(math.max(step, 20 * dt), D.GLIDE_DPS * dt)
+                if math.abs(gap) <= step or math.abs(gap) < 0.3 then s.ang_cur = s.ang_target else s.ang_cur = s.ang_cur + (gap > 0 and step or -step) end
+                -- (10.9) and the game is only asked when the door has really moved (a quarter of a degree) or has arrived: not once per frame for nothing
+                if s.ang_set == nil or math.abs(s.ang_cur - s.ang_set) >= 0.25 or s.ang_cur == s.ang_target and s.ang_cur ~= s.ang_set then
                     s.ang_set = s.ang_cur
                     D.ours[id] = now
                     D.try(s.d, "requestPush(app.DoorPush.OpenSide, System.Single, System.Boolean)", s.ang_side, s.ang_cur + 0.0, false)
@@ -18175,6 +27966,7 @@ function CFG.door.receive(payload)
             result = "already unlocked"
         end
     elseif verb == "open" then
+        s.ang_target = nil -- (10.12) a glide still running would pull the opening door back to the last pushed angle: the doors that stayed half open
         D.take(s, now)
         if D.get(s.d, "get_isLocked") == true then
             D.try(s.d, "unlockDoor")
@@ -18182,7 +27974,12 @@ function CFG.door.receive(payload)
         end
         local before = D.get(s.d, "get_doorState")
         D.pending_close[id] = nil
-        if not D.is_open(before) and D.get(s.d, "get_isLocked") ~= true then
+        -- (10.12) state 3 is "pushed": a door the friend's angles had only pushed part of the way counts as open for is_open, so the "open" that followed did nothing and
+        -- the door stayed where the last angle left it (half open). A pushed door that is short of its full angle is opened the rest of the way.
+        local cur_a = tonumber(D.get(s.d, "get_currentAngle")) or 0
+        local max_a = tonumber(D.field(s.d, "CurrentMaxOpenAngle")) or tonumber(D.field(s.d, "MaxOpenAngle")) or 90
+        local short = before == 3 and max_a > 0 and cur_a < max_a - 3
+        if (not D.is_open(before) or short) and D.get(s.d, "get_isLocked") ~= true then
             local ok, err = D.open_door(s.d)
             D.n.retries = D.n.retries + 1
             D.note(string.format("opening door %s (state %s)%s", id, tostring(before), ok and "" or (" - ERROR " .. tostring(err):sub(1, 80))))
@@ -18193,6 +27990,7 @@ function CFG.door.receive(payload)
             D.note(string.format("open door %s: already state %s, locked %s", id, tostring(before), tostring(D.get(s.d, "get_isLocked"))))
         end
     elseif verb == "close" then
+        s.ang_target = nil
         D.release(s)
         if D.me_near(s, D.NEAR_M) then
             D.pending_close[id] = now
@@ -18242,7 +28040,7 @@ function CFG.door.report()
     end
     table.sort(list, function(a, b) return a.id < b.id end)
     return { on = D.on, hooked_setInteract = D.hooked, hook_problem = D.hook_why, message_kind = D.MSG, doors_known = shown, last = D.last, last_error = D.last_error,
-        counts = D.n, poll_every_s = D.POLL_S, poll_avg_ms = D.polls_timed > 0 and math.floor(D.poll_cost / D.polls_timed * 10000 + 0.5) / 10 or nil,
+        counts = D.n, angle_every_s = D.ANGLE_S, angle_min_degrees = D.ANGLE_MIN, setInteract_hook_ms_total = math.floor((D.hook_s or 0) * 10000 + 0.5) / 10, poll_every_s = D.POLL_S, poll_avg_ms = D.polls_timed > 0 and math.floor(D.poll_cost / D.polls_timed * 10000 + 0.5) / 10 or nil,
         poll_worst_ms = math.floor(D.poll_max * 10000 + 0.5) / 10, waiting_unlocks = (function() local c = 0 for _ in pairs(D.pending_unlock) do c = c + 1 end return c end)(),
         recent = D.events, doors = list, loading_gate = CFG.busy.report() }
 end
@@ -18276,11 +28074,11 @@ end
 CFG.eanim = {
     MSG = 14, on = false, -- (on: remembered as enemy_clips)
     POLL_S = 0.1, ASK_S = 2, ASK_MAX = 4, ADD_MAX = 12, DRIFT = 8, BLEND = 8.0, EMPTY = 4294967295, LOG_MAX = 120, FPS = 30, MISS_S = 0.5,
-    NAMES_MAX = 16, SEEN_MAX = 48, BANKS_MAX = 40, PATH_TRIES = 3, PATH_S = 0.5, PATH_RETRY_S = 5, SAVE_S = 20, PATH_MAX = 130, ERR_MAX = 3,
+    NAMES_MAX = 16, SEEN_MAX = 48, BANKS_MAX = 40, PATH_TRIES = 3, PATH_S = 0.5, PATH_RETRY_S = 5, PATH_LATE_TRIES = 9, PATH_LATE_S = 20, SAVE_S = 20, PATH_MAX = 130, ERR_MAX = 3,
     recs = {}, clips = {}, banks = {}, res = {}, info = nil, names_n = 0, bank_names = 0, added_n = 0, errs = {}, banned = {},
     poll_at = -100, path_at = -100, save_at = 0, dirty = false, pause_until = 0, hooked = false, hook_why = nil, loaded = 0,
     idle_why = "off", saved = false, save_error = nil, change_motion = {},
-    n = { clips_seen = 0, clips_dropped = 0, paths_found = 0, paths_missing = 0, asks = 0, answers_sent = 0, none_sent = 0, answers_got = 0, none_got = 0,
+    n = { clips_seen = 0, clips_dropped = 0, paths_found = 0, paths_found_late = 0, paths_missing = 0, asks = 0, answers_sent = 0, none_sent = 0, answers_got = 0, none_got = 0,
         added = 0, add_failed = 0, add_refused = 0, plays = 0, plays_missing = 0, plays_unsure = 0, drift_fixes = 0, released = 0, taken = 0, bad = 0,
         other_chapter = 0, ignored_off = 0, dropped_busy = 0, not_driven = 0, errors = 0, saves = 0, pauses_for_save = 0 },
     events = {}, lines = 0, last = "No enemy clip seen yet.", last_error = nil,
@@ -18393,9 +28191,12 @@ function CFG.eanim.want_path(name, go, bank)
         b.k[bank] = r
         b.n = b.n + 1
     end
-    if r.path or r.tries >= A.PATH_TRIES then return end
+    -- (10.17) three quick tries (5 s apart) as before, then six more at 20 s while the bank's clips are still being seen: a cutscene's or a gimmick's bank is only on the
+    -- enemy while the event runs, and the quick tries can all fall before it is there (Mia's banks 1 and 3 were "not found" three times in a row in the 20 Nov file)
+    if r.path or r.tries >= A.PATH_LATE_TRIES then return end
     local now = os.clock()
-    if now - A.path_at < A.PATH_S or now - r.at < A.PATH_RETRY_S then return end
+    local gap = r.tries >= A.PATH_TRIES and A.PATH_LATE_S or A.PATH_RETRY_S
+    if now - A.path_at < A.PATH_S or now - r.at < gap then return end
     A.path_at, r.at, r.tries = now, now, r.tries + 1
     local m = A.motion_of(go)
     if m == nil then return end
@@ -18403,12 +28204,49 @@ function CFG.eanim.want_path(name, go, bank)
     if p then
         r.path, r.ow, r.how = p, ow, how
         A.n.paths_found = A.n.paths_found + 1
+        if r.tries > A.PATH_TRIES then A.n.paths_found_late = A.n.paths_found_late + 1 end
         A.dirty = true
-        A.note(string.format("%s: bank %d is %s (%s)", name, bank, p, how))
-    elseif r.tries >= A.PATH_TRIES then
-        A.n.paths_missing = A.n.paths_missing + 1
-        A.note(string.format("%s: no .motlist path found for bank %d (tried %d times)", name, bank, r.tries))
+        A.note(string.format("%s: bank %d is %s (%s)%s", name, bank, p, how, r.tries > A.PATH_TRIES and (" after " .. r.tries .. " tries") or ""))
+    else
+        if r.tries >= A.PATH_TRIES then
+            r.search = A.search_dump(m, bank, now) -- (what the enemy's Motion does hold, so that the next file says why this bank is not in it)
+        end
+        if r.tries == A.PATH_TRIES or r.tries >= A.PATH_LATE_TRIES then
+            A.n.paths_missing = A.n.paths_missing + 1
+            A.note(string.format("%s: no .motlist path found for bank %d (tried %d times)", name, bank, r.tries))
+        end
     end
+end
+
+-- What an enemy's Motion holds: the counts of its dynamic, active and indexed banks and, for each, the bank id and the .motlist path (at most 40 rows). READS ONLY. Asked only
+-- after the quick tries failed, once per try.
+function CFG.eanim.search_dump(m, bank, now)
+    local A = CFG.eanim
+    local get = CFG.door.get
+    local out = { wanted = bank, at = math.floor(now), dynamic = tonumber(get(m, "getDynamicMotionBankCount")), active = tonumber(get(m, "getActiveMotionBankCount")),
+        indexed = tonumber(get(m, "getMotionBankCount")), rows = {} }
+    local function row(kind, i, bo, path)
+        if #out.rows >= 40 then return end
+        local id = bo ~= nil and tonumber(get(bo, "get_BankID")) or nil
+        out.rows[#out.rows + 1] = { kind, i, id, path }
+    end
+    for i = 0, math.min(out.dynamic or 0, 12) - 1 do
+        local bo = get(m, "getDynamicMotionBank", i)
+        local hd = bo ~= nil and get(bo, "get_MotionList") or nil
+        row("dynamic", i, bo, hd and CFG.mot.path_text(get(hd, "get_ResourcePath")) or nil)
+    end
+    for i = 0, math.min(out.active or 0, 12) - 1 do
+        local bo = get(m, "getActiveMotionBank", i)
+        local hd = bo ~= nil and get(bo, "get_MotionList") or nil
+        row("active", i, bo, hd and CFG.mot.path_text(get(hd, "get_ResourcePath")) or nil)
+    end
+    for i = 0, math.min(out.indexed or 0, 16) - 1 do
+        local bo = get(m, "getMotionBank", i)
+        if bo ~= nil and (type(bo) == "table" or type(bo) == "userdata") then
+            row("index", i, bo, CFG.mot.path_text(get(m, "getMotionListPathForTool", i)))
+        end
+    end
+    return out
 end
 
 -- Is the clip in a bank this enemy has loaded? true / false; nil when it cannot be told (then it is played, as before).
@@ -18823,7 +28661,7 @@ function CFG.eanim.report()
     end
     for name, b in pairs(A.banks) do
         local out = {}
-        for bank, r in pairs(b.k) do out[tostring(bank)] = r.path and { path = r.path, overwrite = r.ow, how = r.how } or { path = "not found", tries = r.tries } end
+        for bank, r in pairs(b.k) do out[tostring(bank)] = r.path and { path = r.path, overwrite = r.ow, how = r.how } or { path = "not found", tries = r.tries, search = r.search } end
         banks[name] = out
     end
     local playing = {}
@@ -18839,1129 +28677,6 @@ function CFG.eanim.report()
 end
 
 ----------------------------------------------------------------------------------------------
--- 9.43: THE SPAWN LOG. "Create a log that detects when Mia spawns, then check which methods the game calls to spawn her, as well as which
--- files it loads, so we know for sure if something is missing" (the Mia hair, and hair physics on characters and enemies).
--- It records, with the box ticked (remembered; ships unticked):
---   1. the game's own spawn / load methods: a few dozen methods found BY NAME in the manager classes (app.EnemyManager, app.CharacterManager,
---      via.Prefab, via.ResourceManager ...) are hooked once, in steps, and every call goes into a ring of the last 600 calls with its first two
---      readable arguments (a name, a file path, an object). A method that fires more than 150 times a second is counted, not logged.
---   2. a once-a-second look at every object with a Motion component. A character that was not there a second ago and matches the watched words
---      (Mia: pl2000 / pl2100 / em2000 / em2200 / em2300) starts an EPISODE: when, which chapter, where, what the game called in the 20 s before
---      (grouped: method, how often, first / last second relative to the spawn, the argument), every call and file that MENTIONS her, every file the
---      game was asked for in the 90 s before, and the same for the 25 s after.
---   3. her inventory, read in steps of five objects: every object under her, its components, and the files they hold (mesh, material, animation
---      lists, and every resource / path getter of the hair, cloth and chain components). Whatever looks like hair physics is listed on its own.
---   4. the same inventory of MY copy of her (the lab body or the enemy model), and the difference: objects, components, files and physics
---      components the real one has and the copy has not. That difference is the list of what is missing.
---   5. every few seconds, a census of the physics component types (via.motion.Chain, via.dynamics.GpuCloth ...) in the scene: which character or
---      enemy carries which, kept between sessions (re7mp/spawnlog.json, "hair_physics").
--- Everything is written to re7mp/spawnlog.json and re7mp/spawn_log.txt and is in the debug file as health.spawn_log. Safety: every native
--- call that reads a component is announced in lastcall.json first (stage "spawnlog"); a session that ended inside one never makes that call again
--- (re7mp/spawnstate.json). Reading only: nothing is changed in the game. Unverified in the real game.
-----------------------------------------------------------------------------------------------
-CFG.slog = {
-    on = false, focus = "mia;pl2000;pl2100;em2000;em2200;em2300",
-    POLL_S = 1.0, CENSUS_S = 5.0, SAVE_S = 15, START_DELAY = 3, BEFORE_S = 20, AFTER_S = 25, HITS_S = 180, LOAD_BEFORE_S = 90,
-    RING_MAX = 600, LOAD_MAX = 500, HIT_MAX = 200, FILES_MAX = 600, HOT_PER_S = 150, HOOK_MAX = 140, PER_TYPE_MAX = 28, HOOKS_PER_STEP = 5,
-    EP_MAX = 8, EP_GROUPS = 40, EP_FILES = 120, EP_AFTER = 160, OBJ_MAX = 90, DEPTH_MAX = 8, OBJ_PER_STEP = 5, GETTERS_MAX = 24, MOTLIST_MAX = 24,
-    NAMES_MAX = 80, VALUES_MAX = 40, LINES_MAX = 400, COMPS_MAX = 300, GONE_POLLS = 2, SAY_MAX = 60, ERR_MAX = 3,
-    HOOK_TYPES = { "app.EnemyManager", "app.CharacterManager", "app.PlayerManager", "app.EnemySpawner", "app.EnemyGenerator", "app.EnemySpawnManager",
-        "app.NPCManager", "app.EventManager", "app.GameManager", "app.CutSceneManager", "app.CutsceneManager", "via.Prefab", "via.ResourceManager",
-        "via.Scene", "via.GameObject" },
-    MIN_SCORE = { ["via.GameObject"] = 2, ["via.Scene"] = 2 }, -- (the engine's own busiest classes: only create / instantiate / spawn style names)
-    VERBS = { spawn = 3, instantiate = 3, create = 2, generate = 2, appear = 2, summon = 2, regist = 1, request = 1, load = 1, setup = 1, start = 0 },
-    NO_NAME = { "^get", "^set_", "^is", "^can", "^has", "update", "^%.c", "tostring", "equals", "gethashcode", "finalize", "dispose", "draw" },
-    PHYS_TYPES = { "via.motion.Chain", "via.motion.ChainCollision", "via.motion.ChainGroup", "via.dynamics.GpuCloth", "via.dynamics.Cloth",
-        "via.motion.SpringBone", "app.ChainClothSelector" },
-    PHYS_WORDS = { "chain", "cloth", "hair", "spring", "softbody", "jiggle" },
-    GETTER_WORDS = { "resource", "asset", "path", "holder", "userdata", "file", "preset", "setting", "prefab" },
-    GETTER_NEVER = { get_GameObject = true, get_Transform = true, get_Owner = true, get_Valid = true, get_Type = true, get_Address = true },
-    ring = {}, loads = {}, hits = {}, files = {}, files_n = 0, hooks = {}, queue = {}, eps = {}, collecting = {}, jobs = {}, lines = {},
-    known = {}, cache = {}, census = {}, seen = {}, types = {}, getters = {}, errs = {}, skip = {}, crashes = 0,
-    installing = false, targets = nil, started_at = nil, poll_at = -100, census_at = -100, save_at = 0, dirty = false, state_dirty = false,
-    idle = "off", last = "Nothing recorded yet.", last_error = nil, broken = nil, loaded = 0, saved = false, save_error = nil, text_saved = false, text_error = nil,
-    ep_n = 0, say_n = 0, scene_key = nil, cache_at = 0,
-    n = { hooks_ok = 0, hooks_failed = 0, hooks_skipped = 0, hot = 0, calls = 0, loads = 0, polls = 0, spawns = 0, gone = 0, inventories = 0, objects = 0,
-        reads = 0, censuses = 0, errors = 0, saves = 0, compares = 0, poll_failed = 0 },
-}
-
-function CFG.slog.note(msg)
-    local S = CFG.slog
-    S.last = msg
-    local stamp = "?"
-    pcall(function() stamp = os.date("%H:%M:%S") end)
-    S.lines[#S.lines + 1] = stamp .. "  " .. msg
-    if #S.lines > S.LINES_MAX then table.remove(S.lines, 1) end
-    S.say_n = S.say_n + 1
-    if S.say_n <= S.SAY_MAX then say("spawn log: " .. msg) end
-    S.dirty = true
-end
-
-function CFG.slog.fail(where, err)
-    local S = CFG.slog
-    S.n.errors = S.n.errors + 1
-    S.last_error = where .. ": " .. tostring(err):sub(1, 120)
-    if S.n.errors <= S.ERR_MAX or S.n.errors % 50 == 0 then say("spawn log: error in " .. where .. " (" .. S.n.errors .. " so far): " .. tostring(err):sub(1, 120)) end
-end
-
-function CFG.slog.crumb(key)
-    local S = CFG.slog
-    key = tostring(key):sub(1, 119)
-    if S.last_crumb == key then return end -- (the same kind of component again: the black box already says so)
-    S.last_crumb = key
-    tracer.crumb("spawnlog", key)
-end
-function CFG.slog.clean(what)
-    CFG.slog.last_crumb = nil
-    tracer.crumb("clean", what)
-end
-
-function CFG.slog.words()
-    local S = CFG.slog
-    if S._wf ~= S.focus then
-        S._wf, S._w = S.focus, {}
-        for w in tostring(S.focus or ""):lower():gmatch("[^;,%s]+") do S._w[#S._w + 1] = w end
-    end
-    return S._w
-end
-
-function CFG.slog.hit_text(low)
-    for _, w in ipairs(CFG.slog.words()) do
-        if low:find(w, 1, true) then return true end
-    end
-    return false
-end
-
-function CFG.slog.is_focus(name) return CFG.slog.hit_text(tostring(name or ""):lower()) end
-
-function CFG.slog.round(x) return math.floor(x * 10 + 0.5) / 10 end
-
-function CFG.slog.trim(list, keep)
-    local n = #list
-    if n <= keep then return end
-    table.move(list, n - keep + 1, n, 1)
-    for i = keep + 1, n do list[i] = nil end
-end
-
-function CFG.slog.name_of(go)
-    if go == nil then return nil end
-    local ok, n = pcall(function() return go:call("get_Name") end)
-    if ok and n ~= nil then return tostring(n) end
-    return nil
-end
-
-function CFG.slog.addr_of(o)
-    local ok, a = pcall(function() return o:get_address() end)
-    if ok and a ~= nil then return tostring(a) end
-    return tostring(o)
-end
-
-----------------------------------------------------------------------------------------------
--- 1. The hooks
-----------------------------------------------------------------------------------------------
-function CFG.slog.verb_score(low)
-    local S = CFG.slog
-    for _, p in ipairs(S.NO_NAME) do
-        if low:find(p) then return nil end
-    end
-    local best
-    for v, sc in pairs(S.VERBS) do
-        if low:find(v, 1, true) and (best == nil or sc > best) then best = sc end
-    end
-    return best
-end
-
--- The methods to hook: by reflection, in the manager classes this game has (a class that is missing is just skipped).
-function CFG.slog.find_targets()
-    local S = CFG.slog
-    local out, types_found = {}, {}
-    for _, tn in ipairs(S.HOOK_TYPES) do
-        local td = sdk.find_type_definition(tn)
-        if td ~= nil then
-            local list = {}
-            local okm, ms = pcall(function() return td:get_methods() end)
-            for i, m in ipairs(okm and ms or {}) do
-                local okn, nm = pcall(function() return m:get_name() end)
-                if okn and type(nm) == "string" then
-                    local sc = S.verb_score(nm:lower())
-                    if sc ~= nil and sc >= (S.MIN_SCORE[tn] or 0) then
-                        local np = 0
-                        pcall(function() np = tonumber(m:get_num_params()) or 0 end)
-                        if np <= 5 then list[#list + 1] = { m = m, name = nm, score = sc, idx = i, np = np } end
-                    end
-                end
-            end
-            table.sort(list, function(a, b) if a.score ~= b.score then return a.score > b.score end return a.idx < b.idx end)
-            local took = 0
-            for _, e in ipairs(list) do
-                if took >= S.PER_TYPE_MAX or #out >= S.HOOK_MAX then break end
-                local ptypes, names = {}, {}
-                pcall(function()
-                    for i, t in ipairs(e.m:get_param_types() or {}) do
-                        local okv, isval = pcall(function() return t:is_value_type() end)
-                        local full = tostring(t:get_full_name())
-                        ptypes[i] = { name = full, ref = okv and isval == false, res = full:find("Resource", 1, true) ~= nil or full:find("Holder", 1, true) ~= nil
-                            or full:find("Prefab", 1, true) ~= nil or full:find("UserData", 1, true) ~= nil }
-                        names[i] = full
-                    end
-                end)
-                local static = false
-                pcall(function() static = e.m:is_static() == true end)
-                out[#out + 1] = { m = e.m, type = tn, name = e.name, key = tn .. "." .. e.name .. "(" .. table.concat(names, ",") .. ")", pt = ptypes, static = static }
-                took = took + 1
-            end
-            types_found[#types_found + 1] = tn .. " (" .. took .. " of " .. #list .. ")"
-        end
-    end
-    S.types_hooked = types_found
-    return out
-end
-
-function CFG.slog.install_step()
-    local S = CFG.slog
-    if S.targets == nil then
-        local ok, t = pcall(S.find_targets)
-        if not ok then S.fail("finding the methods", t) S.targets = {} else S.targets = t end
-        S.target_i = 1
-        S.note(string.format("hooking: %d methods found in %d classes (%s)", #S.targets, #(S.types_hooked or {}), table.concat(S.types_hooked or {}, ", "):sub(1, 220)))
-    end
-    local CALL_ORIGINAL = sdk.PreHookResult and sdk.PreHookResult.CALL_ORIGINAL
-    local did = 0
-    while S.target_i <= #S.targets and did < S.HOOKS_PER_STEP do
-        local t = S.targets[S.target_i]
-        S.target_i = S.target_i + 1
-        did = did + 1
-        local hk = "hook " .. t.key
-        if S.skip[hk] then
-            S.n.hooks_skipped = S.n.hooks_skipped + 1
-        else
-            S.crumb(hk)
-            local rec = { key = t.key, type = t.type, name = t.name, pt = t.pt, static = t.static, n = 0, win_at = 0, win_n = 0 }
-            local ok, err = pcall(function()
-                sdk.hook(t.m, function(args)
-                    pcall(S.on_call, rec, args)
-                    return CALL_ORIGINAL
-                end)
-            end)
-            if ok then
-                S.hooks[#S.hooks + 1] = rec
-                S.n.hooks_ok = S.n.hooks_ok + 1
-            else
-                S.n.hooks_failed = S.n.hooks_failed + 1
-                S.fail("hook " .. t.key, err)
-            end
-        end
-    end
-    if S.target_i > #S.targets then
-        S.installing = false
-        S.targets = {}
-        S.hooked = true
-        S.clean("spawn log hooks installed")
-        S.note(string.format("hooks installed: %d, failed %d, skipped (ended a session) %d", S.n.hooks_ok, S.n.hooks_failed, S.n.hooks_skipped))
-    end
-end
-
--- The first two parameters, as text (the same reader as the trace), and the file path among them if there is one.
-function CFG.slog.describe(rec, args)
-    local parts, file = {}, nil
-    for i, pt in ipairs(rec.pt) do
-        if i > 2 then break end
-        local idx = i + (rec.static and 1 or 2)
-        local txt = describe_arg(pt, args, idx)
-        local str = type(txt) == "string" and txt:match('^"(.*)"$') or nil
-        if str and (str:find("/", 1, true) or str:match("%.[%w]+$")) then file = file or str:sub(1, 200) end
-        if pt.ref and pt.res and idx <= 4 then
-            local okr, t = pcall(function()
-                local o = sdk.to_managed_object(args[idx])
-                if o == nil then return nil end
-                for _, nm in ipairs({ "get_Path", "get_ResourcePath", "getResourcePath" }) do
-                    local ok2, r = pcall(o.call, o, nm)
-                    if ok2 and type(r) == "string" and r ~= "" then return r end
-                end
-                return CFG.mprobe.text(o)
-            end)
-            if okr and type(t) == "string" and t ~= "" then
-                txt = "<" .. pt.name .. " " .. t:sub(1, 160) .. ">"
-                file = file or t:sub(1, 200)
-            end
-        end
-        parts[#parts + 1] = tostring(txt):sub(1, 180)
-    end
-    return table.concat(parts, ", "), file
-end
-
-function CFG.slog.on_call(rec, args)
-    local S = CFG.slog
-    if not S.on or S.in_call then return end
-    local now = os.clock()
-    rec.n = rec.n + 1
-    if now - rec.win_at >= 1 then rec.win_at, rec.win_n = now, 0 end
-    rec.win_n = rec.win_n + 1
-    if rec.win_n > S.HOT_PER_S then
-        if not rec.hot then
-            rec.hot = true
-            S.n.hot = S.n.hot + 1
-        end
-        return
-    end
-    if rec.first == nil then rec.first = now end
-    rec.last = now
-    S.in_call = true -- (reading an argument must not log the calls it makes itself)
-    local ok, arg, file = pcall(S.describe, rec, args)
-    S.in_call = false
-    if ok then S.push(now, rec.key, arg, file) end
-end
-
-function CFG.slog.push(now, key, arg, file)
-    local S = CFG.slog
-    local e = { t = now, key = key, arg = arg, file = file }
-    e.hit = S.hit_text(((arg or "") .. " " .. (file or "")):lower())
-    S.ring[#S.ring + 1] = e
-    if #S.ring > S.RING_MAX * 1.25 then S.trim(S.ring, S.RING_MAX) end
-    S.n.calls = S.n.calls + 1
-    if file then
-        S.loads[#S.loads + 1] = e
-        if #S.loads > S.LOAD_MAX * 1.25 then S.trim(S.loads, S.LOAD_MAX) end
-        S.n.loads = S.n.loads + 1
-        local f = S.files[file]
-        if f == nil and S.files_n < S.FILES_MAX then
-            f = { n = 0, first = now, by = key }
-            S.files[file] = f
-            S.files_n = S.files_n + 1
-        end
-        if f then
-            f.n = f.n + 1
-            f.last = now
-        end
-    end
-    if e.hit then
-        S.hits[#S.hits + 1] = e
-        if #S.hits > S.HIT_MAX * 1.25 then S.trim(S.hits, S.HIT_MAX) end
-    end
-    for _, ep in ipairs(S.collecting) do
-        if now <= ep.after_until and #ep.after < S.EP_AFTER then ep.after[#ep.after + 1] = e end
-    end
-end
-
-----------------------------------------------------------------------------------------------
--- 2. Finding who is in the scene (and who is new)
-----------------------------------------------------------------------------------------------
-function CFG.slog.components_of(type_name, cap)
-    local scene = scene_object()
-    if not scene then return nil, "no scene" end
-    local ok, arr = pcall(function() return scene:call("findComponents(System.Type)", sdk.typeof(type_name)) end)
-    if not ok or arr == nil then return nil, "findComponents failed" end
-    local oke, els = pcall(function() return arr:get_elements() end)
-    if not oke or els == nil then return nil, "findComponents gave no list" end
-    if #els > cap then
-        local cut = {}
-        for i = 1, cap do cut[i] = els[i] end
-        return cut, nil, #els
-    end
-    return els, nil, #els
-end
-
--- The owner of a component: the outermost object up the tree named like a character (Pl2000..., Em3300...), else the topmost one.
-function CFG.slog.owner_of(go)
-    local S = CFG.slog
-    local best_name, best_go, top_name, top_go
-    local cur = go
-    for _ = 1, 12 do
-        if cur == nil then break end
-        local nm = S.name_of(cur)
-        if nm == nil then break end
-        top_name, top_go = nm, cur
-        local id = nm:match("^(%a%a%d%d%d%d)")
-        if id and (id:sub(1, 2):lower() == "pl" or id:sub(1, 2):lower() == "em") then best_name, best_go = id, cur end
-        local okp, parent = pcall(function() return cur:call("get_Transform"):call("get_Parent") end)
-        if not okp or parent == nil then break end
-        local okg, pgo = pcall(function() return parent:call("get_GameObject") end)
-        cur = okg and pgo or nil
-    end
-    if best_name then return best_name, best_go end
-    return top_name, top_go
-end
-
--- Per component, once: its owner (the scene's objects get new addresses when a scene is made again, so the cache is cleared with the scene).
-function CFG.slog.owner_cached(comp, now)
-    local S = CFG.slog
-    local a = S.addr_of(comp)
-    local c = S.cache[a]
-    if c == nil then
-        local okg, go = pcall(function() return comp:call("get_GameObject") end)
-        if not okg or go == nil then return nil end
-        local oname, ogo = S.owner_of(go)
-        c = { owner = oname, go = ogo, name = S.name_of(go), t = now }
-        S.cache[a] = c
-        S.cache_n = (S.cache_n or 0) + 1
-    end
-    return c
-end
-
-function CFG.slog.check_scene(now)
-    local S = CFG.slog
-    local key = CFG.body.scene_key()
-    if key ~= S.scene_key or now - S.cache_at > 90 then
-        if key ~= S.scene_key and S.scene_key ~= nil then
-            S.known = {}
-            S.jobs = {}
-            S.collecting = {}
-            S.note("the scene changed: the list of who is standing is made again")
-        end
-        S.scene_key, S.cache, S.cache_n, S.cache_at = key, {}, 0, now
-    end
-end
-
-function CFG.slog.chapter()
-    local ok, c = pcall(CFG.door.chapter)
-    return ok and tonumber(c) or nil
-end
-
-function CFG.slog.poll(now)
-    local S = CFG.slog
-    S.n.polls = S.n.polls + 1
-    S.check_scene(now)
-    local els, why = S.components_of("via.motion.Motion", 600)
-    if els == nil then
-        S.n.poll_failed = S.n.poll_failed + 1
-        S.poll_why = why
-        return
-    end
-    S.poll_why = nil
-    local present, firsts = {}, {}
-    for _, c in ipairs(els) do
-        local o = S.owner_cached(c, now)
-        if o and o.go ~= nil and o.owner then
-            local a = S.addr_of(o.go)
-            if present[a] == nil then
-                present[a] = o
-                local sn = S.seen[o.owner]
-                if sn == nil and S.seen_n and S.seen_n >= S.NAMES_MAX then
-                    -- (the list of characters seen is full)
-                else
-                    if sn == nil then
-                        sn = { n = 0, chapter = S.chapter() }
-                        S.seen[o.owner] = sn
-                        S.seen_n = (S.seen_n or 0) + 1
-                        S.dirty = true
-                    end
-                    sn.n = sn.n + 1
-                end
-            end
-        end
-    end
-    for a, o in pairs(present) do
-        local k = S.known[a]
-        if k == nil then
-            S.known[a] = { owner = o.owner, name = o.name, missed = 0 }
-            if S.is_focus(o.owner) or S.is_focus(o.name) then S.start_episode(o, a, now, S.first_poll_done ~= true) end
-        else
-            k.missed = 0
-        end
-    end
-    for a, k in pairs(S.known) do
-        if present[a] == nil then
-            k.missed = k.missed + 1
-            if k.missed >= S.GONE_POLLS then
-                if k.ep then
-                    k.ep.gone_at = S.round(now - k.ep.t0)
-                    S.n.gone = S.n.gone + 1
-                    S.note(string.format("%s (spawn #%d) left the scene %s s after it was found", tostring(k.owner), k.ep.id, tostring(k.ep.gone_at)))
-                end
-                S.known[a] = nil
-            end
-        end
-    end
-    S.first_poll_done = true
-    S.standing = {}
-    for _, o in pairs(present) do S.standing[#S.standing + 1] = o.owner end
-end
-
-----------------------------------------------------------------------------------------------
--- 3. Episodes
-----------------------------------------------------------------------------------------------
--- The calls of a list, grouped by method: { key, n, first, last (seconds from t0), arg, hit }. Calls that mention her stay; the rare ones before the busy ones.
-function CFG.slog.group(list, t0, max)
-    local S = CFG.slog
-    local by, order = {}, {}
-    for _, e in ipairs(list) do
-        local g = by[e.key]
-        if g == nil then
-            g = { key = e.key, n = 0, first = S.round(e.t - t0), last = S.round(e.t - t0), arg = e.arg, hit = false }
-            by[e.key] = g
-            order[#order + 1] = g
-        end
-        g.n = g.n + 1
-        g.last = S.round(e.t - t0)
-        if e.hit then
-            g.hit = true
-            g.arg = e.arg
-        end
-    end
-    table.sort(order, function(a, b)
-        if a.hit ~= b.hit then return a.hit end
-        if a.n ~= b.n then return a.n < b.n end
-        return a.first < b.first
-    end)
-    local out = {}
-    for i = 1, math.min(#order, max) do out[i] = order[i] end
-    table.sort(out, function(a, b) return a.first < b.first end)
-    return out, #order
-end
-
-function CFG.slog.window(list, from, to)
-    local out = {}
-    for _, e in ipairs(list) do
-        if e.t >= from and e.t <= to then out[#out + 1] = e end
-    end
-    return out
-end
-
-function CFG.slog.pos_of(go)
-    local ok, p = pcall(function() return go:call("get_Transform"):call("get_Position") end)
-    if ok and p ~= nil then return { x = CFG.slog.round(p.x), y = CFG.slog.round(p.y), z = CFG.slog.round(p.z) } end
-    return nil
-end
-
-function CFG.slog.start_episode(o, addr, now, first)
-    local S = CFG.slog
-    S.ep_n = S.ep_n + 1
-    S.n.spawns = S.n.spawns + 1
-    local ep = { id = S.ep_n, owner = o.owner, name = o.name, t0 = now, wall = nil, chapter = S.chapter(), pos = S.pos_of(o.go), go = o.go,
-        already_there = first == true, after = {}, after_until = now + S.AFTER_S }
-    pcall(function() ep.wall = os.date("%Y-%m-%d %H:%M:%S") end)
-    local before = S.window(S.ring, now - S.BEFORE_S, now)
-    ep.calls_before, ep.calls_before_total = S.group(before, now, S.EP_GROUPS)
-    local hits = S.window(S.hits, now - S.HITS_S, now)
-    ep.hits_before = {}
-    for i = math.max(1, #hits - 40), #hits do
-        local e = hits[i]
-        if e then ep.hits_before[#ep.hits_before + 1] = { dt = S.round(e.t - now), key = e.key, arg = e.arg } end
-    end
-    local loads = S.window(S.loads, now - S.LOAD_BEFORE_S, now)
-    ep.files_before = {}
-    local rest = {}
-    for _, e in ipairs(loads) do
-        if e.hit then ep.files_before[#ep.files_before + 1] = { dt = S.round(e.t - now), file = e.file, by = e.key, mentions = true } else rest[#rest + 1] = e end
-    end
-    for i = math.max(1, #rest - (S.EP_FILES - #ep.files_before)), #rest do
-        local e = rest[i]
-        if e and #ep.files_before < S.EP_FILES then ep.files_before[#ep.files_before + 1] = { dt = S.round(e.t - now), file = e.file, by = e.key } end
-    end
-    S.eps[#S.eps + 1] = ep
-    if #S.eps > S.EP_MAX then table.remove(S.eps, 1) end
-    S.collecting[#S.collecting + 1] = ep
-    local k = S.known[addr]
-    if k then k.ep = ep end
-    S.note(string.format("SPAWN #%d: %s (object %s), chapter %s%s. %d method calls in the last %d s (%d kinds), %d calls / files that mention her in the last %d s, %d files asked for in the last %d s",
-        ep.id, tostring(o.owner), tostring(o.name), tostring(ep.chapter), first and " (it was already standing when the log started: no 'before')" or "",
-        #before, S.BEFORE_S, ep.calls_before_total, #hits, S.HITS_S, #loads, S.LOAD_BEFORE_S))
-    S.queue_job(ep, "real", o.go)
-    S.dirty = true
-end
-
-function CFG.slog.queue_job(ep, which, go)
-    local S = CFG.slog
-    S.jobs[#S.jobs + 1] = { ep = ep, which = which, go = go, stage = "collect" }
-end
-
-function CFG.slog.finish_after(now)
-    local S = CFG.slog
-    for i = #S.collecting, 1, -1 do
-        local ep = S.collecting[i]
-        if now >= ep.after_until then
-            table.remove(S.collecting, i)
-            ep.calls_after, ep.calls_after_total = S.group(ep.after, ep.t0, S.EP_GROUPS)
-            ep.files_after = {}
-            for _, e in ipairs(ep.after) do
-                if e.file and #ep.files_after < S.EP_FILES then ep.files_after[#ep.files_after + 1] = { dt = S.round(e.t - ep.t0), file = e.file, by = e.key, mentions = e.hit or nil } end
-            end
-            ep.hits_after = {}
-            for _, e in ipairs(ep.after) do
-                if e.hit and #ep.hits_after < 40 then ep.hits_after[#ep.hits_after + 1] = { dt = S.round(e.t - ep.t0), key = e.key, arg = e.arg } end
-            end
-            ep.after = nil
-            ep.after_done = true
-            S.summarize(ep)
-        end
-    end
-end
-
-----------------------------------------------------------------------------------------------
--- 4. The inventory of an object (and of my copy of it)
-----------------------------------------------------------------------------------------------
-function CFG.slog.is_phys(tn)
-    local low = tostring(tn):lower()
-    for _, w in ipairs(CFG.slog.PHYS_WORDS) do
-        if low:find(w, 1, true) then return true end
-    end
-    return false
-end
-
-function CFG.slog.short(tn) return (tostring(tn):gsub("^via%.", "")) end
-
-function CFG.slog.getters_of(td, tn)
-    local S = CFG.slog
-    local g = S.getters[tn]
-    if g ~= nil then return g end
-    g = {}
-    local okm, ms = pcall(function() return td:get_methods() end)
-    for _, m in ipairs(okm and ms or {}) do
-        if #g >= S.GETTERS_MAX then break end
-        local okn, nm = pcall(function() return m:get_name() end)
-        if okn and type(nm) == "string" and (nm:find("^get_") or nm:find("^get%u")) and not S.GETTER_NEVER[nm] then
-            local np = 1
-            pcall(function() np = tonumber(m:get_num_params()) or 1 end)
-            local low = nm:lower()
-            if np == 0 then
-                for _, w in ipairs(S.GETTER_WORDS) do
-                    if low:find(w, 1, true) then g[#g + 1] = nm break end
-                end
-            end
-        end
-    end
-    S.getters[tn] = g
-    return g
-end
-
-function CFG.slog.scalar_getters(td, tn)
-    local S = CFG.slog
-    local key = "scalar " .. tn
-    local g = S.getters[key]
-    if g ~= nil then return g end
-    g = {}
-    local okm, ms = pcall(function() return td:get_methods() end)
-    for _, m in ipairs(okm and ms or {}) do
-        if #g >= S.VALUES_MAX then break end
-        local okn, nm = pcall(function() return m:get_name() end)
-        if okn and type(nm) == "string" and nm:find("^get_") and not S.GETTER_NEVER[nm] then
-            local np = 1
-            pcall(function() np = tonumber(m:get_num_params()) or 1 end)
-            if np == 0 then g[#g + 1] = nm end
-        end
-    end
-    S.getters[key] = g
-    return g
-end
-
--- The methods a component type has, as "name(number of parameters)": what the next build needs to set a Chain or a cloth component up.
-function CFG.slog.api_of(td)
-    local list = {}
-    local okm, ms = pcall(function() return td:get_methods() end)
-    for _, m in ipairs(okm and ms or {}) do
-        if #list >= 150 then break end
-        local okn, nm = pcall(function() return m:get_name() end)
-        if okn and type(nm) == "string" then
-            local np = "?"
-            pcall(function() np = tostring(tonumber(m:get_num_params()) or "?") end)
-            list[#list + 1] = nm .. "(" .. np .. ")"
-        end
-    end
-    table.sort(list)
-    return list
-end
-
--- One component: its type and the files it holds { what = path }. The plain types are not asked anything (a component's resource getters are only
--- read for physics components and for the types known to hold files).
-function CFG.slog.read_component(c, objname, deep)
-    local S, MP = CFG.slog, CFG.mprobe
-    local okt, td = pcall(function() return c:get_type_definition() end)
-    if not okt or td == nil then return { t = "?" } end
-    local tn = tostring(td:get_full_name())
-    local rec = { t = tn }
-    local oke, en = pcall(function() return c:call("get_Enabled") end)
-    if oke and type(en) == "boolean" then rec.en = en end
-    local phys = S.is_phys(tn)
-    if phys then rec.phys = true end
-    if S.skip["read " .. tn] then rec.skipped = true return rec end
-    local files = {}
-    if tn == "via.render.Mesh" then
-        S.crumb("read " .. tn)
-        local mres = MP.try(c, { "getMesh", "get_Mesh", "get_MeshResource" })
-        local mp = MP.text(mres)
-        if mp then files.mesh = mp:sub(1, 200) end
-        local okm, mdf = pcall(function() return MP.text((MP.try(c, { "get_Material", "getMaterial" }))) end)
-        if okm and mdf then files.material = mdf:sub(1, 200) end
-    elseif tn == "via.motion.Motion" then
-        S.crumb("read " .. tn)
-        local nb = tonumber(CFG.door.get(c, "getMotionBankCount")) or 0
-        for i = 0, math.min(nb, S.MOTLIST_MAX) - 1 do
-            local p = CFG.mot.path_text(CFG.door.get(c, "getMotionListPathForTool", i))
-            if p then files["motlist " .. i] = p end
-        end
-        rec.banks = nb
-    elseif phys or deep then
-        local gs = S.getters_of(td, tn)
-        if #gs > 0 then
-            S.crumb("read " .. tn)
-            for _, nm in ipairs(gs) do
-                local ok, r = pcall(c.call, c, nm)
-                if ok and r ~= nil then
-                    local txt
-                    if type(r) == "string" then txt = r
-                    elseif type(r) == "userdata" or type(r) == "table" then txt = MP.text(r) end
-                    if type(txt) == "string" and txt ~= "" and #txt <= 200 then files[nm:gsub("^get_?", "")] = txt end
-                end
-            end
-        end
-    end
-    if phys then -- every zero-parameter getter that answers a number, a flag or a short text (what a Chain / Cloth component is set to)
-        local vals, nv = {}, 0
-        S.crumb("read " .. tn)
-        for _, nm in ipairs(S.scalar_getters(td, tn)) do
-            if nv >= S.VALUES_MAX then break end
-            local ok, r = pcall(c.call, c, nm)
-            if ok then
-                local t = type(r)
-                if (t == "number" and r == r and r ~= math.huge and r ~= -math.huge) or t == "boolean" or (t == "string" and #r <= 100) then
-                    vals[(nm:gsub("^get_?", ""))] = r
-                    nv = nv + 1
-                end
-            end
-        end
-        if nv > 0 then rec.values = vals end
-    end
-    if next(files) then rec.files = files end
-    S.n.reads = S.n.reads + 1
-    return rec
-end
-
-function CFG.slog.collect(go)
-    local S = CFG.slog
-    local out = {}
-    local function walk(xf, depth, siblings)
-        while xf ~= nil and #out < S.OBJ_MAX do
-            local g = xf:call("get_GameObject")
-            out[#out + 1] = { go = g, name = S.name_of(g) or "?", depth = depth }
-            if depth < S.DEPTH_MAX then
-                local child = xf:call("get_Child")
-                if child ~= nil then walk(child, depth + 1, true) end
-            end
-            if not siblings then break end
-            xf = xf:call("get_Next")
-        end
-    end
-    local ok, err = pcall(function() walk(go:call("get_Transform"), 0, false) end)
-    if not ok then S.fail("walking the objects", err) end
-    return out
-end
-
-function CFG.slog.read_object(it, deep)
-    local S = CFG.slog
-    local obj = { name = it.name, depth = it.depth, comps = {} }
-    local ok, comps = pcall(function() return it.go:call("get_Components"):get_elements() end)
-    if ok and comps then
-        for _, c in ipairs(comps) do
-            local okc, rec = pcall(S.read_component, c, it.name, deep)
-            if okc then obj.comps[#obj.comps + 1] = rec else S.fail("reading a component of " .. tostring(it.name), rec) end
-        end
-    end
-    return obj
-end
-
--- One slice of the first job: collect the objects, then read OBJ_PER_STEP of them a frame.
-function CFG.slog.job_step()
-    local S = CFG.slog
-    local job = S.jobs[1]
-    if job == nil then return end
-    if job.stage == "collect" then
-        job.items = S.collect(job.go)
-        job.i, job.objects = 1, {}
-        job.stage = "read"
-        job.deep = job.which == "real" or job.which == "copy"
-        return
-    end
-    local did = 0
-    while job.i <= #job.items and did < S.OBJ_PER_STEP do
-        local it = job.items[job.i]
-        job.i = job.i + 1
-        did = did + 1
-        local ok, obj = pcall(S.read_object, it, job.deep)
-        if ok then job.objects[#job.objects + 1] = obj else S.fail("reading " .. tostring(it.name), obj) end
-        S.n.objects = S.n.objects + 1
-    end
-    if job.i > #job.items then
-        table.remove(S.jobs, 1)
-        S.clean("spawn log read finished")
-        S.n.inventories = S.n.inventories + 1
-        S.finish_job(job)
-    end
-end
-
--- The numbers of an inventory: files (normalised), component counts, physics components.
-function CFG.slog.digest(objects, truncated)
-    local files, counts, phys, names = {}, {}, {}, {}
-    for _, o in ipairs(objects) do
-        names[o.name:lower()] = true
-        for _, c in ipairs(o.comps) do
-            counts[c.t] = (counts[c.t] or 0) + 1
-            if c.phys then phys[#phys + 1] = { obj = o.name, t = c.t, files = c.files } end
-            for what, p in pairs(c.files or {}) do files[p:lower()] = what end
-        end
-    end
-    return { objects = objects, n_objects = #objects, files = files, counts = counts, phys = phys, names = names, truncated = truncated }
-end
-
-function CFG.slog.finish_job(job)
-    local S, ep = CFG.slog, job.ep
-    local d = S.digest(job.objects, #job.items >= S.OBJ_MAX)
-    if job.which == "real" then
-        ep.real = d
-        ep.inv_done = true
-        S.note(string.format("%s (spawn #%d): %d objects, %d files, %d physics components (%s)", tostring(ep.owner), ep.id, d.n_objects, (function() local k = 0 for _ in pairs(d.files) do k = k + 1 end return k end)(),
-            #d.phys, #d.phys > 0 and (function() local l = {} for i = 1, math.min(#d.phys, 4) do l[#l + 1] = d.phys[i].obj .. ":" .. S.short(d.phys[i].t) end return table.concat(l, ", ") end)() or "none: no chain / cloth / hair component on her"))
-        S.find_copy_and_compare(ep)
-    elseif job.which == "copy" then
-        ep.copy = d
-        ep.copy_how = job.how
-        ep.diff = S.compare(ep.real, d)
-        S.n.compares = S.n.compares + 1
-        ep.copy_done = true
-        S.note(string.format("copy of %s (%s): %d objects. Missing on the copy: %d objects, %d component kinds, %d files, %d physics components", tostring(ep.owner), tostring(job.how), d.n_objects,
-            #ep.diff.objects, #ep.diff.components, #ep.diff.files, #ep.diff.physics))
-        S.summarize(ep)
-    end
-    S.dirty = true
-end
-
-function CFG.slog.find_copy()
-    local S = CFG.slog
-    local B, P = CFG.body, CFG.pup
-    local tc = rawget(_G, "RE7MP_TEST_COPY") -- (only the test harness sets it: a function that answers a copy)
-    if type(tc) == "function" then
-        local ok, go = pcall(tc)
-        if ok and go ~= nil then return go, "a test copy" end
-    end
-    if B.go ~= nil and S.is_focus(B.model_src) and S.name_of(B.go) ~= nil then return B.go, "the lab body (made from " .. tostring(B.model_src) .. ")" end
-    for name, rec in pairs(P.list or {}) do
-        if type(rec) == "table" and rec.go ~= nil and S.is_focus(name) and S.name_of(rec.go) ~= nil then return rec.go, "the enemy model of " .. tostring(name) end
-    end
-    return nil
-end
-
-function CFG.slog.find_copy_and_compare(ep)
-    local S = CFG.slog
-    local go, how = S.find_copy()
-    if go == nil then
-        ep.copy_note = "no copy of her is standing (make the lab body from her, or let the enemy model of her stand, then press 'Compare the last spawn with my copy')"
-        S.summarize(ep)
-        return false
-    end
-    ep.copy_note = nil
-    S.jobs[#S.jobs + 1] = { ep = ep, which = "copy", go = go, how = how, stage = "collect" }
-    return true
-end
-
--- What the real one has and the copy lacks.
-function CFG.slog.compare(real, copy)
-    local S = CFG.slog
-    local d = { objects = {}, components = {}, files = {}, physics = {} }
-    for _, o in ipairs(real.objects) do
-        if not copy.names[o.name:lower()] and #d.objects < 40 then d.objects[#d.objects + 1] = o.name end
-    end
-    for t, n in pairs(real.counts) do
-        local c = copy.counts[t] or 0
-        if c < n and #d.components < 60 then d.components[#d.components + 1] = { t = t, real = n, copy = c, phys = S.is_phys(t) or nil } end
-    end
-    table.sort(d.components, function(a, b) if (a.phys == true) ~= (b.phys == true) then return a.phys == true end return a.t < b.t end)
-    for p, what in pairs(real.files) do
-        if copy.files[p] == nil and #d.files < 80 then d.files[#d.files + 1] = { file = p, what = what } end
-    end
-    table.sort(d.files, function(a, b) return a.file < b.file end)
-    for _, ph in ipairs(real.phys) do
-        if (copy.counts[ph.t] or 0) == 0 and #d.physics < 40 then d.physics[#d.physics + 1] = { obj = ph.obj, t = ph.t, files = ph.files } end
-    end
-    return d
-end
-
--- The panel's button: the copy is read again and compared with the last finished inventory.
-function CFG.slog.compare_last()
-    local S = CFG.slog
-    for i = #S.eps, 1, -1 do
-        local ep = S.eps[i]
-        if ep.inv_done then
-            ep.copy, ep.diff, ep.copy_done, ep.summary_done = nil, nil, nil, nil
-            if S.find_copy_and_compare(ep) then S.note("comparing spawn #" .. ep.id .. " with my copy...") end
-            return true
-        end
-    end
-    S.note("no finished inventory of a spawn to compare yet")
-    return false
-end
-
-----------------------------------------------------------------------------------------------
--- 5. The census of physics components
-----------------------------------------------------------------------------------------------
-function CFG.slog.census_step(now)
-    local S = CFG.slog
-    S.n.censuses = S.n.censuses + 1
-    S.check_scene(now)
-    for _, tn in ipairs(S.PHYS_TYPES) do
-        local td = sdk.find_type_definition(tn)
-        local t = S.types[tn]
-        if t == nil then
-            t = { exists = td ~= nil, found = 0 }
-            if td ~= nil then t.api = S.api_of(td) end
-            S.types[tn] = t
-        end
-        if td ~= nil and not S.skip["census " .. tn] then
-            S.crumb("census " .. tn)
-            local els, why, total = S.components_of(tn, S.COMPS_MAX)
-            if els ~= nil then
-                t.found = total or #els
-                for _, c in ipairs(els) do
-                    local o = S.owner_cached(c, now)
-                    if o and o.owner then
-                        local row = S.census[o.owner]
-                        if row == nil and S.census_n and S.census_n >= S.NAMES_MAX then row = nil
-                        else
-                            if row == nil then
-                                row = { objs = {}, kinds = {}, chapter = S.chapter() }
-                                S.census[o.owner] = row
-                                S.census_n = (S.census_n or 0) + 1
-                                S.dirty = true
-                                S.note(string.format("hair physics: %s carries %s on %s", tostring(o.owner), S.short(tn), tostring(o.name)))
-                            end
-                            local list = row.objs[o.name or "?"]
-                            if list == nil then
-                                local count = 0
-                                for _ in pairs(row.objs) do count = count + 1 end
-                                if count < 16 then list = {} row.objs[o.name or "?"] = list end
-                            end
-                            if list then
-                                local sh = S.short(tn)
-                                local have = false
-                                for _, v in ipairs(list) do if v == sh then have = true end end
-                                if not have then list[#list + 1] = sh S.dirty = true end
-                            end
-                            row.kinds[S.short(tn)] = true
-                        end
-                    end
-                end
-            else
-                t.why = why
-            end
-        end
-    end
-    S.clean("spawn log census finished")
-end
-
-----------------------------------------------------------------------------------------------
--- 6. Text, files, report
-----------------------------------------------------------------------------------------------
-function CFG.slog.summarize(ep)
-    local S = CFG.slog
-    if ep.summary_done then return end
-    if not (ep.after_done and ep.inv_done and (ep.copy_done or ep.copy_note)) then return end
-    ep.summary_done = true
-    local L = {}
-    local function add(s) L[#L + 1] = s S.lines[#S.lines + 1] = "     " .. s end
-    add(string.format("=== spawn #%d: %s (%s) at %s, chapter %s ===", ep.id, tostring(ep.owner), tostring(ep.name), tostring(ep.wall), tostring(ep.chapter)))
-    for _, h in ipairs(ep.hits_before or {}) do add(string.format("  mentions her %+.1f s: %s  %s", h.dt, h.key, tostring(h.arg))) end
-    for _, h in ipairs(ep.hits_after or {}) do add(string.format("  mentions her %+.1f s: %s  %s", h.dt, h.key, tostring(h.arg))) end
-    for _, g in ipairs(ep.calls_before or {}) do add(string.format("  before: %s x%d (%+.1f .. %+.1f s) %s", g.key, g.n, g.first, g.last, tostring(g.arg or ""))) end
-    for _, g in ipairs(ep.calls_after or {}) do add(string.format("  after : %s x%d (%+.1f .. %+.1f s) %s", g.key, g.n, g.first, g.last, tostring(g.arg or ""))) end
-    for _, f in ipairs(ep.files_before or {}) do if f.mentions then add(string.format("  file asked for %+.1f s: %s (by %s)", f.dt, f.file, f.by)) end end
-    for _, o in ipairs(ep.real.objects) do
-        for _, c in ipairs(o.comps) do
-            if c.files or c.phys then
-                local fl = {}
-                for what, p in pairs(c.files or {}) do fl[#fl + 1] = what .. "=" .. p end
-                table.sort(fl)
-                add(string.format("  %s%s [%s]%s %s", string.rep(" ", o.depth), o.name, S.short(c.t), c.phys and " PHYSICS" or "", table.concat(fl, "; ")))
-            end
-        end
-    end
-    if ep.diff then
-        add("  MISSING on my copy (" .. tostring(ep.copy_how) .. "):")
-        for _, p in ipairs(ep.diff.physics) do add("    physics: " .. p.obj .. " " .. S.short(p.t)) end
-        for _, c in ipairs(ep.diff.components) do add(string.format("    component: %s real %d, copy %d", S.short(c.t), c.real, c.copy)) end
-        for _, o in ipairs(ep.diff.objects) do add("    object: " .. o) end
-        for _, f in ipairs(ep.diff.files) do add("    file: " .. f.file .. " (" .. tostring(f.what) .. ")") end
-    else
-        add("  copy: " .. tostring(ep.copy_note))
-    end
-    S.dirty = true
-    S.save()
-end
-
-function CFG.slog.save_state()
-    local S = CFG.slog
-    local ok = pcall(json.dump_file, FILES.path("spawnstate"), { skip = S.skip, crashes = S.crashes, session = tracer.session, build = CFG.BUILD })
-    if ok then S.state_dirty = false end
-end
-
-function CFG.slog.save()
-    local S = CFG.slog
-    local rep = S.report(true)
-    rep.lines = S.lines
-    local ok, err = pcall(json.dump_file, FILES.path("spawnlog"), rep)
-    S.saved = ok == true
-    S.save_error = (not ok) and tostring(err):sub(1, 100) or nil
-    S.n.saves = S.n.saves + 1
-    if ok then S.dirty = false end
-    -- the text file: one line per event, the same lines as the JSON's "lines"
-    if fs ~= nil and fs.write ~= nil then
-        local okt, errt = pcall(fs.write, FILES.path("spawntext"), "re7mp spawn log, build " .. CFG.BUILD .. "\n" .. table.concat(S.lines, "\n") .. "\n")
-        S.text_saved = okt == true
-        S.text_error = (not okt) and tostring(errt):sub(1, 100) or nil
-    else
-        S.text_error = "this REFramework has no fs.write: the same lines are in spawnlog.json (lines)"
-    end
-end
-
-function CFG.slog.load()
-    local S = CFG.slog
-    local d = FILES.read("spawnstate")
-    if type(d) == "table" then
-        if type(d.skip) == "table" then
-            local n = 0
-            for k, v in pairs(d.skip) do
-                if type(k) == "string" and #k < 150 and v == true and n < 200 then S.skip[k] = true n = n + 1 end
-            end
-        end
-        S.crashes = tonumber(d.crashes) or 0
-    end
-    local f = FILES.read("spawnlog")
-    if type(f) == "table" and type(f.hair_physics) == "table" then
-        for name, row in pairs(f.hair_physics) do
-            if type(name) == "string" and name:match("^[%w_]+$") and type(row) == "table" and (S.census_n or 0) < S.NAMES_MAX then
-                local r = { objs = {}, kinds = {}, chapter = tonumber(row.chapter) }
-                for on, list in pairs(type(row.objects) == "table" and row.objects or {}) do
-                    if type(on) == "string" and type(list) == "table" and #on < 80 then
-                        local l = {}
-                        for i = 1, math.min(#list, 8) do if type(list[i]) == "string" then l[#l + 1] = list[i]:sub(1, 40) r.kinds[list[i]:sub(1, 40)] = true end end
-                        r.objs[on] = l
-                    end
-                end
-                S.census[name] = r
-                S.census_n = (S.census_n or 0) + 1
-                S.loaded = S.loaded + 1
-            end
-        end
-    end
-end
-
--- A session that ended while the log was reading something: that call is never made again.
-function CFG.slog.after_previous()
-    local S = CFG.slog
-    if tracer.slog_key ~= nil then
-        S.skip[tracer.slog_key] = true
-        S.crashes = S.crashes + 1
-        S.state_dirty = true
-        say("spawn log: the last session ended at '" .. tostring(tracer.slog_key) .. "': that call is skipped from now on")
-        S.save_state()
-    end
-end
-
-function CFG.slog.report(for_file)
-    local S = CFG.slog
-    local hooks = {}
-    for _, h in ipairs(S.hooks) do hooks[#hooks + 1] = { key = h.key, calls = h.n, hot = h.hot or nil } end
-    table.sort(hooks, function(a, b) return a.calls > b.calls end)
-    while #hooks > 60 do table.remove(hooks) end
-    local eps = {}
-    for _, ep in ipairs(S.eps) do
-        eps[#eps + 1] = { id = ep.id, owner = ep.owner, name = ep.name, when = ep.wall, chapter = ep.chapter, position = ep.pos, already_standing_when_logging_began = ep.already_there,
-            left_after_s = ep.gone_at, calls_before = ep.calls_before, kinds_of_calls_before = ep.calls_before_total, mentions_before = ep.hits_before, files_asked_for_before = ep.files_before,
-            calls_after = ep.calls_after, mentions_after = ep.hits_after, files_asked_for_after = ep.files_after,
-            her_objects = for_file and ep.real and ep.real.objects or nil, her_physics = ep.real and ep.real.phys or nil, objects_cut_off = ep.real and ep.real.truncated or nil,
-            copy_how = ep.copy_how, copy_note = ep.copy_note, copy_objects = ep.copy and ep.copy.n_objects or nil, missing_on_copy = ep.diff }
-    end
-    local phys = {}
-    for name, row in pairs(S.census) do
-        local o = {}
-        for on, list in pairs(row.objs) do o[on] = list end
-        phys[name] = { chapter = row.chapter, objects = o }
-    end
-    local without = {}
-    for name, sn in pairs(S.seen) do
-        if S.census[name] == nil then without[#without + 1] = name end
-    end
-    table.sort(without)
-    local types = {}
-    for tn, t in pairs(S.types) do types[tn] = { exists_in_this_game = t.exists, components_in_scene_at_last_look = t.found, why = t.why, methods = t.api } end
-    local skip = {}
-    for k in pairs(S.skip) do skip[#skip + 1] = k end
-    table.sort(skip)
-    return { on = S.on, build = CFG.BUILD, focus = S.focus, state = S.idle, hooked = S.hooked == true, counts = S.n, classes_hooked = S.types_hooked, hooks_by_calls = hooks,
-        episodes = eps, hair_physics = phys, characters_seen_without_physics = without, physics_types = types, files_requested = (function()
-            local out, n = {}, 0
-            for p, f in pairs(S.files) do
-                if for_file or S.hit_text(p:lower()) then n = n + 1 if n <= 120 then out[p] = { n = f.n, by = f.by } end end
-            end
-            return out
-        end)(), standing_now = S.standing, skipped_calls = skip, crashes = S.crashes, loaded_from_file = S.loaded, poll_problem = S.poll_why,
-        file = FILES.path("spawnlog"), text_file = FILES.path("spawntext"), saved = S.saved, save_error = S.save_error, text_saved = S.text_saved, text_error = S.text_error,
-        last = S.last, last_error = S.last_error, broken = S.broken }
-end
-
-----------------------------------------------------------------------------------------------
--- 7. The frame
-----------------------------------------------------------------------------------------------
-function CFG.slog.set_on(v)
-    local S = CFG.slog
-    S.on = v == true
-    if S.on then
-        S.started_at = S.started_at or os.clock()
-        S.note("switched on (the hooks are installed a few at a time)")
-    else
-        S.note("switched off (the hooks stay but record nothing)")
-    end
-    S.dirty = true
-end
-
-function CFG.slog.update(now)
-    local S = CFG.slog
-    if S.dirty and now - S.save_at >= S.SAVE_S then
-        S.save_at = now
-        S.save()
-    end
-    if S.state_dirty then S.save_state() end
-    if not S.on then S.idle = "off" return end
-    if S.broken then S.idle = "off: " .. S.broken return end
-    if S.started_at == nil then S.started_at = now end
-    if now - S.started_at < S.START_DELAY then S.idle = "starting" return end
-    if not S.hooked then
-        if not S.installing then
-            S.installing = true
-            S.targets = nil
-        end
-        S.idle = "hooking"
-        local ok, err = pcall(S.install_step)
-        if not ok then
-            S.fail("hooking", err)
-            S.errs.hook = (S.errs.hook or 0) + 1
-            if S.errs.hook >= S.ERR_MAX then S.hooked, S.installing = true, false S.note("hooking stopped after " .. S.ERR_MAX .. " errors") end
-        end
-        return
-    end
-    S.idle = "watching"
-    if CFG.busy.busy then S.idle = "the game is loading: not looking at the scene" return end
-    S.finish_after(now)
-    if S.jobs[1] ~= nil then
-        S.idle = "reading an object"
-        local ok, err = pcall(S.job_step)
-        if not ok then
-            S.fail("reading an object", err)
-            table.remove(S.jobs, 1)
-        end
-        return
-    end
-    if now - S.poll_at >= S.POLL_S then
-        S.poll_at = now
-        local ok, err = pcall(S.poll, now)
-        if not ok then S.fail("looking at the scene", err) end
-        return
-    end
-    if now - S.census_at >= S.CENSUS_S then
-        S.census_at = now
-        local ok, err = pcall(S.census_step, now)
-        if not ok then S.fail("the physics census", err) end
-    end
-end
-
-----------------------------------------------------------------------------------------------
 -- Main loop and UI
 ----------------------------------------------------------------------------------------------
 pcall(function() CFG.reset.code_defaults = CFG.reset.copy(settings_snapshot()) end) -- 9.33: what the code itself defaults to (for the reset button)
@@ -19972,19 +28687,19 @@ pcall(CFG.mot.load) -- 9.33: the .motlist paths seen in earlier sessions
 pcall(tracer.report_previous)
 if tracer.face_suspect then CFG.body.face.mats = false end -- 9.33: the last session ended inside the switching of Mia's head layers
 pcall(CFG.load.after_previous)
-pcall(CFG.hair.after_previous) -- 9.35: Mia's hair physics: skip what ended the last session
 pcall(CFG.pick.after_previous)
 pcall(CFG.story.after_previous) -- 9.32: a cutscene that was being played for the other player when the last session ended
 pcall(give.report_trail) -- 
 settings_saved_key = settings_key(settings_snapshot())
+-- (10.21) the loader switched itself off because the last session ended while it was loading a file: that "off" is written to the settings file at the next check. The key above is made
+-- AFTER the markers were applied, so with a settings file that already existed (always, after the first run) the change was taken for "already saved" and the next start had the loader on again.
+if tracer.loader_suspect then settings_saved_key = nil end
 prime_messages()
 items.hooked = select(2, pcall(install_item_hooks)) == true
 give.hooked = select(2, pcall(install_give_hooks)) == true
 pcall(CFG.door.install) -- 9.40: the door hook (which door my player used)
 pcall(CFG.eanim.install) -- 9.41: the save hook for the enemy clips (the animation controllers go back on while an enemy is saved)
 pcall(CFG.eanim.load) -- 9.41: the banks and clips seen in earlier sessions
-pcall(CFG.slog.load) -- 9.43: the spawn log's skipped calls and the hair physics census of earlier sessions
-pcall(CFG.slog.after_previous) -- 9.43: a call that ended the last session while the spawn log was reading
 pcall(CFG.pick.install) -- 9.31: the item journal's hooks (setItemGotFlag, createDropItemInstance, applyDifficultyItemNumRate)
 pcall(pstat.install)
 pcall(RE7.install_death_extras)
@@ -19992,7 +28707,7 @@ local ok_hook, installed = pcall(RE7.install_new_game_hook, on_local_new_game)
 lobby.hook_installed = ok_hook and installed == true
 
 -- Never leave the game frozen if the scripts are reloaded while we're holding it.
-if re.on_script_reset then re.on_script_reset(function() release_game() pcall(CFG.body.remove) pcall(CFG.pup.remove_all) pcall(enemy_release_all) tracer.crumb("clean", "scripts reset") end) end
+if re.on_script_reset then re.on_script_reset(function() release_game() pcall(CFG.body.remove) pcall(CFG.pup.remove_all) pcall(enemy_release_all) pcall(CFG.own.release_all, "scripts reset") pcall(CFG.carsync.release, "scripts reset", false) tracer.crumb("clean", "scripts reset") end) end
 
 re.on_frame(function()
     local now = os.clock()
@@ -20001,56 +28716,78 @@ re.on_frame(function()
     local PF = CFG.perf
     PF.begin() -- (9.36: where does the frame time go? the debug file lists the parts, the slowest frames and what the debug file itself costs)
 
+    -- (10.27) the 10.26 file had ONE part for all of this ("net send/read": 1.0 ms a frame, 273 s of 562 s the script used): now four, so the next file says which of them it is
     if now - state.last_send >= CFG.SEND_INTERVAL then send_local(now) end
+    PF.mark("net: pose file write")
     if now - state.last_read >= CFG.READ_INTERVAL then
         read_remote(now)
+        PF.mark("net: pose file read")
         pcall(read_messages)
+        PF.mark("net: inbox read")
     end
-    PF.mark("net send/read")
     flush_messages(now)
     PF.mark("flush messages")
     flush_debug(now)
     PF.mark("debug file write")
-    if now - saves.last_read >= 1 then pcall(read_saves, now) end
+    if now - saves.last_read >= saves.read_gap(now) then pcall(read_saves, now) end -- (10.20: see saves.read_gap; it was every second)
+    PF.mark("saves: exe file")
     pcall(saves.watch, now)
+    PF.mark("saves: slot watch")
     pcall(CFG.lm.update, now)
+    PF.mark("saves: load screen labels")
     save_settings_if_changed(now)
-    PF.mark("saves+settings")
+    PF.mark("settings write")
     update_remote(now, dt)
     PF.mark("update remote")
     pcall(CFG.menu.update, now)
+    PF.mark("menu")
     pcall(CFG.who.update, now)  -- (9.31: which character is who)
+    PF.mark("who")
     pcall(CFG.wpn.update, now)  -- (9.31: which weapon I hold)
+    PF.mark("weapon")
     pcall(CFG.inv.update, now)  -- (9.31: the inventory change log)
-    PF.mark("menu/who/weapon/inventory")
+    PF.mark("inventory")
     pcall(CFG.idata.update, now) -- (9.32: the item data for the debug file)
     PF.mark("item data")
     pcall(CFG.pick.near_step, now) -- (9.31: the objects near a pickup)
     update_lobby(now)
     PF.mark("pickup+lobby")
     pcall(CFG.busy.update, now) -- (9.40: is the game loading? the world modules wait for it)
+    pcall(CFG.car.update, now) -- (10.16: the garage car probe: reads only, off unless the box is ticked)
+    pcall(CFG.flow.update, now) -- (10.18: the story-point probe: reads only)
+    pcall(CFG.match.update, now) -- (10.18: story-point matching: off unless the box is ticked)
+    pcall(CFG.tgt.update, now) -- (10.18: who the enemies target: reads only)
+    pcall(CFG.own.update, now, dt) -- (10.18: the enemy hand-over: off unless the box is ticked)
+    pcall(CFG.esync.update, now) -- (10.19: re7mp.exe's "Sync enemies and the Molded" box)
+    pcall(CFG.chan.update, now) -- (10.24: which channel and build re7mp.exe is; only said in the panel and the debug file)
+    CFG.carsync.frame(now, dt) -- (10.19: the garage car sync; an error in it is written in its journal)
+    pcall(CFG.actors.update, now) -- (10.19: the actor probe: reads only, off unless the box is ticked)
+    PF.mark("world modules")
     pcall(CFG.door.update, now) -- (9.40: doors)
     PF.mark("doors")
     pcall(CFG.eanim.update, now) -- (9.41: enemy clips)
     PF.mark("enemy clips")
-    pcall(CFG.slog.update, now) -- (9.43: the spawn log)
-    PF.mark("spawn log")
     pcall(CFG.real.frame, now)
-    PF.mark("my model (real)")
+    PF.mark("my model: real.frame")
+    pcall(CFG.mbank.update, now) -- 10.1: Ethan's own bank / clip, named and labelled; sent as the "mot" event
+    PF.mark("my model: motion bank")
+    pcall(CFG.low.tick, now) -- 10.12: my camera is very low (crawling, lying): sent as the "low" event
+    pcall(CFG.settle.update, now) -- 10.1: the look at a new body after FIRST s, a rebuild and another look after AGAIN s
+    PF.mark("my model: low camera + settle")
     if CFG.body.enabled or CFG.body.go or #CFG.body.queue > 0 or CFG.clip.enabled then pcall(CFG.body.frame, now) end
     PF.mark("body frame")
     pcall(CFG.clip.update)
     PF.mark("clips")
+    pcall(CFG.friend.mode.update, now) -- (10.26: F5 = Ethan's friend follows you / stays put)
     local oke, erre = pcall(function()
         enemy_host_update(now)
-        PF.mark("enemy host (scene walk)")
+        PF.mark("enemy host: snapshots + file")
         enemy_update(now, dt)
         PF.mark("enemy update")
         give_update(now)
         PF.mark("give")
         enemy.hit.update(now)
         CFG.story.update(now)
-        CFG.cs.update(now)
         chat.update(now)
         PF.mark("hit/story/cutscene/chat")
         CFG.mprobe.update(now)
@@ -20098,8 +28835,10 @@ re.on_frame(function()
     pcall(CFG.bm.update, now)     -- (9.36: the model table is saved when it changed)
     PF.mark("model check")
     pcall(draw_enemies, now)
+    pcall(CFG.pool.draw, now) -- (10.15) the boss health bar
     pcall(enemy.hit.draw, now)
     pcall(draw_give_hint, now)
+    pcall(CFG.friend.mode.draw, now) -- (10.26) "F5 = stay put / follow you", top right
     pcall(give.inventory_note, now) -- (9.36)
     PF.mark("draw enemies+hints")
 
@@ -20156,11 +28895,15 @@ re.on_draw_ui(function()
     if state.role == "host" then
         imgui.text("Enemies: your game runs them (you are the host) and tells the other player where they are.")
     elseif state.role == "join" then
-        imgui.text("Enemies: the host's game runs them; you see them as red ghosts (see the Enemies section).")
+        if enemy.mode == 3 then
+            imgui.text("Enemies: the host's game runs them and your own enemies are moved onto theirs (settings: Developer tools > Enemies).")
+        else
+            imgui.text("Enemies: the host's game runs them; you see them as red ghosts (settings: Developer tools > Enemies).")
+        end
     end
     if state.last_error then imgui.text("Last error: " .. state.last_error) end
 
-    if imgui.tree_node("Start together (host and join)") then
+    if CFG.show_retired and imgui.tree_node("Start together (host and join)") then
         local ok, err = pcall(function()
             imgui.text(lobby.message)
             if lobby.phase == "idle" then
@@ -20202,7 +28945,7 @@ re.on_draw_ui(function()
         imgui.tree_pop()
     end
 
-    if imgui.tree_node("Co-op saves") then
+    if CFG.show_retired and imgui.tree_node("Co-op saves") then
         local ok, err = pcall(function()
             imgui.text(saves.enabled and "Save sharing: on (TCP)" or "Save sharing: off (tick 'Share saves' in re7mp.exe and use TCP)")
             imgui.text(saves.last ~= "" and saves.last or "Nothing shared yet.")
@@ -20271,17 +29014,6 @@ re.on_draw_ui(function()
                     death.exec_skipped, death.exec_last))
                 imgui.text("    It acts in \"Downed and revive\" mode only. The other player's game goes game over when yours is executed, as if both were down.")
             end
-            -- do finishers (grabs, executions) end the game by a different call than a death by damage?
-            imgui.text("Execution test (EXPERIMENTAL, off at every start): what does a finisher call, and can it become 'down'?")
-            local ce, ve = imgui.checkbox("    log the calls a grab / finisher / game over makes (hooks a few more methods; may crash the game)", RE7.exec.on)
-            if ce then RE7.exec.set_on(ve) end
-            local cb, vb = imgui.checkbox("    ...and block the game over and go down instead (needs Downed mode and the other player next to you; may leave the game stuck)", RE7.exec.block)
-            if cb then RE7.exec.set_block(vb) end
-            if RE7.exec.on or RE7.exec.block then
-                imgui.text(string.format("    watching %d methods; game overs seen %d; blocked %d", #RE7.exec.hooks, RE7.exec.overs, RE7.exec.blocked))
-                imgui.text("    " .. RE7.exec.verdict())
-                imgui.text("    " .. RE7.exec.note)
-            end
             if imgui.button("Test: send a death message to the other player") then
                 net_send(DEATH_MSG, "test")
                 death.sent = death.sent + 1
@@ -20303,8 +29035,9 @@ re.on_draw_ui(function()
         imgui.tree_pop()
     end
 
-    if imgui.tree_node("Items: sync pickups") then
+    if imgui.tree_node("Items") then -- (10.22) one tab for the pickups and for giving and dropping (they were "Items: sync pickups" and "Items: give and drop")
         local ok, err = pcall(function()
+            imgui.text("PICKUPS: what one of you picks up, the other gets too.")
             local c1, v1 = imgui.checkbox("Sync item pickups", items.enabled)
             if c1 then items.enabled = v1 end
             imgui.text("Only consumables and weapons are shared, so a key item (the fuse, the bolt cutters) can't be taken out of the other game.")
@@ -20343,11 +29076,9 @@ re.on_draw_ui(function()
             end
         end)
         if not ok then imgui.text("UI error: " .. tostring(err)) end
-        imgui.tree_pop()
-    end
-
-    if imgui.tree_node("Items: give and drop") then
-        local ok, err = pcall(function()
+        pcall(imgui.separator)
+        local ok2, err2 = pcall(function()
+            imgui.text("GIVE AND DROP: hand an item to the other player, or drop it on the ground for them.")
             local who = state.remote_name or CFG.DEFAULT_NAME
             local now = os.clock()
             imgui.text("Give: pick an item from your inventory list below (works with the game paused or not).")
@@ -20411,7 +29142,7 @@ re.on_draw_ui(function()
             end
             imgui.text(give.last)
             if imgui.button("Write the item details to the debug file") then dump_focused_item() end
-            imgui.text("Receive tests (they run the real receive code on yourself, since the loopback bot can't give):")
+            imgui.text("Receive tests (they run the real receive code on yourself, since Ethan's friend can't give):")
             if imgui.button("Test: receive 1 Herb as if " .. who .. " gave it") then give.test_receive("Herb|1") end
             if imgui.button("Test: receive 5 HandgunBullet as if " .. who .. " gave them") then give.test_receive("HandgunBullet|5") end
             if imgui.button("Test: receive 1 ChemicalS as if " .. who .. " gave it (lands on the ground if you hold none)") then give.test_receive("ChemicalS|1") end
@@ -20420,105 +29151,7 @@ re.on_draw_ui(function()
                 netmsg.handlers[DROP_MSG](string.format("Herb|1|%.2f|%.2f|%.2f", lp.x, lp.y - CFG.EYE_HEIGHT, lp.z))
             end
         end)
-        if not ok then imgui.text("UI error: " .. tostring(err)) end
-        imgui.tree_pop()
-    end
-
-    if imgui.tree_node("Enemies (experimental)") then
-        local ok, err = pcall(function()
-            local c, idx = imgui.combo("Enemy sync", enemy.mode, ENEMY_MODES)
-            if c then
-                enemy.mode = idx
-                if idx < 3 then enemy_release_all() end
-            end
-            if enemy.mode == 3 then
-                imgui.text("EXPERIMENTAL: this moves your own enemies about. Use a throwaway save.")
-                local c2, v2 = imgui.checkbox("Also switch off their AI (riskier; they stop fighting the host's positions)", enemy.drive_ai)
-                if c2 then
-                    enemy.drive_ai = v2
-                    enemy_release_all()
-                end
-                local A = CFG.eanim
-                local c3, v3 = imgui.checkbox("EXPERIMENTAL: play the host's enemy animations on my enemies (needs the box above; fetches animation files my game lacks; remembered)", A.on)
-                if c3 and type(v3) == "boolean" then
-                    A.on = v3
-                    if not v3 then A.release_all("switched off") end
-                    A.note("enemy clips " .. (v3 and "switched on" or "switched off"))
-                end
-                imgui.text("Enemy clips: " .. tostring(A.idle_why) .. ".   Clips played: " .. A.n.plays .. ".   Banks asked for: " .. A.n.asks .. ", added: " .. A.n.added
-                    .. ".   Banks and clips seen: " .. A.n.clips_seen .. " (re7mp/enemy_clips.json).   Errors: " .. A.n.errors)
-                imgui.text("Last: " .. A.last)
-            end
-            if state.transport ~= "tcp" then
-                imgui.text("Enemy sync needs TCP. Choose TCP in re7mp.exe (one of you hosts, the other joins).")
-            elseif state.role == "host" then
-                imgui.text(string.format("You are the HOST: your game runs the enemies. Snapshots sent: %d", enemy.sent))
-                local live = 0
-                for _, r in ipairs(enemy.roots) do
-                    if (r.last_flags or 1) < 2 then live = live + 1 end
-                end
-                imgui.text(string.format("Em#### objects in your scene: %d   (%d look like live enemies)", #enemy.roots, live))
-                for i = 1, math.min(#enemy.roots, 10) do
-                    local r = enemy.roots[i]
-                    local why = r.last_flags and flags_reason(r.last_flags) or ""
-                    imgui.text("   " .. r.name .. (why ~= "" and ("   not sent as live: " .. why) or ""))
-                end
-            else
-                local driven = 0
-                for _ in pairs(enemy.driven) do driven = driven + 1 end
-                imgui.text(string.format("You JOIN: the host's game runs the enemies. Snapshots received: %d", enemy.received))
-                imgui.text(string.format("Enemies from the host: %d   of mine being moved: %d", enemy.count or 0, driven))
-            end
-            local c3, v3 = imgui.checkbox("Draw received enemies even if I am the host (loopback test: the bot sends two)", enemy.test_ghosts)
-            if c3 then enemy.test_ghosts = v3 end
-            local c4, v4 = imgui.checkbox("Also draw parked / placeholder objects in grey (to see what a stray box was)", enemy.show_parked)
-            if c4 then enemy.show_parked = v4 end
-            local c5, v5 = imgui.checkbox("Hide a red box that has a wall in the way (the same wall test as for the other player; needs 'Hide them behind walls' ticked)", enemy.hide_walls)
-            if c5 then enemy.hide_walls = v5 end
-            do
-                local hid = 0
-                for _, w in pairs(enemy.wall) do if w.hide then hid = hid + 1 end end
-                imgui.text(string.format("   boxes hidden behind walls now: %d   (tests %d, of which behind a wall %d)", hid, enemy.wall_checks, enemy.wall_hidden_checks))
-            end
-            imgui.text(enemy.last)
-            do
-                local H = enemy.hit
-                imgui.text("Damage to the host's enemies:")
-                local ch1, v1 = imgui.checkbox("JOINER: my shots hurt the host's enemies (a shot that points at a red box)", H.on)
-                if ch1 then H.on = v1 end
-                local ch2, v2 = imgui.checkbox("HOST: apply the other player's hits to my enemies", H.accept)
-                if ch2 then H.accept = v2 end
-                local okd, chd, vd = pcall(imgui.slider_float, "Damage per hit", H.damage, 1, 600)
-                if okd and chd then H.damage = math.floor(vd + 0.5) end
-                imgui.text("   (the health you mean it to take off; one real pistol shot took 210 off Jack's 10000. The host measures what the game really")
-                imgui.text("    took off and corrects the next hits for it.)")
-                if H.ratio then
-                    imgui.text(string.format("Host: the game's multiplier is x%.2f (measured on %d hit(s)): %s", H.ratio, H.measured, H.ratio_last))
-                    local per = {}
-                    for k, v in pairs(H.ratios) do per[#per + 1] = string.format("%s x%.2f", k, v) end
-                    table.sort(per)
-                    if #per > 0 then imgui.text("   per enemy: " .. table.concat(per, ", ")) end
-                elseif #H.pending > 0 or H.measured > 0 then imgui.text("Host: " .. H.ratio_last) end
-                if imgui.button("Test: hit the red box I am aiming at") then H.fire(os.clock(), "test button") end
-                if imgui.button(H.learn.on and "Learning the shot signal: fire three shots now ..." or "Learn the shot signal (then fire three shots)") then
-                    if not H.learn.on then H.learn_start(os.clock()) end
-                end
-                local okh, chh, vh = pcall(imgui.checkbox, "JOINER: take my shots from the gun's own shoot call (hooks app.PlayerGun.shoot, once per shot)", H.hook.on)
-                if okh and chh and type(vh) == "boolean" then H.hook.on = vh end
-                imgui.text(string.format("Gun hook: %s   (shoot calls seen: %d, used as shots: %d)%s",
-                    #H.hook.installed > 0 and table.concat(H.hook.installed, ", ") or (H.hook.tried and "not installed" or "installs when enemies arrive"),
-                    (H.hook.counts.shoot or 0) + (H.hook.counts.shootStart or 0), H.hook.used, H.hook.error and (" " .. H.hook.error) or ""))
-                imgui.text("Shot detection: " .. (H.signal and (H.signal.type .. "." .. H.signal.field) or "not learned yet") .. "   (" .. H.learn.status .. ")")
-                imgui.text(string.format("Shots tested %d, no box in line %d, behind a wall %d, hits sent %d, host answered %d", H.shots, H.misses, H.walled, H.sent, H.acked))
-                imgui.text(H.last)
-                imgui.text(string.format("Host side: received %d, applied %d, refused %d, failed %d", H.received, H.applied, H.refused, H.failed))
-                imgui.text(H.host_last)
-            end
-            imgui.text("Not built yet: enemy deaths shown on the joiner's own screen, spawning, animations.")
-            if imgui.button("Write enemy details to the debug file") then enemy_details() end
-            if imgui.button("Trace enemy damage (then shoot an enemy once)") then trace_enemy_damage() end
-        end)
-        if not ok then imgui.text("UI error: " .. tostring(err)) end
+        if not ok2 then imgui.text("UI error: " .. tostring(err2)) end
         imgui.tree_pop()
     end
 
@@ -20583,8 +29216,37 @@ re.on_draw_ui(function()
                 end
                 imgui.text(string.format("    the game's own end callback when it starts a cutscene: %d null, %d set", S.delegates_null, S.delegates_set))
             end
+            do
+                local M = S.mark
+                local c1, v1 = imgui.checkbox("Check a cutscene's markers (Pos_...) before playing it here, and wait a few seconds for the area##markon", M.on)
+                if c1 and type(v1) == "boolean" then M.on = v1 end
+                imgui.text(string.format("    markers: scans %d   told %d   from %s %d   waited for the area %d   played without them %d%s", M.scans, M.sent, who, M.received, M.waits,
+                    M.played_without, next(M.waiting) and "   waiting now" or ""))
+                if imgui.button("List every Pos_ marker of this scene (stand in the room; it goes into the debug file)##markall") then pcall(S.mark_scan_all) end
+                if M.all then imgui.text(string.format("    last list: %d marker(s), %.0f ms", M.all.count, (M.all.secs or 0) * 1000)) end
+            end
+            do -- (10.18) the game's story points (the numbered steps of each story part)
+                local FL, MT = CFG.flow, CFG.match
+                imgui.text("Story points: the game numbers the steps of each story part. Compare them with the other player's, and (experimental) take a part that is behind forward.")
+                local cfl, vfl = imgui.checkbox("Story points: read the game's step numbers and tell the other player (reads only; debug file: story_flow, re7mp/flow_probe.json)##flowprobe", FL.on)
+                if cfl and type(vfl) == "boolean" then FL.set_on(vfl) end
+                local cmt, vmt = imgui.checkbox("EXPERIMENTAL: match them: a part of mine that is BEHIND the other player's is taken forward one step at a time, never back; only in a quiet moment. Not remembered##matchon", MT.on)
+                if cmt and type(vmt) == "boolean" then MT.set_on(vmt) end
+                if imgui.button("Catch up once (one pass now, then it stops)##matchonce") then MT.request_once() end
+                local cwr, vwr = imgui.checkbox("When the game ignores a step twice, only write the number (skips what the step would do; may leave a gimmick unplayed). Not remembered##matchwrite", MT.write_fallback)
+                if cwr and type(vwr) == "boolean" then MT.write_fallback = vwr end
+                imgui.text("    probe: " .. tostring(FL.status) .. "   |   matching: " .. tostring(MT.status) .. (MT.blocked and (" (" .. tostring(MT.blocked) .. ")") or ""))
+                if tracer.flow_suspect then imgui.text("    OFF: the last session ended inside a story-flow call (tick the first box to try again).") end
+                local rows = FL.rows()
+                for i = 1, math.min(#rows, 8) do
+                    local r = rows[i]
+                    imgui.text(string.format("    %s %s: mine %s, %s %s%s", r.hash, tostring(r.name or "?"), tostring(r.mine or "-"), who, tostring(r.theirs or "-"),
+                        (r.mine and r.theirs and r.mine ~= r.theirs) and (r.mine < r.theirs and "   (behind)" or "   (ahead)") or ""))
+                end
+                imgui.text("    " .. tostring(MT.last))
+            end
             if imgui.button("FORCE test: play the last cutscene I started again here, as if " .. who .. " had just started it (stand where it began; may play it twice in a story you are in)##forcetest") then S.force_test() end
-            imgui.text("Test (works with the loopback bot; needs the first box ticked, and the second to see the move):")
+            imgui.text("Test (works with Ethan's friend; needs the first box ticked, and the second to see the move):")
             if imgui.button("Test: pretend " .. who .. " started the cutscene c03e03_00 where they stand") then
                 local r = state.remote
                 local ex = r and r.pos or state.local_pos or { x = 0, y = 0, z = 0 }
@@ -20596,36 +29258,6 @@ re.on_draw_ui(function()
         imgui.tree_pop()
     end
 
-    if imgui.tree_node("Doors (shared with the other player)") then
-        local ok, err = pcall(function()
-            local D = CFG.door
-            imgui.text("Doors: shared with the other player. When one of you unlocks, opens, closes or pushes a door, the same happens to that door in the other game.")
-            local c1, v1 = imgui.checkbox("Share doors with the other player (open, close, unlock and push; remembered)", D.on)
-            if c1 and type(v1) == "boolean" then
-                D.on = v1
-                D.note("door sync " .. (v1 and "switched on" or "switched off"))
-            end
-            local n = D.n
-            local count = 0
-            for _ in pairs(D.doors) do count = count + 1 end
-            imgui.text(string.format("Doors in this area: %d.   Sent: %d open, %d close, %d unlock, %d push angles.   Got: %d open, %d close, %d unlock, %d angles.",
-                count, n.sent_open, n.sent_close, n.sent_unlock, n.sent_angle, n.got_open, n.got_close, n.got_unlock, n.got_angle))
-            imgui.text(string.format("Applied here: %d.   Not loaded here: %d.   Other chapter: %d.   Dropped while loading: %d.   Errors: %d.",
-                n.applied, n.not_loaded, n.other_chapter, n.dropped_busy, n.errors))
-            imgui.text("Last: " .. D.last)
-            if CFG.busy.busy then imgui.text("The game is loading: doors wait (" .. tostring(CFG.busy.last_why or "settling") .. ").") end
-            if not D.hooked then imgui.text("The door hook is not installed (" .. tostring(D.hook_why or "not tried yet") .. "): a close is only sent when I opened the door.") end
-            local shown = 0
-            for i = #D.events, 1, -1 do
-                local e = D.events[i]
-                shown = shown + 1
-                if shown > 6 then break end
-                imgui.text(string.format("  %s  %s%s", e.dir == "sent" and "sent" or "got ", e.text, e.result and ("   -> " .. e.result) or ""))
-            end
-        end)
-        if not ok then imgui.text("UI error (doors): " .. tostring(err)) end
-        imgui.tree_pop()
-    end
     if imgui.tree_node("Who I am (character)") then
         local ok, err = pcall(function()
             local W = CFG.who
@@ -20648,14 +29280,14 @@ re.on_draw_ui(function()
             imgui.text(who .. " is: " .. (W.remote and (W.entry(W.remote).label) or "not heard yet"))
             imgui.text("Their body: " .. tostring(W.status))
             imgui.text("re7mp.exe's 'Play as' box sets the first box here too (re7mp_char.json); whichever was chosen last counts.")
-            if state.remote_name == "Loopback Bot" then
+            if CFG.friend.present() then
                 -- (9.33) a test aid: the bot says which character it is, so Mia's and Clancy's bodies can be tried alone
                 local bn, bi = { "Says nothing (Ethan's body)" }, 1
                 for i, c in ipairs(W.LIST) do
                     bn[#bn + 1] = c.label
                     if W.bot == c.key then bi = i + 1 end
                 end
-                local cb, ib = imgui.combo("The loopback bot is", bi, bn)
+                local cb, ib = imgui.combo("Ethan's friend is", bi, bn)
                 if cb and type(ib) == "number" then
                     if ib <= 1 then W.set_bot(nil) elseif W.LIST[ib - 1] then W.set_bot(W.LIST[ib - 1].key) end
                 end
@@ -20666,11 +29298,18 @@ re.on_draw_ui(function()
                     an[#an + 1] = a.label
                     if W.bot_act == a.key then ai = i end
                 end
-                local ca, ia = imgui.combo("The loopback bot does", ai, an)
+                local ca, ia = imgui.combo("Ethan's friend does", ai, an)
                 if ca and type(ia) == "number" and W.BOT_ACTS[ia] then
                     W.set_bot_act(W.BOT_ACTS[ia].key)
                 end
-                imgui.text("(" .. (W.bot_act == "copy" and "it stands beside you and shows your pose, your gun and your speed" or "one state at a time: pick another to look at the next animation") .. "; needs the exe from 9.38)")
+                imgui.text("(" .. (W.bot_act == "own" and "it acts for itself: it walks after you, faces the way it moves, blocks when an enemy is close and uses its heals on you; none of your poses are copied"
+                    or W.bot_act == "copy" and "it shows your pose, your gun and your speed (it follows you or stays put: F5 in the game)" or "one state at a time: pick another to look at the next animation") .. "; needs the exe from 9.38)")
+                local okr, br = pcall(function() return CFG.friend.body.report() end)
+                if okr and br and br.acting_for_itself then
+                    imgui.text(string.format("Its body: %s; %s", br.blocking and "BLOCKING" or "not blocking", tostring(br.enemies)))
+                    imgui.text(string.format("It stands on %s (%d points of your trail, %d heights set from the trail, %d from your own floor)",
+                        br.floor_y and string.format("y = %.2f", br.floor_y) or "no floor yet", br.trail_points or 0, br.from_trail or 0, br.from_my_floor or 0))
+                end
             end
             if p == "other" then imgui.text("(this player object is none of Ethan, Mia or Clancy: I am shown as Ethan unless one is chosen)") end
             -- (9.31) a character whose model is not in this scene (Clancy's is only there in a tape) can be made from its files
@@ -20683,6 +29322,133 @@ re.on_draw_ui(function()
             end
         end)
         if not ok then imgui.text("UI error: " .. tostring(err)) end
+        imgui.tree_pop()
+    end
+
+    if imgui.tree_node("Ethan's friend (an AI helper you play with alone: no network)") then -- 10.5
+        local okf, errf = pcall(function()
+            local F = CFG.friend
+            local r = F.report()
+            imgui.text(F.present() and "Ethan's friend is here." or "It is not here: start re7mp.exe in its \"Ethan's friend (play alone)\" mode. (A real player on the network is not a friend; nothing here applies to them.)")
+            imgui.text("What it looks like: the \"Appear as\" box in re7mp.exe. Your own character stays as the game has you.")
+            imgui.text("It has its OWN inventory, weapons and ammo too: an item you give it (F7 on the highlighted item, within 3 m) leaves yours and is kept by it, also between sessions.")
+            imgui.text("A gun it carries is shot with its own kind of ammo (HandgunBullet for a handgun, ShotgunBullet for a shotgun, ...); every shot takes one round out of ITS inventory.")
+            if #r.carries == 0 then imgui.text("It carries nothing yet.") end
+            for _, e in ipairs(r.carries) do imgui.text(string.format("   %s x%d", e.id, e.count)) end
+            imgui.text(string.format("Taken so far: %d. Last: %s", r.items_taken, tostring(r.last)))
+            local A = F.ai -- (10.6) what it does for you
+            imgui.text(string.format("WHAT IT DOES FOR YOU (within %.0f m of you; the distance and the seconds are the revive sliders in the Health section):", pstat.revive_radius))
+            local c0, v0 = imgui.checkbox("Ethan's friend helps me (gets me up, heals me)##friendhelps", A.on)
+            if c0 and type(v0) == "boolean" then A.on = v0 end
+            local c1, v1 = imgui.checkbox(string.format("It gets me up when I am down: it stays within %.0f m for %.0f s, no item is used##friendrevive", pstat.revive_radius, pstat.revive_hold), A.revive)
+            if c1 and type(v1) == "boolean" then A.revive = v1 end
+            local c2, v2 = imgui.checkbox("It uses a healing item from its own inventory on me when my health is low##friendheal", A.heal)
+            if c2 and type(v2) == "boolean" then A.heal = v2 end
+            local okb, chb, vb = pcall(imgui.slider_float, "...when my health is at or below (% of my maximum)##friendbelow", A.below, 10, 80)
+            if okb and chb and type(vb) == "number" then A.below = math.max(10, math.min(80, math.floor(vb + 0.5))) end
+            imgui.text(string.format("An item gives back (estimates from RE7 guides): Herb %d%%, First Aid Med %d%%, Strong First Aid Med %d%% of your maximum health.",
+                A.HEAL_PCT.herb, A.HEAL_PCT.med, A.HEAL_PCT.strong))
+            local hl = A.carried_heals()
+            if #hl == 0 then
+                imgui.text("It carries no healing item: give it a Herb or First Aid Med (F7 next to it).")
+            else
+                local t = {}
+                for _, e in ipairs(hl) do t[#t + 1] = string.format("%s x%d (%d%%)", e.id, e.count, e.pct) end
+                imgui.text("Healing items it carries: " .. table.concat(t, ", "))
+            end
+            imgui.text("Now: " .. tostring(A.status))
+            imgui.text("Last: " .. tostring(A.last))
+            imgui.text(string.format("Got me up %d (stopped %d)   healed me %d (stopped %d)   low health with nothing to use %d", A.stats.revives, A.stats.revives_stopped,
+                A.stats.heals, A.stats.heals_stopped, A.stats.no_item))
+            if imgui.button("Test: drop my health under the heal level now (to see it heal me)##friendlow") then
+                local mx = pstat.max or pstat.seen_max
+                if pstat.downed then
+                    pstat.note("you are down: get up first")
+                elseif not pstat.hi or type(mx) ~= "number" or mx <= 0 then
+                    pstat.note("your health can't be read, so I can't set it")
+                else
+                    local pc = math.max(5, A.below - 10)
+                    pstat.write_health(math.max(2, mx * pc / 100))
+                    pstat.note(string.format("test: your health set to %d%% (the friend helps at %d%% or less)", pc, A.below))
+                end
+            end
+            -- (10.8) the fighting friend
+            local T = F.fight
+            imgui.text(string.format("WHAT IT DOES FOR ITSELF (it has to act for itself: \"Ethan's friend does\" = acts for itself in Who I am). It shoots enemies within %.1f m of YOU, line of sight ignored.", T.NEAR_YOU))
+            local f1, g1 = imgui.checkbox("It shoots at enemies near me, with its own guns and ammo (damage by the gun and the scale in the Weapons section)##friendfights", T.on)
+            if f1 and type(g1) == "boolean" then T.on = g1 end
+            local f2, g2 = imgui.checkbox("It uses a healing item from its own inventory on itself when its health is low##friendselfheal", T.heal_self)
+            if f2 and type(g2) == "boolean" then T.heal_self = g2 end
+            local oks1, cs1, vs1 = pcall(imgui.slider_float, "...when its own health is at or below (% of its maximum)##friendselfbelow", T.heal_below, 10, 80)
+            if oks1 and cs1 and type(vs1) == "number" then T.heal_below = math.max(10, math.min(80, math.floor(vs1 + 0.5))) end
+            local oks2, cs2, vs2 = pcall(imgui.slider_float, "An enemy that reaches it takes this % of its health off every 1.2 s (0 = enemies never hurt it)##friendhurt", T.hurt_pct, 0, 30)
+            if oks2 and cs2 and type(vs2) == "number" then T.hurt_pct = math.max(0, math.min(30, math.floor(vs2 + 0.5))) end
+            local okn, csn, vsn = pcall(imgui.slider_float, "It shoots enemies this close to YOU (m; the enemy's own reach to hurt it stays 1.6 m)##friendshootm", T.NEAR_YOU, T.NEAR_MIN, T.NEAR_MAX)
+            if okn and csn and type(vsn) == "number" then T.NEAR_YOU = math.max(T.NEAR_MIN, math.min(T.NEAR_MAX, math.floor(vsn * 2 + 0.5) / 2)) end
+            local okg, csg, vsg = pcall(imgui.slider_float, "Its shots are at least this far apart (ms; 300 = no gun fires faster than that)##friendgap", T.MIN_GAP * 1000, T.MIN_GAP_LO * 1000, T.MIN_GAP_HI * 1000)
+            if okg and csg and type(vsg) == "number" then T.MIN_GAP = math.max(T.MIN_GAP_LO, math.min(T.MIN_GAP_HI, math.floor(vsg / 10 + 0.5) / 100)) end
+            local fo, go = imgui.checkbox("After a game over it gets up at full health and comes to me (when the reload has finished; needs the new exe to be put next to me)##friendover", CFG.friend.over.on)
+            if fo and type(go) == "boolean" then CFG.friend.over.on = go end
+            local okb, csb, vsb = pcall(imgui.slider_float, "It blocks only when an enemy is this close to IT (m; it lets go 0.4 m further)##friendblockm", CFG.friend.body.BLOCK_DIST, CFG.friend.body.BLOCK_MIN, CFG.friend.body.BLOCK_MAX)
+            if okb and csb and type(vsb) == "number" then CFG.friend.body.BLOCK_DIST = math.max(CFG.friend.body.BLOCK_MIN, math.min(CFG.friend.body.BLOCK_MAX, math.floor(vsb * 10 + 0.5) / 10)) end
+            local fg1, fg2 = imgui.checkbox("Its crouch measures its own feet and keeps them on the floor (the slider below is added on top)##friendground", CFG.friend.ground.on)
+            if fg1 and type(fg2) == "boolean" then CFG.friend.ground.on = fg2 end
+            do
+                local gr = CFG.friend.ground.report()
+                imgui.text(string.format("   feet: %s", tostring(gr.now)))
+                local R = CFG.friend.body.root
+                if R.used > 0 then
+                    imgui.text(string.format("   floor under you: read from your own object (the camera is %.2f m above it; %d readings, %d not believable, the guess used for those)", R.last_off or 0, R.reads, R.rejected))
+                elseif R.reads > 0 then
+                    imgui.text(string.format("   floor under you: your object's height was read %d times but was not believable (the camera %.2f m above it): the camera guess is used", R.reads, R.last_off or 0))
+                else
+                    imgui.text("   floor under you: your own object could not be read yet: the camera guess is used")
+                end
+            end
+            local okx, cxs, vxs = pcall(imgui.slider_float, "Crouch: stand its body this much higher on top of that (m; negative = lower; if its crouch floats, drag it down, if it sinks, up)##friendcrouch", CFG.friend.crouch_lift, CFG.body.CROUCH_EXTRA_MIN, CFG.body.CROUCH_EXTRA_TOP)
+            if okx and cxs and type(vxs) == "number" then CFG.friend.crouch_lift = math.floor(vxs * 1000 + 0.5) / 1000 end
+            imgui.text("(it crouches when you crouch. Its own slider: the one in Developer tools > Real body is for the other player's body, whose camera really sinks)")
+            local fr = T.report()
+            imgui.text(string.format("Now: %s", tostring(fr.state)))
+            if fr.target then imgui.text(string.format("   target %s, %.1f m from you, %.1f m from it   (%d in reach)", tostring(fr.target.name), fr.target.metres_from_you, fr.target.metres_from_it, fr.enemies_in_reach)) end
+            if fr.weapon then
+                imgui.text(string.format("   gun in hand: %s (%s, %d damage a shot before the scale), %d in the magazine%s", fr.weapon.id, fr.weapon.kind, fr.weapon.damage, fr.weapon.rounds_in_magazine, fr.weapon.reloading and ", reloading" or ""))
+            elseif #fr.guns == 0 then
+                imgui.text("   it carries no gun: give it one (F7 next to it) and some ammo of its kind")
+            else
+                imgui.text("   it carries a gun but no ammo of its kind: give it ammo (F7 next to it)")
+            end
+            local am = {}
+            for fam, n in pairs(fr.ammo) do am[#am + 1] = string.format("%s %d", fam, n) end
+            table.sort(am)
+            imgui.text("   ammo: " .. (#am > 0 and table.concat(am, ", ") or "none"))
+            if fr.health then imgui.text(string.format("   its health: %d / %d (%d%%)%s", fr.health.hp, fr.health.max, fr.health.percent, fr.health.down and "   DOWN: F8 within 3 m, or a heal" or "")) end
+            local st = fr.stats
+            imgui.text(string.format("Shots %d (hit %d, not taken %d), damage dealt %d, killed %d, ammo used %d, reloads %d, out of ammo %d times, no gun %d times",
+                st.shots, st.hits, st.failed, st.damage_dealt, st.kills, st.ammo_used, st.reloads, st.out_of_ammo, st.no_gun))
+            imgui.text(string.format("Healed itself %d (stopped %d, nothing to use %d). Enemies hurt it %d times for %d in all; it went down %d times.", st.heals, st.heals_stopped,
+                st.no_heal_item, st.hurts, st.damage_taken, st.times_down))
+            if fr.exe_older_than_10_8 then imgui.text("The exe is older than 10.8: it could not take an exact health, so a heal may not show. Rebuild re7mp.exe.") end
+            imgui.text("Last: " .. tostring(fr.last))
+            if fr.last_said then imgui.text("It last said: " .. tostring(fr.last_said)) end
+            imgui.text("Enemies cannot really aim at it (the game's AI does not know it exists): the damage it takes is simulated by distance. Nothing hands items back yet.")
+            if imgui.button("Test: put a handgun and 30 handgun bullets into its inventory##friendarm") then
+                pcall(F.take, "HandgunM19", 1)
+                pcall(F.take, "HandgunBullet", 30)
+            end
+            imgui.same_line()
+            if imgui.button("Test: take all its guns and ammo away##friendunarm") then
+                F.load()
+                local gone = {}
+                for id in pairs(F.inv) do
+                    if T.ammo_family(id) or T.is_gun(id) then gone[#gone + 1] = id end
+                end
+                for _, id in ipairs(gone) do F.inv[id] = nil end
+                F.save()
+                T.weapon = nil
+            end
+        end)
+        if not okf then imgui.text("UI error: " .. tostring(errf)) end
         imgui.tree_pop()
     end
 
@@ -20741,13 +29507,20 @@ re.on_draw_ui(function()
             if cg and type(vg) == "boolean" then enemy.hit.by_gun = vg end
             local oks, cs, vs = pcall(imgui.slider_float, "Gun damage scale (the 100-damage pistol shot measured 210)", enemy.hit.gun_scale, 0.5, 6)
             if oks and cs and type(vs) == "number" then enemy.hit.gun_scale = math.max(0.5, math.min(6, vs)) end
-            imgui.text("FRIENDLY FIRE (experimental; off at every start; both players need it ticked for the damage to be taken; the loopback bot takes it without a tick):")
+            do -- (10.21) which gun the last shot used and what each gun has sent (the debug file has the whole table)
+                local parts = {}
+                for id, g in pairs(enemy.hit.gun_sent) do parts[#parts + 1] = string.format("%s x%d (%d)", id, g.shots, g.damage or 0) end
+                table.sort(parts)
+                imgui.text(string.format("Last shot used: %s.  Sent by gun so far: %s.  Flat-number shots: %d, unknown-gun shots: %d.", tostring(enemy.hit.last_gun or "none yet"),
+                    #parts > 0 and table.concat(parts, ", ") or "nothing yet", enemy.hit.flat_shots, enemy.hit.unknown_gun_shots))
+            end
+            imgui.text("FRIENDLY FIRE (experimental; off at every start; both players need it ticked for the damage to be taken; Ethan's friend takes it without a tick):")
             local cf, vf = imgui.checkbox("Friendly fire: my shots that cross " .. who .. " hurt them (never below 1 health)", F.on)
             if cf and type(vf) == "boolean" then F.on = vf end
             local okc, cc, vc = pcall(imgui.slider_float, "Friendly fire damage scale", F.scale, 0.1, 3)
             if okc and cc and type(vc) == "number" then F.scale = math.max(0.1, math.min(3, vc)) end
             imgui.text(string.format("Friendly fire: tested %d, missed %d, behind a wall %d, sent %d, taken %d. %s", F.shots, F.misses, F.walled, F.sent, F.applied, tostring(F.last)))
-            local rh = pstat.remote -- (9.33) the loopback bot takes the hits itself and reports its health, so a hit shows here
+            local rh = pstat.remote -- (9.33) Ethan's friend takes the hits itself and reports its health, so a hit shows here
             if rh and rh.hp and os.clock() - (rh.at or -100) < 10 then
                 imgui.text(string.format("%s's health as they report it: %.0f / %.0f%s", who, rh.hp, rh.max or 0, rh.downed and "   DOWN (it stays at 1)" or ""))
             end
@@ -20760,7 +29533,11 @@ re.on_draw_ui(function()
         local ok, err = pcall(function()
             local P = CFG.pup
             local c1, v1 = imgui.checkbox("Show the host's enemies as their real models (EXPERIMENTAL; the red box is the fallback)", P.enabled())
-            if c1 and type(v1) == "boolean" then P.on = v1 end
+            if c1 and type(v1) == "boolean" then
+                P.on = v1
+                if v1 then tracer.puppet_suspect = nil end -- (10.21: ticked by hand: try again after a crash marker)
+            end
+            imgui.text("Off by default since 10.21: these models stand in a T-pose. An enemy my own game has moved onto the host's (mode 3) is its own picture and never gets one.")
             local c2, v2 = imgui.checkbox("Also draw the red box next to the model (to compare)", P.box_too)
             if c2 and type(v2) == "boolean" then P.box_too = v2 end
             do -- (9.36)
@@ -20843,18 +29620,25 @@ re.on_draw_ui(function()
                 if ch then R.set_hair(vh) end
                 -- (9.33) Mia's face: the layers of the scene's head, each with a box (the corrupted Mia's skin off, her own on, by default)
                 local Fc, Bc = CFG.body.face, CFG.body
-                local cl0, vl0 = imgui.checkbox("Mia: switch the layers of her head (the corrupted Mia's skin off, her own on; press Rebuild)", Fc.mats)
+                local cl0, vl0 = imgui.checkbox("Switch the layers (materials) of the body and its parts: Mia's head skins (the corrupted skin off, her own on) and the VR hands (press Rebuild)", Fc.mats)
                 if cl0 and type(vl0) == "boolean" then Fc.mats, Fc.mat_ver = vl0, Fc.mat_ver + 1 end
+                -- (10.4) the VR hands layer: a body mesh carries a second pair of hands as a material (pl0000_VR, pl2000_VR, pl3000_VR); with hand parts of their own they show over them
+                local cvr, vvr = imgui.checkbox("Hide the VR hands layer (a material named ..._VR) on a body that has its own hands, e.g. Clancy's", Fc.vr_off)
+                if cvr and type(vvr) == "boolean" then Fc.vr_off, Fc.mat_ver = vvr, Fc.mat_ver + 1 end
                 if Fc.mats then
                     local names, list = {}, {}
                     for n in pairs(Fc.MAT_DEFAULT) do names[n] = true end
-                    for n in pairs(Fc.seen) do names[n] = true end
+                    for n in pairs(Fc.shown) do names[n] = true end
+                    for n in pairs(Fc.seen) do
+                        local low = tostring(n):lower()
+                        if Bc.is_vr_layer(n) or low:find("skin_", 1, true) or low:match("^em%d%d%d%d_") or low:match("^eye_") then names[n] = true end -- (the layers worth a box; the debug file lists them all)
+                    end
                     for n in pairs(names) do list[#list + 1] = n end
                     table.sort(list)
                     for _, n in ipairs(list) do
                         local w = Bc.face_wanted(n)
                         if w == nil then w = Fc.seen[n] ~= false end
-                        local cly, vly = imgui.checkbox("Head layer: " .. n, w)
+                        local cly, vly = imgui.checkbox((Bc.is_vr_layer(n) and "VR hands layer: " or "Head layer: ") .. n, w)
                         if cly and type(vly) == "boolean" then Bc.face_set_layer(n, vly) end
                     end
                 end
@@ -20867,10 +29651,28 @@ re.on_draw_ui(function()
                 local cdn, vdn = imgui.checkbox("Mia: put the corrupted Mia's head and chain hair on her playable body (Pl2000; press Rebuild)", CFG.body.donor.on)
                 if cdn and type(vdn) == "boolean" then CFG.body.donor.on = vdn end
                 imgui.text("    " .. CFG.body.donor_line())
-                local chp, vhp = imgui.checkbox("Mia: hair physics (EXPERIMENTAL: copies the corrupted Mia's chain component when she is in the scene; it could close the game, so it is switched off after a crash)", CFG.hair.on)
-                if chp and type(vhp) == "boolean" then CFG.hair.set_on(vhp) end
-                imgui.text("    " .. CFG.hair.line())
-                if imgui.button("Read her hair components (needs a corrupted Mia in the scene; for the developer)##hair") then pcall(CFG.hair.probe_scene) end
+                -- (10.2) the game's own animations (the motion bank) instead of the recorded clips
+                local cgm, vgm = imgui.checkbox("Animate it with the game's own clips (the motion bank) instead of my recorded ones", CFG.gmot.on)
+                if cgm and type(vgm) == "boolean" then CFG.gmot.set_on(vgm) end
+                imgui.text("    " .. CFG.gmot.line())
+                -- (10.10) the small actions (touching a door or a wall, the codex ...) on a second animation layer, as the other mod does
+                local cact, vact = imgui.checkbox("Small actions: show their touching of a door or wall, the codex ... on a second animation layer over the walk (as Molded Together does)##actlayers", CFG.mbank.act_on)
+                if cact and type(vact) == "boolean" then CFG.mbank.act_on = vact end
+                imgui.text(string.format("    mine now: %s | theirs now: %s | %s", CFG.mbank.act and (CFG.mbank.act.name or CFG.mbank.act.key) or "none",
+                    CFG.mbank.act_remote and string.format("%d/%d on layer %d", CFG.mbank.act_remote.bank, CFG.mbank.act_remote.motion, CFG.mbank.act_remote.layer) or "none", tostring(CFG.gmot.act_text or "nothing played yet")))
+                -- (10.14) the scripted moves (the van door, a ladder, a kick ...) and the banks the game adds: their list goes onto the body and the move plays
+                local cjk, vjk = imgui.checkbox("Scripted moves: show their van door, ladder, kicks ... (the move's own animation list is added to the body)##jack", CFG.jack.on)
+                if cjk and type(vjk) == "boolean" then CFG.jack.on, CFG.jack.last = vjk, vjk and "switched on in the panel" or "switched off in the panel" end
+                imgui.text(string.format("    mine now: %s | theirs now: %s | bank changes: %d", CFG.jack.s.path and (CFG.jack.s.path:match("[^/]+$") or CFG.jack.s.path) or "none",
+                    CFG.jack.remote and (CFG.jack.remote.path:match("[^/]+$") or CFG.jack.remote.path) or "none", CFG.jack.rebuilds))
+                -- (10.15) the weapon in their hand
+                do
+                    local Wm = CFG.wmesh
+                    local cwm, vwm = imgui.checkbox("Weapon: show the weapon in their hand (a copy of its model, made from the game's files and hung on the body's right-hand joint; the knife needs half a second; switched off after a crash; remembered)##wmesh", Wm.on)
+                    if cwm and type(vwm) == "boolean" then Wm.set_on(vwm) end
+                    imgui.text(string.format("    mine now: %s | theirs now: %s | %s", Wm.local_rec and Wm.local_rec.name or ("none (" .. tostring(Wm.local_why) .. ")"),
+                        Wm.got and (Wm.got.mesh:match("[^/]+$") or Wm.got.mesh) or "none", tostring(Wm.state())))
+                end
                 if R.stage ~= "failed" and imgui.button("Rebuild the body##realretry") then R.retry() end
                 -- (9.39) the parts made from files and the material file each uses: a file that exists but is the wrong one draws black, and only your eyes see that
                 do
@@ -20900,41 +29702,45 @@ re.on_draw_ui(function()
         imgui.tree_pop()
     end
 
-    if imgui.tree_node("Send me this (debug files for the developer)") then
-        local ok, err = pcall(function()
-            imgui.text("Everything below is saved to reframework\\data\\re7mp\\debug.json.")
-            imgui.text("In re7mp.exe click 'Open data folder' and send me that file.")
-            if imgui.button("1. Collect game info") then collect_info() end
-            if imgui.button("2. Start tracing items (then pick up and drop an item)") then
-                for _, n in ipairs({ "app.ItemManager", "app.Inventory", "app.Item" }) do trace_type(n, "", false) end
-            end
-            if imgui.button("3. Scan for enemies (stand where one is visible)") then scan_enemies() end
-            if imgui.button("4. Watch for death (then let something kill you once)") then
-                trace_type("app.GameManager", "", false)
-            end
-            if imgui.button("5. Enemy details (stand near Jack or any enemy)") then enemy_details() end
-            if imgui.button("6. Enemy damage trace (press, then shoot an enemy once)") then trace_enemy_damage() end
-            if imgui.button("7. Highlighted item details (open the inventory, click an item to select it)") then dump_focused_item() end
-            if imgui.button("8. Player details and trace (press, then get hit, block, use a Herb)") then pstat.details() end
-            if imgui.button("9. Cutscene / event trace (press, then trigger a cutscene, open a door)") then pstat.events_trace() end
-            pstat.extras_panel()
-            if imgui.button("10. Load screen scan (open the Load Game screen first, then press)") then CFG.lm.dump() end
-            do -- (9.33) the enemies' animation files (.motlist): a list of them, then 30 s of what they play. Reads only.
-                local Mo = CFG.mot
-                if imgui.button(Mo.watch and "12. Enemy animations: watching ...  [F3] (press to stop and save)"
-                    or "12. Enemy animations (.motlist)  [F3]: stand near enemies, press, then fight or run for 45 s") then Mo.press() end
-                imgui.text("    F3 does the same with the menu shut (press it again to stop and save). A line at the top left shows it is watching.")
-                imgui.text("    " .. Mo.line())
-                imgui.text("    every .motlist path seen so far is kept in " .. FILES.path("motlists") .. ": send that file (and the debug file)")
-            end
-            pstat.rec_panel()
-            if imgui.tree_node("13. Loopback bot's enemy: pick the model it shows (which models work, which I still need to collect)") then
+    if imgui.tree_node("Developer tools (for the mod's author: you do not need these to play)") then
+        imgui.text("Experiments, recorders and test switches. The debug files the developer asks for are the first box.")
+        if imgui.tree_node("Debug files for the developer (send me reframework\\data\\re7mp\\debug.json)") then
+            local ok, err = pcall(function()
+                imgui.text("re7mp.exe > 'Open data folder'. Press what is asked for, do the thing in the game, then send me that file.")
+                imgui.text(string.format("Debug log: %d lines. The file is written every %d s while you play (every %d s with a menu open).", #dbg.lines, CFG.dbgf.play_s, CFG.dbgf.ui_s))
+                do -- (9.36) the file is written at most every few seconds; this writes it now
+                    local F = CFG.dbgf
+                    imgui.text(string.format("    writes so far: %d, last took %.1f ms (building it %.1f ms, saving it %.1f ms), slowest %.1f ms", F.n, F.last * 1000, F.last_build * 1000, F.last_dump * 1000, F.max * 1000))
+                    if imgui.button("Save the debug file now") then pcall(flush_debug, os.clock(), true) end
+                    pcall(imgui.same_line)
+                    if imgui.button("Clear the debug log") then dbg.lines = {} dbg.dirty = true end
+                end
+                if imgui.tree_node("Game and items (1, 2, 7, 10)##dbggame") then
+                    if imgui.button("1. Collect game info") then collect_info() end
+                    if imgui.button("2. Start tracing items (then pick up and drop an item)") then
+                        for _, n in ipairs({ "app.ItemManager", "app.Inventory", "app.Item" }) do trace_type(n, "", false) end
+                    end
+                    if imgui.button("7. Highlighted item details (open the inventory, click an item to select it)") then dump_focused_item() end
+                    if imgui.button("10. Load screen scan (open the Load Game screen first, then press)") then CFG.lm.dump() end
+                    imgui.tree_pop()
+                end
+                if imgui.tree_node("Enemies (3, 5, 6, 12, 13)##dbgenemy") then
+                    if imgui.button("3. Scan for enemies (stand where one is visible)") then scan_enemies() end
+                    if imgui.button("5. Enemy details (stand near Jack or any enemy)") then enemy_details() end
+                    if imgui.button("6. Enemy damage trace (press, then shoot an enemy once)") then trace_enemy_damage() end
+                    do -- (9.33) the enemies' animation files (.motlist): a list of them, then 30 s of what they play. Reads only.
+                        local Mo = CFG.mot
+                        if imgui.button(Mo.watch and "12. Enemy animations: watching ...  [F3] (press to stop and save)"
+                            or "12. Enemy animations (.motlist)  [F3]: stand near enemies, press, then fight or run for 45 s") then Mo.press() end
+                        imgui.text("    " .. Mo.line() .. "  (F3 does the same with the menu shut; the paths seen are kept in " .. FILES.path("motlists") .. ")")
+                    end
+            if imgui.tree_node("13. Ethan's friend's enemy: pick the model it shows (which models work, which I still need to collect)") then
                 local M = CFG.bm
                 local ok2, err2 = pcall(function()
                     local list = M.list()
-                    imgui.text("The loopback bot's circling enemy is sent by re7mp.exe as Jack Baker (Em3000). Pick any model below and it is drawn as that model instead.")
-                    imgui.text("It needs the loopback bot, 'Show the host's enemies as their real models' ticked, and 'Load models that are not in this scene' ticked (Who I am).")
-                    if state.remote_name ~= "Loopback Bot" then imgui.text("(the loopback bot is not connected now: the choice is kept for when it is)") end
+                    imgui.text("Ethan's friend's circling enemy is sent by re7mp.exe as Jack Baker (Em3000). Pick any model below and it is drawn as that model instead.")
+                    imgui.text("It needs Ethan's friend, 'Show the host's enemies as their real models' ticked, and 'Load models that are not in this scene' ticked (Who I am).")
+                    if not CFG.friend.present() then imgui.text("(Ethan's friend is not connected now: the choice is kept for when it is)") end
                     local names, cur = {}, 1
                     local want = M.choice and M.choice:lower() or "em3000"
                     for i, m in ipairs(list) do
@@ -20971,21 +29777,23 @@ re.on_draw_ui(function()
                 if not ok2 then imgui.text("UI error: " .. tostring(err2)) end
                 imgui.tree_pop()
             end
-            imgui.text(string.format("Debug log: %d lines", #dbg.lines))
-            do -- (9.36) the file is written at most every few seconds; this writes it now
-                local F = CFG.dbgf
-                imgui.text(string.format("    the debug file is written every %d s while you play (every %d s while a menu is open), and waits longer if a write was slow", F.play_s, F.ui_s))
-                imgui.text(string.format("    writes so far: %d, last took %.1f ms (building it %.1f ms, saving it %.1f ms), slowest %.1f ms", F.n, F.last * 1000, F.last_build * 1000, F.last_dump * 1000, F.max * 1000))
-                if imgui.button("Save the debug file now") then pcall(flush_debug, os.clock(), true) end
-            end
-            if imgui.button("Clear the debug log") then dbg.lines = {} dbg.dirty = true end
-        end)
-        if not ok then imgui.text("UI error: " .. tostring(err)) end
-        imgui.tree_pop()
-    end
+                    imgui.tree_pop()
+                end
+                if imgui.tree_node("Player and events (4, 8, 9, 11)##dbgplayer") then
+                    if imgui.button("4. Watch for death (then let something kill you once)") then
+                        trace_type("app.GameManager", "", false)
+                    end
+                    if imgui.button("8. Player details and trace (press, then get hit, block, use a Herb)") then pstat.details() end
+                    if imgui.button("9. Cutscene / event trace (press, then trigger a cutscene, open a door)") then pstat.events_trace() end
+                    pstat.extras_panel()
+                    pstat.rec_panel()
+                    imgui.tree_pop()
+                end
+            end)
+            if not ok then imgui.text("UI error: " .. tostring(err)) end
+            imgui.tree_pop()
+        end
 
-    if imgui.tree_node("Developer tools (for the mod's author: you do not need these to play)") then
-        imgui.text("Experiments, recorders and test switches. The debug files the developer asks for are under \"Send me this\".")
         if imgui.tree_node("Debug model (the green man), poses and hiding") then
             imgui.text("The debug model is the shaded green stand-in and the skeleton lines. Once the real body works it is only for testing.")
             imgui.text("Hiding it behind walls and menus is off by default (a real body is hidden by the game itself).")
@@ -21049,50 +29857,197 @@ re.on_draw_ui(function()
             imgui.tree_pop()
         end
 
-        if imgui.tree_node("Spawn log: Mia's spawn, the methods and files, hair physics") then
+        -- (10.23) the Enemies section lives here now (it was a tab of the main panel): the sync mode, the probes and the test buttons are for the developer.
+        -- The player's own switch for enemy sync is re7mp.exe's box 'Sync enemies and the Molded' (ticked by default).
+        if imgui.tree_node("Enemies") then
             local ok, err = pcall(function()
-                local S = CFG.slog
-                imgui.text("Watches the game spawn a character (Mia by default): which methods it calls, which files it asks for, what she is made of, and")
-                imgui.text("what my copy of her lacks (hair / cloth / chain components first). Play to her spawn, then send re7mp/spawnlog.json and the debug file.")
-                local c, v = imgui.checkbox("Spawn log on (hooks the game's spawn / load methods a few at a time; reads only; remembered)", S.on)
-                if c and type(v) == "boolean" then S.set_on(v) end
-                local c2, v2 = imgui.input_text("Who to watch (words, separated by ;)", S.focus)
-                if c2 and type(v2) == "string" and v2 ~= "" and #v2 <= 120 then
-                    S.focus = v2
-                    S.dirty = true
+                local c, idx = imgui.combo("Enemy sync", enemy.mode, ENEMY_MODES)
+                if c then
+                    enemy.mode = idx
+                    if idx < 3 then enemy_release_all() end
                 end
-                imgui.text("State: " .. tostring(S.idle) .. ".   Methods hooked: " .. S.n.hooks_ok .. " (failed " .. S.n.hooks_failed .. ", skipped " .. S.n.hooks_skipped
-                    .. ", too busy to log " .. S.n.hot .. ").   Calls seen: " .. S.n.calls .. ", files asked for: " .. S.n.loads)
-                imgui.text("Spawns found: " .. S.n.spawns .. ".   Objects read: " .. S.n.objects .. ".   Copy comparisons: " .. S.n.compares .. ".   Errors: " .. S.n.errors)
-                imgui.text("Last: " .. tostring(S.last))
-                if S.last_error then imgui.text("Last error: " .. tostring(S.last_error)) end
-                if imgui.button("Look for hair physics now") then
-                    S.census_at = -100
-                    S.note("looking for hair physics on every character in the scene")
-                end
-                if imgui.button("Compare the last spawn with my copy") then S.compare_last() end
-                if imgui.button("Write the log files now") then S.save() S.note("log written to " .. FILES.path("spawnlog")) end
-                if next(S.skip) ~= nil and imgui.button("Forget the calls that ended a session") then
-                    S.skip, S.crashes = {}, 0
-                    S.save_state()
-                    S.note("the skipped calls were forgotten")
-                end
-                for i = math.max(1, #S.eps - 2), #S.eps do
-                    local ep = S.eps[i]
-                    imgui.text(string.format("Spawn #%d: %s (%s), chapter %s: %d kinds of calls before, %d objects, %d physics components%s", ep.id, tostring(ep.owner), tostring(ep.name),
-                        tostring(ep.chapter), ep.calls_before_total or 0, ep.real and ep.real.n_objects or 0, ep.real and #ep.real.phys or 0,
-                        ep.diff and string.format(", missing on my copy: %d objects, %d physics, %d files", #ep.diff.objects, #ep.diff.physics, #ep.diff.files) or ""))
-                end
-                local shown = 0
-                for name, row in pairs(S.census) do
-                    if shown < 8 then
-                        shown = shown + 1
-                        local ks = {}
-                        for k in pairs(row.kinds) do ks[#ks + 1] = k end
-                        table.sort(ks)
-                        imgui.text("   " .. name .. " carries " .. table.concat(ks, ", "))
+                if enemy.mode == 3 then
+                    local c2, v2 = imgui.checkbox("Also switch off their AI (riskier; they stop fighting the host's positions)", enemy.drive_ai)
+                    if c2 then
+                        enemy.drive_ai = v2
+                        enemy_release_all()
                     end
+                    local A = CFG.eanim
+                    local c3, v3 = imgui.checkbox("EXPERIMENTAL: play the host's enemy animations on my enemies (needs the box above; fetches animation files my game lacks; remembered)", A.on)
+                    if c3 and type(v3) == "boolean" then
+                        A.on = v3
+                        if not v3 then A.release_all("switched off") end
+                        A.note("enemy clips " .. (v3 and "switched on" or "switched off"))
+                    end
+                    imgui.text("Enemy clips: " .. tostring(A.idle_why) .. ".   Clips played: " .. A.n.plays .. ".   Banks asked for: " .. A.n.asks .. ", added: " .. A.n.added
+                        .. ".   Banks and clips seen: " .. A.n.clips_seen .. " (re7mp/enemy_clips.json).   Errors: " .. A.n.errors)
+                    imgui.text("Last: " .. A.last)
                 end
+                do -- (10.15) one health pool, the boss bar, and the Molded copies
+                    local P = CFG.pool
+                    local cbar, vbar = imgui.checkbox("Boss health bar: show the host's health for a boss at the top of both screens, so the two numbers can be seen to match (remembered)##poolbar", P.bar)
+                    if cbar and type(vbar) == "boolean" then P.bar = vbar end
+                    local cpool, vpool = imgui.checkbox("One health pool (mode 3): my copy of the host's enemy takes the host's health, and dies when theirs does; never for a boss unless the next box is ticked, never during a cutscene or a load (remembered)##poolfollow", P.on)
+                    if cpool and type(vpool) == "boolean" then
+                        P.on = vpool
+                        if vpool then tracer.pool_suspect = nil end -- (ticked by hand: try again after a crash marker)
+                    end
+                    local cpb, vpb = imgui.checkbox("EXPERIMENTAL: the pool also writes the host's health into my copy of a BOSS (Mia, Jack ...; lowered only, never during a cutscene, never a damage call; not remembered: off at every start)##poolbosses", P.bosses)
+                    if cpb and type(vpb) == "boolean" then P.bosses = vpb end
+                    imgui.text(string.format("    copies lowered %d, raised %d, in step %d | killed %d (hits %d, failed %d) | write errors %d | boss bars now %d | held for a cutscene or load %d | boss left alone %d", P.n.lowered, P.n.raised, P.n.same,
+                        P.n.killed, P.n.kill_tries, P.n.kill_failed, P.n.errors, P.shown, P.n.held_not_quiet, P.n.boss_not_written))
+                    if tracer.pool_suspect then imgui.text("    OFF: the last session ended inside the health pool (tick its box to try again).") end
+                    do -- (10.21) kills both ways
+                        local K = CFG.kill
+                        local ck, vk = imgui.checkbox("Share kills: when my copy of the host's enemy dies here first, the host's dies too (the host applies it). The host's own deaths already kill mine. Never a boss, never during a cutscene (remembered)##killsync", K.on)
+                        if ck and type(vk) == "boolean" then
+                            K.on = vk
+                            if vk then tracer.kill_suspect = nil end -- (ticked by hand: try again after a crash marker)
+                        end
+                        imgui.text(string.format("    I asked the host %d time(s) (+%d again; answered ok %d, refused %d, gave up %d, boss left alone %d, dead at first sight %d) | as host: asked %d, killed %d, already dead %d, refused %d, failed %d | %s",
+                            K.n.asked, K.n.resent, K.n.ok, K.n.refused, K.n.gave_up, K.n.bosses_skipped, K.n.born_dead, K.n.host_asked, K.n.host_killed, K.n.host_already_dead, K.n.host_refused, K.n.host_failed, tostring(K.last)))
+                        if tracer.kill_suspect then imgui.text("    OFF: the last session ended inside a kill (tick its box to try again).") end
+                    end
+                    do -- (10.21) Molded limbs and heads both ways
+                        local LB = CFG.limb
+                        local cl, vl = imgui.checkbox("Share Molded limbs and heads: a head, arm or leg lost on one side is removed on the other's copy. PARTLY GUESSWORK: it only acts through a game method it can recognise, and writes re7mp/limb_probe.json with what the game offers (remembered)##limbsync", LB.on)
+                        if cl and type(vl) == "boolean" then
+                            LB.on = vl
+                            if vl then tracer.limb_suspect = nil end -- (ticked by hand: try again after a crash marker)
+                        end
+                        imgui.text(string.format("    types read %d of %d | readings ok %d, none %d | told the other player %d (+%d again), heard %d | removed here %d, could not %d, no method %d | refused %d, errors %d | %s",
+                            LB.types_done, #LB.TYPES, LB.n.read_ok, LB.n.read_none, LB.n.sent, LB.n.resent, LB.n.heard, LB.n.applied, LB.n.apply_failed, LB.n.no_apply_method, LB.n.refused, LB.n.errors, tostring(LB.last)))
+                        if tracer.limb_suspect then imgui.text("    OFF: the last session ended while the script was removing a limb (tick its box to try again).") end
+                    end
+                    do -- (10.16) the garage car probe (reads only)
+                        local CP = CFG.car
+                        local ccp, vcp = imgui.checkbox("Garage car probe (reads only): writes the type app.CarInGarage and, once the garage's car exists, 3 readings of it to re7mp/car_probe.json (not remembered)##carprobe", CP.on)
+                        if ccp and type(vcp) == "boolean" then CP.set_on(vcp) end
+                        if CP.on and imgui.button("Probe again##carprobe2") then CP.start("the button") end
+                        imgui.text("    " .. tostring(CP.status))
+                    end
+                    imgui.text("    " .. tostring(P.last))
+                    local M = CFG.molded
+                    local cmo, vmo = imgui.checkbox("EXPERIMENTAL: bring out the host's Molded in my game too and move those real bodies onto theirs (not remembered; the game may close: it is switched off after a crash)##moldedcopies", M.on)
+                    if cmo and type(vmo) == "boolean" then M.set_on(vmo) end
+                    imgui.text(string.format("    Molded copies up %d (taken %d, let go %d, asked for %d, killed %d) | spawn points %d, bodies out %d | %s", (function() local n = 0 for _ in pairs(M.copies) do n = n + 1 end return n end)(),
+                        M.n.taken, M.n.released, M.n.asked, M.n.killed, CFG.mold.n.points, CFG.mold.n.with_body, tostring(M.last)))
+                end
+                do -- (10.18) who the enemies target, and the hand-over of an enemy to the player it goes for
+                    local TG, OW = CFG.tgt, CFG.own
+                    local ctg, vtg = imgui.checkbox("Enemy targeting log (reads only): who the nearest enemies are going for and how far each is from you and from the other player (debug file: enemy_targets)##tgtlog", TG.on)
+                    if ctg and type(vtg) == "boolean" then TG.set_on(vtg) end
+                    imgui.text("    " .. tostring(TG.status))
+                    local cow, vow = imgui.checkbox("EXPERIMENTAL, BOTH players tick it (mode 3 on both): the enemy goes to the player who is clearly nearer, and that player's game runs it (its AI targets them for real). Bosses and Molded stay with the host. Not remembered##handover", OW.on)
+                    if cow and type(vow) == "boolean" then OW.set_on(vow) end
+                    imgui.text(string.format("    %s | offered %d, taken %d, refused %d, no answer %d | taken back %d, lost %d, died %d | states sent %d, read %d | hits passed on %d, applied %d | errors %d",
+                        tostring(OW.status), OW.n.offered, OW.n.accepted, OW.n.refused, OW.n.no_answer, OW.n.taken_back, OW.n.lost, OW.n.died, OW.n.states_sent, OW.n.states_read,
+                        OW.n.hits_forwarded, OW.n.hits_applied, OW.n.errors))
+                    if tracer.own_suspect then imgui.text("    OFF: the last session ended inside a hand-over (tick its box to try again).") end
+                    imgui.text("    " .. tostring(OW.last))
+                end
+                do -- (10.19) re7mp.exe's enemy box, the garage car sync and the actor probe
+                    local ES, CS, AP = CFG.esync, CFG.carsync, CFG.actors
+                    imgui.text("re7mp.exe's 'Sync enemies and the Molded' box: " .. (ES.state == nil and "not seen yet (no file: mode and Molded stay as set here)" or (ES.state and "ON" or "off")) .. "  |  " .. tostring(ES.last))
+                    if ES.molded_note then imgui.text("    " .. ES.molded_note) end
+                    local ccs, vcs = imgui.checkbox("Garage car sync (Jack's car; needs mode 3): whoever gets in first drives, the other player gets in too, and the other game's car follows (remembered)##carsync", CS.on)
+                    if ccs and type(vcs) == "boolean" then CS.set_on(vcs) end
+                    if tracer.car_suspect then imgui.text("    OFF: the last session ended inside a garage car call (tick its box to try again).") end
+                    local O = CS.opt
+                    local cr, vr = imgui.checkbox("The other player's own player gets in too (Interact_GetInto is fired for them)##carride", O.ride)
+                    if cr and type(vr) == "boolean" then O.ride = vr end
+                    local cst, vst = imgui.checkbox("Draw the other player at the second seat (sideways offset below)##carseat", O.seat)
+                    if cst and type(vst) == "boolean" then O.seat = vst end
+                    local okx, chx, vx = pcall(imgui.slider_float, "Seat offset (m, to the car's right; try a minus if it is on the wrong side)##carseatx", O.seat_x, -2, 2)
+                    if okx and chx then O.seat_x = vx end
+                    local ccr, vcr = imgui.checkbox("Carry my player along when the car moves and the game does not##carcarry", O.carry)
+                    if ccr and type(vcr) == "boolean" then O.carry = vcr end
+                    local cbo, vbo = imgui.checkbox("The following car's brain is switched off too (off: only its state machine is paused)##carbrain", O.brain_off)
+                    if cbo and type(vbo) == "boolean" then O.brain_off = vbo end
+                    local cdm, vdm = imgui.checkbox("Mirror the car's damage (windows, body, door, tyres) and its end (AfterExplosion)##cardamage", O.damage)
+                    if cdm and type(vdm) == "boolean" then O.damage = vdm end
+                    local cro, vro = imgui.checkbox("A run-over: the runner's car hits my player when it drives over them (amount below, never lethal in one pass)##carrun", O.runover)
+                    if cro and type(vro) == "boolean" then O.runover = vro end
+                    local okd2, chd2, vd2 = pcall(imgui.slider_float, "Run-over damage##carrundmg", O.run_damage, 1, 600)
+                    if okd2 and chd2 then O.run_damage = math.floor(vd2) end
+                    if imgui.button("Get me out of the car##carout") then CS.get_out("the button") end
+                    if imgui.button("Let go of the car now (everything back as the game has it)##carrelease") then CS.release("the button", false) end
+                    imgui.text(string.format("    %s | story %s | my car: %s | ride: %s | puppet %s | placed %d, carried %d | lines sent %d, read %d | windows %d, body %d, tyres %d | errors %d",
+                        tostring(CS.status), tostring(CS.story_n), tostring(CS.local_r and CS.local_r.state or "-"), tostring(CS.rs and CS.rs.phase or "-"), tostring(CS.puppet ~= nil),
+                        CS.n.placed, CS.n.carried, CS.n.lines_sent, CS.n.lines_read, CS.n.windows, CS.n.bodies, CS.n.tyres, CS.n.errors))
+                    imgui.text("    " .. tostring(CS.last))
+                    local cap, vap = imgui.checkbox("Actor probe (reads only): list the scene's objects that run a script of their own like the garage car, to re7mp/actor_probe.json (not remembered)##actorprobe", AP.on)
+                    if cap and type(vap) == "boolean" then AP.set_on(vap) end
+                    imgui.text("    " .. tostring(AP.status))
+                end
+                if state.transport ~= "tcp" then
+                    imgui.text("Enemy sync needs TCP. Choose TCP in re7mp.exe (one of you hosts, the other joins).")
+                elseif state.role == "host" then
+                    imgui.text(string.format("You are the HOST: your game runs the enemies. Snapshots sent: %d", enemy.sent))
+                    local live = 0
+                    for _, r in ipairs(enemy.roots) do
+                        if (r.last_flags or 1) < 2 then live = live + 1 end
+                    end
+                    imgui.text(string.format("Em#### objects in your scene: %d   (%d look like live enemies)", #enemy.roots, live))
+                    for i = 1, math.min(#enemy.roots, 10) do
+                        local r = enemy.roots[i]
+                        local why = r.last_flags and flags_reason(r.last_flags) or ""
+                        imgui.text("   " .. r.name .. (why ~= "" and ("   not sent as live: " .. why) or ""))
+                    end
+                else
+                    local driven = 0
+                    for _ in pairs(enemy.driven) do driven = driven + 1 end
+                    imgui.text(string.format("You JOIN: the host's game runs the enemies. Snapshots received: %d", enemy.received))
+                    imgui.text(string.format("Enemies from the host: %d   of mine being moved: %d", enemy.count or 0, driven))
+                end
+                local c3, v3 = imgui.checkbox("Draw received enemies even if I am the host (loopback test: the bot sends two)", enemy.test_ghosts)
+                if c3 then enemy.test_ghosts = v3 end
+                local c4, v4 = imgui.checkbox("Also draw parked / placeholder objects in grey (to see what a stray box was)", enemy.show_parked)
+                if c4 then enemy.show_parked = v4 end
+                local c5, v5 = imgui.checkbox("Hide a red box that has a wall in the way (the same wall test as for the other player; needs 'Hide them behind walls' ticked)", enemy.hide_walls)
+                if c5 then enemy.hide_walls = v5 end
+                do
+                    local hid = 0
+                    for _, w in pairs(enemy.wall) do if w.hide then hid = hid + 1 end end
+                    imgui.text(string.format("   boxes hidden behind walls now: %d   (tests %d, of which behind a wall %d)", hid, enemy.wall_checks, enemy.wall_hidden_checks))
+                end
+                imgui.text(enemy.last)
+                do
+                    local H = enemy.hit
+                    imgui.text("Damage to the host's enemies:")
+                    local ch1, v1 = imgui.checkbox("JOINER: my shots hurt the host's enemies (a shot that points at a red box)", H.on)
+                    if ch1 then H.on = v1 end
+                    local ch2, v2 = imgui.checkbox("HOST: apply the other player's hits to my enemies", H.accept)
+                    if ch2 then H.accept = v2 end
+                    local okd, chd, vd = pcall(imgui.slider_float, "Damage per hit", H.damage, 1, 600)
+                    if okd and chd then H.damage = math.floor(vd + 0.5) end
+                    imgui.text("   (the health you mean it to take off; one real pistol shot took 210 off Jack's 10000. The host measures what the game really")
+                    imgui.text("    took off and corrects the next hits for it.)")
+                    if H.ratio then
+                        imgui.text(string.format("Host: the game's multiplier is x%.2f (measured on %d hit(s)): %s", H.ratio, H.measured, H.ratio_last))
+                        local per = {}
+                        for k, v in pairs(H.ratios) do per[#per + 1] = string.format("%s x%.2f", k, v) end
+                        table.sort(per)
+                        if #per > 0 then imgui.text("   per enemy: " .. table.concat(per, ", ")) end
+                    elseif #H.pending > 0 or H.measured > 0 then imgui.text("Host: " .. H.ratio_last) end
+                    if imgui.button("Test: hit the red box I am aiming at") then H.fire(os.clock(), "test button") end
+                    if imgui.button(H.learn.on and "Learning the shot signal: fire three shots now ..." or "Learn the shot signal (then fire three shots)") then
+                        if not H.learn.on then H.learn_start(os.clock()) end
+                    end
+                    local okh, chh, vh = pcall(imgui.checkbox, "JOINER: take my shots from the gun's own shoot call (hooks app.PlayerGun.shoot, once per shot)", H.hook.on)
+                    if okh and chh and type(vh) == "boolean" then H.hook.on = vh end
+                    imgui.text(string.format("Gun hook: %s   (shoot calls seen: %d, used as shots: %d)%s",
+                        #H.hook.installed > 0 and table.concat(H.hook.installed, ", ") or (H.hook.tried and "not installed" or "installs when enemies arrive"),
+                        (H.hook.counts.shoot or 0) + (H.hook.counts.shootStart or 0), H.hook.used, H.hook.error and (" " .. H.hook.error) or ""))
+                    imgui.text("Shot detection: " .. (H.signal and (H.signal.type .. "." .. H.signal.field) or "not learned yet") .. "   (" .. H.learn.status .. ")")
+                    imgui.text(string.format("Shots tested %d, no box in line %d, behind a wall %d, hits sent %d, host answered %d", H.shots, H.misses, H.walled, H.sent, H.acked))
+                    imgui.text(H.last)
+                    imgui.text(string.format("Host side: received %d, applied %d, refused %d, failed %d", H.received, H.applied, H.refused, H.failed))
+                    imgui.text(H.host_last)
+                end
+                imgui.text("Not built yet: enemy deaths shown on the joiner's own screen, spawning, animations.")
+                if imgui.button("Write enemy details to the debug file") then enemy_details() end
+                if imgui.button("Trace enemy damage (then shoot an enemy once)") then trace_enemy_damage() end
             end)
             if not ok then imgui.text("UI error: " .. tostring(err)) end
             imgui.tree_pop()
@@ -21100,7 +30055,7 @@ re.on_draw_ui(function()
 
         if imgui.tree_node("Testing tools (dev build)") then
             local ok, err = pcall(function()
-                local cf, vf = imgui.checkbox("Face me: the other player's body (the loopback bot too) turns to look at me, so I can see the model from the front", CFG.face_me)
+                local cf, vf = imgui.checkbox("Face me: the other player's body (Ethan's friend too) turns to look at me, so I can see the model from the front", CFG.face_me)
                 if cf and type(vf) == "boolean" then CFG.face_me = vf end
                 local cg, vg = imgui.checkbox("Invincible (testing with enemies; off at every start): any hit is undone at once", pstat.god == true)
                 if cg and type(vg) == "boolean" then
@@ -21113,47 +30068,7 @@ re.on_draw_ui(function()
             imgui.tree_pop()
         end
 
-        if imgui.tree_node("Cutscene probe (EXPERIMENTAL: find out which animations a cutscene plays)") then
-            local ok, err = pcall(function()
-                local K = CFG.cs
-                imgui.text("WHAT TO DO: tick the box, press \"Record now\" when a scene is on, or tick the link box below. Every recording writes down which animations play near you")
-                imgui.text("and records Ethan's own joints, then saves re7mp/cutscenes/<name>.json and re7mp/clips/cs_<name>.json in the data folder. Send me those files")
-                imgui.text("(and say what the scene was). Nothing is changed in the game; the only hook is the read-only requestEvent one the story sync uses.")
-                local c1, v1 = imgui.checkbox("Cutscene probe: on (remembered)", K.on)
-                if c1 then K.set_on(v1) end
-                local cl, vl = imgui.checkbox("Linked to cutscenes: a recording starts and ends by itself with every cutscene (OFF = the cutscene is only counted; remembered)", K.link)
-                if cl and type(vl) == "boolean" then K.link = vl say("cutscene probe: " .. (vl and "linked to cutscenes (a recording starts with each one)" or "UNLINKED from cutscenes (only 'Record now' records)")) end
-                if K.on and not K.link then
-                    if imgui.button("Record now (by hand; F10 stops it)##csnow") then CFG.cs.record_now() end
-                end
-                local ok2, c2, v2 = pcall(imgui.slider_float, "Seconds to record per cutscene", K.secs, K.SECS_MIN, K.SECS_MAX)
-                if ok2 and c2 then K.secs = math.floor(v2 + 0.5) end
-                -- (9.32) the recording ends by itself when the player is back to idle / walk / run; F10 ends it by hand (any recording)
-                local c5, v5 = imgui.checkbox("Stop a recording when I am idle / walking / running again (that is gameplay, not a cutscene)", K.stop_loco)
-                if c5 then K.stop_loco = v5 end
-                local ok6, c6, v6 = pcall(imgui.slider_float, "...but not in the first seconds (a cutscene can take a moment to start)", K.loco_grace, K.GRACE_MIN, K.GRACE_MAX)
-                if ok6 and c6 then K.loco_grace = math.floor(v6 * 2 + 0.5) / 2 end
-                imgui.text("F10 stops a recording that is running (also these ones). An event that only ever idled / walked is written down as an event trigger and its joint clip is not kept.")
-                if K.on then
-                    imgui.text((CFG.story.hooked and "Hook: on (app.GameManager.requestEvent)" or ("Hook: NOT installed yet (" .. tostring(CFG.story.hook_error) .. ")")))
-                end
-                if K.active then
-                    imgui.text(string.format("    RECORDING %s: %.0f s of %d  (Ethan: %s; %d looks at the animations; the player is: %s)", K.active.id, os.clock() - K.active.t0, K.secs,
-                        K.active.ethan, #K.active.scans, K.active.loco and K.active.loco.now_key and (K.active.loco.now_key .. (K.LOCO[K.active.loco.now_key] and (" " .. K.LOCO[K.active.loco.now_key]) or " (not gameplay)")) or "not readable"))
-                end
-                imgui.text(string.format("Cutscene starts seen %d   recorded %d   saved %d   asked again %d   skipped while recording %d   errors %d",
-                    K.seen, K.started, K.saved, K.repeats, #K.skipped, K.errors))
-                imgui.text(K.last)
-                for i = math.max(1, #K.files - 8), #K.files do
-                    local f = K.files[i]
-                    imgui.text(string.format("    %s: %d looks, up to %d animated objects near you, Ethan: %s  [%s]", f.id, f.scans, f.most_objects, tostring(f.ethan), tostring(f.kind)))
-                end
-            end)
-            if not ok then imgui.text("UI error: " .. tostring(err)) end
-            imgui.tree_pop()
-        end
-
-        if imgui.tree_node("Find item hooks (tracer)") then
+        if CFG.show_retired and imgui.tree_node("Find item hooks (tracer)") then
             local ok, err = pcall(function()
                 imgui.text("Logs which methods fire (with arguments) while you pick up, drop or use items.")
                 imgui.text("Hooks stay until the scripts are reloaded; calls are rate limited.")
@@ -21196,8 +30111,12 @@ re.on_draw_ui(function()
                 local cs = MP.cutscene_note()
                 imgui.text("Also saved: " .. (cs or "no cutscene id known (it needs \"Story sync\" ticked)"))
                 if imgui.button("COLLECT the characters in view now  [F11]") then MP.collect("button") end
-                local ca, va = imgui.checkbox("Collect by itself every 20 s while this is ticked (may stutter a little each time)", MP.auto)
+                local ca, va = imgui.checkbox("Collect by itself every 20 s while this is ticked (a scan stops the game for about 0.1 s: it waits for a menu, a cutscene or standing still)", MP.auto)
                 if ca then MP.auto = va MP.auto_at = os.clock() end
+                if MP.auto and MP.stats.waiting then imgui.text("    " .. MP.stats.waiting) end
+                if (MP.stats.timed or 0) > 0 then
+                    imgui.text(string.format("    last scan %.0f ms (average %.0f ms, longest %.0f ms, %d scans)", MP.stats.last_ms or 0, MP.stats.total_ms / MP.stats.timed, MP.stats.max_ms or 0, MP.stats.timed))
+                end
                 imgui.text(string.format("Collected: %d model(s) of at most %d   presses %d   new %d   saved to the file: %s", MP.collected_n,
                     MP.COLLECT_MAX, MP.stats.presses, MP.stats.added, MP.stats.saved and "yes" or "not yet"))
                 imgui.text(MP.stats.last)
@@ -21207,7 +30126,7 @@ re.on_draw_ui(function()
             imgui.tree_pop()
         end
 
-        if imgui.tree_node("Model probe (Mia, Ethan, enemies)") then
+        if CFG.show_retired and imgui.tree_node("Model probe (Mia, Ethan, enemies)") then
             local ok, err = pcall(function()
                 local MP = CFG.mprobe
                 imgui.text("Read-only. Stand near the character you want me to look at (Mia in her cutscene, the headless Mia on the")
@@ -21253,7 +30172,7 @@ re.on_draw_ui(function()
                     if imgui.button("2. Make the body (a new object with Ethan's body mesh, beside you)") then B.later("Make", B.make) end
                     if imgui.button("3. Add the hands and the lower body (children of it)") then B.later("Parts", B.add_parts) end
                     if B.go then
-                        local c3, v3 = imgui.checkbox("It follows the other player (the loopback bot does)", B.follow)
+                        local c3, v3 = imgui.checkbox("It follows the other player (Ethan's friend does)", B.follow)
                         if c3 then B.follow = v3 end
                         local c4, t4 = imgui.input_text("Joint to turn (a name from the model probe)", B.joint)
                         if c4 then B.joint = t4 end
@@ -21266,7 +30185,7 @@ re.on_draw_ui(function()
                         do -- (9.28) size and parts
                             local ok8, c8s, v8s = pcall(imgui.slider_float, "Body size (1.00 = as copied; Mia's copy is shorter than Ethan)", B.scale, B.SCALE_MIN, B.SCALE_MAX)
                             if ok8 and c8s and type(v8s) == "number" then B.scale = math.floor(v8s * 1000 + 0.5) / 1000 end
-                            local okx, cxs, vxs = pcall(imgui.slider_float, "Crouch: stand the body this much higher (m; if the crouch sinks into the floor)", B.crouch_extra, 0, B.CROUCH_EXTRA_MAX)
+                            local okx, cxs, vxs = pcall(imgui.slider_float, "Crouch: stand the body this much higher (m; negative = lower; if the crouch sinks into the floor drag it up)", B.crouch_extra, B.CROUCH_EXTRA_MIN, B.CROUCH_EXTRA_MAX)
                             if okx and cxs and type(vxs) == "number" then B.crouch_extra = math.floor(vxs * 1000 + 0.5) / 1000 end
                             if imgui.button("Match Ethan's height (stand up straight first)") then B.match_height() end
                             local cm, vm = imgui.checkbox("Show part: " .. B.MAIN, not B.hidden[B.MAIN])
@@ -21360,3 +30279,8 @@ re.on_draw_ui(function()
 end)
 
 say("script v" .. CFG.BUILD .. " loaded")
+do
+    local i = CFG.fw.read()
+    say(string.format("REFramework: %s%s, commit %s, built %s%s", i.tag or "(version not given)", i.commits_past_tag and (" + " .. i.commits_past_tag .. " commits") or "",
+        (i.commit or "?"):sub(1, 8), i.build_date or "?", i.missing_calls and ("; missing: " .. i.missing_calls) or ""))
+end

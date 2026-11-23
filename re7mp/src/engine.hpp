@@ -5,31 +5,38 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "steam_api.hpp"
 #include "transport.hpp"
 
 namespace re7mp {
 
 enum class Mode {
     Network,   // talk to a real peer over TCP
-    Loopback,  // a built-in fake Player 2 (reached over real TCP on 127.0.0.1) orbits you
+    Loopback,  // (10.5: shown as "Ethan's friend") a built-in helper player (reached over real TCP on 127.0.0.1) that walks with you; no network
 };
 
-// TCP only (UDP was removed in 9.7: nobody used it; players connect over a VPN (Radmin VPN is the recommended one) or a forwarded port).
+// TCP (UDP was removed in 9.7: nobody used it; players connect over a VPN (Radmin VPN is the recommended one) or a forwarded port), and since 10.10 the
+// Steam relay (no port at all: the two players name each other's Steam ID; the lower Steam ID is the host).
 enum class Transport {
-    TcpHost,  // wait for the other player to connect (the default)
-    TcpJoin,  // connect to the other player (who hosts)
+    TcpHost,    // wait for the other player to connect (the default)
+    TcpJoin,    // connect to the other player (who hosts)
+    SteamHost,  // (10.10) over Steam's relay, and this player has the lower Steam ID
+    SteamJoin,  // (10.10) over Steam's relay, and the other player has the lower Steam ID
 };
 
+// (10.5) Orbit is gone: the friend is a helper, it walks with you. (The script's one-state animation tests, "walk", "run" ..., still circle a spot.)
+// (10.26) "Beside you" is gone too, and the window no longer picks the mode at all: the script does, with the F5 key in the game (kind 11
+// "mode:follow" / "mode:stay", see bot_mode_command). The exe starts the friend following you.
 enum class BotMode {
-    Orbit,       // the loopback bot circles you
-    Stationary,  // the loopback bot teleports to you, stays put, and keeps copying where your camera points
-    Follow,      // (9.37) the loopback bot walks after you (a walk when close, a run when far) and stops about 2 m away
+    Follow,      // (9.37; the default since 10.5) the friend walks after you (a walk when close, a run when far) and stops about 2 m away
+    Stationary,  // the friend stays put (10.26: told by the script, where it stands now; the old teleport-to-you start is for Config / set_bot_mode / the CLI)
 };
 
 struct Config {
@@ -40,7 +47,10 @@ struct Config {
     uint16_t peer_port = 27015;
     std::string name = "Player";  // shown above you on the other player's screen
     Transport transport = Transport::TcpHost;
-    BotMode bot_mode = BotMode::Orbit;  // loopback mode only
+    uint64_t peer_steam_id = 0;                                       // (10.10) Steam transports: the other player's SteamID64
+    std::function<std::unique_ptr<ISteamApi>()> steam_api;            // (10.10) makes the Steam interface (the exe: the game's own steam_api64.dll; the tests: a mock)
+    BotMode bot_mode = BotMode::Follow;  // loopback mode only
+    std::string bot_character;           // (10.5) the character the friend looks like (a key of bot_character_ok(): "ethan", "mia" ...); "" = it says nothing
     float bot_pose_first_s = 4.0f;      // loopback bot blocks, crouches and heals in a 16 s loop starting this many seconds in; < 0 = never
     // Co-op save sharing: saves made while connected are sent to the other player.
     bool save_sync = false;
@@ -88,6 +98,7 @@ public:
 
     // Loopback bot controls (work while running).
     void set_bot_mode(BotMode mode);
+    void set_bot_character(const std::string& key);  // (10.5) what the friend looks like; "", "auto" or "none" = it says nothing again
     void teleport_bot_here();  // stationary bot: move it to where you are now
 
     Status status() const;
@@ -105,6 +116,8 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> name_dirty_{true};
     std::atomic<int> bot_mode_{0};
+    std::atomic<uint32_t> bot_char_ver_{0};  // (10.5) goes up each time the window picks the friend's look
+    std::string bot_char_want_;              // (guarded by mu_)
     std::atomic<bool> bot_teleport_{false};
     std::string name_;
     mutable std::mutex mu_;

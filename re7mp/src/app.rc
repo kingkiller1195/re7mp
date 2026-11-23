@@ -3,3 +3,8 @@
 101 RCDATA "../lua/re7mp.lua"
 // The built-in clips and settings a new install starts with (the script reads it as re7mp/defaults.json; tools/build_defaults.py makes it).
 102 RCDATA "../data/re7mp/defaults.json"
+// (10.13) The full character models (AfroJackX, Nexus RE7 mod 86; CREDITS.txt is inside): the exe installs them itself, nothing to download.
+// tools/pack_models.py builds the zip from modpack/third-person-full-models.
+103 RCDATA "../modpack/third-person-full-models.zip"
+// (10.13) The program's icon (the lowest-numbered icon is the one Explorer shows for the exe; the window uses it too).
+1 ICON "../data/re7mp_icon.ico"

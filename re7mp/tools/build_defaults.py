@@ -22,15 +22,15 @@ import os
 import sys
 
 # Settings that must not ship switched on, whatever the developer's own file says.
-# (cutscene_probe records every cutscene and writes files: a developer tool, not a default for players.)
+# (10.22: the cutscene recorder and the spawn log are gone from the script, so their keys are in NEVER_SHIP below, not here.)
 RELEASE_OVERRIDES = {
     # (9.44) Item sync stays ON, but it shares only consumables and weapons (item_safe_only, whose code default is True and which is never shipped off):
     # a key item (the fuse, the bolt cutters) stays in each game. The developer's own settings file must not turn the filter off for players.
     "item_sync": True,
     "item_safe_only": True,
-    "cutscene_probe": False,
-    # (9.38) the probe is NOT linked to cutscenes: a recording starts only when the tester presses "Record now".
-    "cutscene_link": False,
+    # (10.22) Enemy sync mode 3 (ghosts, and my own enemies moved onto the host's) is the default for everybody, under a NEW key: the old key
+    # enemy_mode held 2 for every player, because the default was saved with the rest. The developer's own file must not turn it down for players.
+    "enemy_mode2": 3,
     # (9.33) "make the loopback bot face me" is a testing tool; the developer's own file has it on.
     "face_me": False,
     # (9.30) the real body is the default, so the green man is only a debug model: it is drawn anywhere it is switched on, and the two
@@ -52,7 +52,7 @@ RELEASE_OVERRIDES = {
     # (9.35) "These are the right Mia settings" (the 9.34 screenshots): the layers of the corrupted Mia's head switched by name, her own skin on,
     # the corrupted skin and the blend between them off, the eyes, the hair and the tear layers on; her playable body gets that head and chain hair.
     # Her own pl2050 head is the game's shadow-only head (it drew black), so it stays off. The side-lock hair meshes (GpuCloth) are hidden: without
-    # the cloth they draw as flat white shards. The hair physics is a new experiment (a copied via.motion.Chain): it ships UNticked until seen working.
+    # the cloth they draw as flat white shards. (The hair physics experiment was removed in 10.23; its key is in NEVER_SHIP.)
     "mia_layers_on": True,
     "mia_own_head": False,
     "mia_head_parts": True,
@@ -68,14 +68,17 @@ RELEASE_OVERRIDES = {
     "body_hidden": ["Em2000LeftHair", "Em2000RightHair"],
     "real_body_hair": False,
     "real_body_model": "Pl0000_Chapter1",
-    "hair_physics": False,
 }
 
 # (9.33) Settings that are one player's own choices or testing leftovers: they are never shipped, so the code's own default applies.
 #   who_choice, who_follow   the "Play as" choice belongs to re7mp.exe (a new player starts on "auto")
 #   story_callout, story_watch   the story message callouts and the watch-only list are per player; the story SWITCHES are never saved at all
 # (9.35) the Mia keys are shipped now (RELEASE_OVERRIDES); tape_on / tape_hide went with the tape watcher (removed in 9.35).
-NEVER_SHIP = ["who_choice", "who_follow", "story_callout", "story_watch", "tape_on", "tape_hide"]
+NEVER_SHIP = ["who_choice", "who_follow", "story_callout", "story_watch", "tape_on", "tape_hide",
+              # (10.22) keys of things that are gone or no longer read: a developer's old file still has them
+              "cutscene_probe", "cutscene_link", "cutscene_secs", "cutscene_stop_loco", "cutscene_loco_grace", "spawn_log", "spawn_focus", "door_sync", "enemy_mode",
+              # (10.23)
+              "hair_physics"]
 
 # A learned gun signal that is a PrevWeaponActionID is the PREVIOUS weapon's action: it was 2 during a block with empty hands (the 9.7
 # recording), so a new install would show the gun pose for every unarmed block. It is left out of the shipped settings (the script then
