@@ -10,7 +10,7 @@ https://www.youtube.com/watch?v=3M1CG62zraA
 
 2. Run the EXE file and press install/Update script (EXE might give blue prompt, just press more info and run anyway, this is because it is unsigned atm)
 
-3. Choose Network at the top of the window and choose whether to Host or join (only joiner has to put host ip:port).
+3. Choose Network at the top of the window and choose whether to Host or join (only joiner has to put host ip:port). If you use steam, just run the game and press pick a friend, if you cannot see them on there then copy and paste each other's invite into the box in place of their ID's.
 
 4. Press START and make sure the game is loaded and it should say the other players position and where they are, press new game and select whatever difficulty you wish
 
