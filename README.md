@@ -14,7 +14,7 @@ https://www.youtube.com/watch?v=3M1CG62zraA
 
 4. Press START and make sure the game is loaded and it should say the other players position and where they are, press new game and select whatever difficulty you wish
 
-   To run this game on steamos (Steamdeck) or linux, you can use the same VPNs on windows and instead of just running the re7mp.exe you add a non steam game and run it through proton or wine. I have tested with the Steamdeck and this does work.
+   To run this game on steamos (Steamdeck) or linux, you can use the same VPNs on windows and instead of just running the re7mp.exe you add a non steam game and run it through proton or wine. I have tested with the Steamdeck and this does work. You can just invite through steam if you want an easier time.
 
 Thank you to Setgent and my friend André  (a.k.a. Major Tom)  Filho for helping me test the early and unreleased versions of this mod!
 
